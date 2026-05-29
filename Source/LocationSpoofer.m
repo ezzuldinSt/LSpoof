@@ -69,9 +69,28 @@ static CLLocationCoordinate2D LSApplyFluctuation(CLLocationCoordinate2D coordina
     double distance = sqrt((double)arc4random_uniform(UINT32_MAX) / (double)UINT32_MAX) * radiusMeters;
 
     double latOffset = distance * cos(angle) / 111320.0;
-    double lonOffset = distance * sin(angle) / (111320.0 * cos(coordinate.latitude * M_PI / 180.0));
+    double cosLat = cos(coordinate.latitude * M_PI / 180.0);
+    double lonOffset = 0.0;
+    if (fabs(cosLat) > 1e-6) {
+        lonOffset = distance * sin(angle) / (111320.0 * cosLat);
+    }
 
-    return CLLocationCoordinate2DMake(coordinate.latitude + latOffset, coordinate.longitude + lonOffset);
+    double newLat = coordinate.latitude + latOffset;
+    double newLon = coordinate.longitude + lonOffset;
+
+    if (newLat > 90.0) {
+        newLat = 90.0;
+    } else if (newLat < -90.0) {
+        newLat = -90.0;
+    }
+
+    if (newLon > 180.0) {
+        newLon -= 360.0;
+    } else if (newLon < -180.0) {
+        newLon += 360.0;
+    }
+
+    return CLLocationCoordinate2DMake(newLat, newLon);
 }
 
 CLLocation *LSCreateSpoofedLocation(void) {

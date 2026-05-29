@@ -622,10 +622,10 @@ static const CGFloat kLSMapHeightMultiplier = 0.30;
 
         [self.fluctuationRow.heightAnchor constraintEqualToConstant:40.0],
 
-        [self.fluctuationRadiusField.topAnchor constraintEqualToAnchor:self.fluctuationRow.bottomAnchor constant:6.0],
+        (self.fluctuationRadiusTopConstraint = [self.fluctuationRadiusField.topAnchor constraintEqualToAnchor:self.fluctuationRow.bottomAnchor constant:6.0]),
         [self.fluctuationRadiusField.leadingAnchor constraintEqualToAnchor:self.staticControlsContainer.leadingAnchor],
         [self.fluctuationRadiusField.trailingAnchor constraintEqualToAnchor:self.staticControlsContainer.trailingAnchor],
-        [self.fluctuationRadiusField.heightAnchor constraintEqualToConstant:40.0],
+        (self.fluctuationRadiusHeightConstraint = [self.fluctuationRadiusField.heightAnchor constraintEqualToConstant:40.0]),
 
         [self.cancelButton.heightAnchor constraintEqualToConstant:50.0],
         [self.applyButton.heightAnchor constraintEqualToConstant:50.0],
@@ -987,12 +987,19 @@ static const CGFloat kLSMapHeightMultiplier = 0.30;
     self.fluctuationSwitch.on = store.fluctuationEnabled;
     self.fluctuationRadiusField.text = [NSString stringWithFormat:@"%.0f", store.fluctuationRadius];
     self.fluctuationRadiusField.hidden = !store.fluctuationEnabled;
+    self.fluctuationRadiusHeightConstraint.constant = store.fluctuationEnabled ? 40.0 : 0.0;
+    self.fluctuationRadiusTopConstraint.constant = store.fluctuationEnabled ? 6.0 : 0.0;
 }
 
 - (void)handleFluctuationToggle {
     PersistenceManager *store = [PersistenceManager shared];
     store.fluctuationEnabled = self.fluctuationSwitch.isOn;
     self.fluctuationRadiusField.hidden = !self.fluctuationSwitch.isOn;
+    self.fluctuationRadiusHeightConstraint.constant = self.fluctuationSwitch.isOn ? 40.0 : 0.0;
+    self.fluctuationRadiusTopConstraint.constant = self.fluctuationSwitch.isOn ? 6.0 : 0.0;
+    [UIView animateWithDuration:0.25 animations:^{
+        [self.view layoutIfNeeded];
+    }];
     if (self.fluctuationSwitch.isOn) {
         [self.fluctuationRadiusField becomeFirstResponder];
     }
@@ -1000,11 +1007,13 @@ static const CGFloat kLSMapHeightMultiplier = 0.30;
 
 - (void)handleFluctuationRadiusChanged {
     NSString *text = [self.fluctuationRadiusField.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-    if (text.length == 0) {
-        return;
+    double radius = 50.0;
+    if (text.length > 0) {
+        NSNumber *value = [self ls_parsedCoordinateComponentFromText:text];
+        radius = value ? value.doubleValue : 50.0;
+    } else {
+        radius = [PersistenceManager shared].fluctuationRadius;
     }
-    NSNumber *value = [self ls_parsedCoordinateComponentFromText:text] ?: @50.0;
-    double radius = value.doubleValue;
     if (radius < 1.0) {
         radius = 1.0;
     } else if (radius > 1000.0) {
