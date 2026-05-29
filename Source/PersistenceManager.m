@@ -8,6 +8,8 @@ static NSString * const kKeyLongitude = @"spoof_longitude";
 static NSString * const kKeySimulationWasActive = @"LSSimulationWasActive";
 static NSString * const kKeyAltitude = @"LSAltitude";
 static NSString * const kKeyHeading = @"LSHeading";
+static NSString * const kKeyFluctuationEnabled = @"LSFluctuationEnabled";
+static NSString * const kKeyFluctuationRadius = @"LSFluctuationRadius";
 static NSString * const kKeyRecentLocations = @"LSRecentLocations";
 static NSString * const kRecentLatitudeKey = @"LSRecentLat";
 static NSString * const kRecentLongitudeKey = @"LSRecentLon";
@@ -23,13 +25,15 @@ static const NSUInteger kLSMaxRecentLocations = 5;
 @property (nonatomic, assign) BOOL cachedSimulationWasActive;
 @property (nonatomic, assign) double cachedAltitude;
 @property (nonatomic, assign) CLLocationDirection cachedHeading;
+@property (nonatomic, assign) BOOL cachedFluctuationEnabled;
+@property (nonatomic, assign) double cachedFluctuationRadius;
 @property (nonatomic, strong) NSMutableArray<NSDictionary *> *cachedRecents;
 @property (nonatomic, assign) BOOL recentsLoaded;
 @end
 
 @implementation PersistenceManager
 
-@dynamic simulationWasActive, altitude, heading;
+@dynamic simulationWasActive, altitude, heading, fluctuationEnabled, fluctuationRadius;
 
 + (instancetype)shared {
     static PersistenceManager *instance = nil;
@@ -49,6 +53,8 @@ static const NSUInteger kLSMaxRecentLocations = 5;
         _hasCachedCoordinate = NO;
         _cachedAltitude = 0.0;
         _cachedHeading = 0.0;
+        _cachedFluctuationEnabled = NO;
+        _cachedFluctuationRadius = 50.0;
         _cachedRecents = [NSMutableArray array];
     }
     return self;
@@ -80,6 +86,11 @@ static const NSUInteger kLSMaxRecentLocations = 5;
         self.cachedSimulationWasActive = [self.defaults boolForKey:kKeySimulationWasActive];
         self.cachedAltitude = [self.defaults doubleForKey:kKeyAltitude];
         self.cachedHeading = [self.defaults doubleForKey:kKeyHeading];
+        self.cachedFluctuationEnabled = [self.defaults boolForKey:kKeyFluctuationEnabled];
+        self.cachedFluctuationRadius = [self.defaults doubleForKey:kKeyFluctuationRadius];
+        if (self.cachedFluctuationRadius <= 0.0) {
+            self.cachedFluctuationRadius = 50.0;
+        }
 
         if ([self.defaults objectForKey:kKeyLatitude] != nil &&
             [self.defaults objectForKey:kKeyLongitude] != nil) {
@@ -168,6 +179,33 @@ static const NSUInteger kLSMaxRecentLocations = 5;
     }
 }
 
+- (BOOL)fluctuationEnabled {
+    @synchronized(self) {
+        return self.cachedFluctuationEnabled;
+    }
+}
+
+- (void)setFluctuationEnabled:(BOOL)fluctuationEnabled {
+    @synchronized(self) {
+        self.cachedFluctuationEnabled = fluctuationEnabled;
+        [self.defaults setBool:fluctuationEnabled forKey:kKeyFluctuationEnabled];
+    }
+}
+
+- (double)fluctuationRadius {
+    @synchronized(self) {
+        double radius = self.cachedFluctuationRadius;
+        return radius > 0.0 ? radius : 50.0;
+    }
+}
+
+- (void)setFluctuationRadius:(double)fluctuationRadius {
+    @synchronized(self) {
+        self.cachedFluctuationRadius = fluctuationRadius > 0.0 ? fluctuationRadius : 50.0;
+        [self.defaults setDouble:self.cachedFluctuationRadius forKey:kKeyFluctuationRadius];
+    }
+}
+
 - (NSArray<NSDictionary *> *)recentLocations {
     @synchronized(self) {
         [self reloadRecentsLocked];
@@ -215,6 +253,8 @@ static const NSUInteger kLSMaxRecentLocations = 5;
         [self.defaults setBool:enabled forKey:kKeyEnabled];
         [self.defaults setDouble:self.cachedAltitude forKey:kKeyAltitude];
         [self.defaults setDouble:self.cachedHeading forKey:kKeyHeading];
+        [self.defaults setBool:self.cachedFluctuationEnabled forKey:kKeyFluctuationEnabled];
+        [self.defaults setDouble:self.cachedFluctuationRadius forKey:kKeyFluctuationRadius];
     }
     return YES;
 }
