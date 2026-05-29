@@ -16,6 +16,8 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, assign) BOOL simulationWasActive;
 @property (nonatomic, assign) double altitude;
 @property (nonatomic, assign) CLLocationDirection heading;
+@property (nonatomic, assign) BOOL fluctuationEnabled;
+@property (nonatomic, assign) double fluctuationRadius;
 
 - (NSArray<NSDictionary *> *)recentLocations;
 - (void)recordRecentCoordinate:(CLLocationCoordinate2D)coordinate name:(nullable NSString *)name;

@@ -60,6 +60,20 @@ static CLLocation *LSBuildSpoofedLocation(CLLocationCoordinate2D coordinate,
     return location;
 }
 
+static CLLocationCoordinate2D LSApplyFluctuation(CLLocationCoordinate2D coordinate, double radiusMeters) {
+    if (radiusMeters <= 0.0) {
+        return coordinate;
+    }
+
+    double angle = (double)arc4random_uniform(UINT32_MAX) / (double)UINT32_MAX * 2.0 * M_PI;
+    double distance = sqrt((double)arc4random_uniform(UINT32_MAX) / (double)UINT32_MAX) * radiusMeters;
+
+    double latOffset = distance * cos(angle) / 111320.0;
+    double lonOffset = distance * sin(angle) / (111320.0 * cos(coordinate.latitude * M_PI / 180.0));
+
+    return CLLocationCoordinate2DMake(coordinate.latitude + latOffset, coordinate.longitude + lonOffset);
+}
+
 CLLocation *LSCreateSpoofedLocation(void) {
     LSRouteSimulator *simulator = [LSRouteSimulator shared];
     if (simulator.isSimulating) {
@@ -75,7 +89,11 @@ CLLocation *LSCreateSpoofedLocation(void) {
     }
 
     PersistenceManager *store = [PersistenceManager shared];
-    return LSBuildSpoofedLocation([store spoofCoordinate],
+    CLLocationCoordinate2D baseCoordinate = [store spoofCoordinate];
+    if (store.fluctuationEnabled) {
+        baseCoordinate = LSApplyFluctuation(baseCoordinate, store.fluctuationRadius);
+    }
+    return LSBuildSpoofedLocation(baseCoordinate,
                                 store.heading,
                                 store.altitude,
                                 6.0,

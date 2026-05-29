@@ -52,6 +52,8 @@ static const CGFloat kLSMapHeightMultiplier = 0.30;
     [self updateHeadingLabel];
     [self updatePanelTabVisibility];
 
+    [self syncFluctuationUI];
+
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(ls_keyboardWillShow:) name:UIKeyboardWillShowNotification object:nil];
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(ls_keyboardWillHide:) name:UIKeyboardWillHideNotification object:nil];
 }
@@ -399,6 +401,47 @@ static const CGFloat kLSMapHeightMultiplier = 0.30;
     self.separatorHeadingActions = [self ls_separatorView];
     [staticPanel addSubview:self.separatorHeadingActions];
 
+    self.separatorFluctuation = [self ls_separatorView];
+    [staticPanel addSubview:self.separatorFluctuation];
+
+    self.fluctuationRow = [[UIView alloc] init];
+    self.fluctuationRow.translatesAutoresizingMaskIntoConstraints = NO;
+    [staticPanel addSubview:self.fluctuationRow];
+
+    self.fluctuationLabel = [[UILabel alloc] init];
+    self.fluctuationLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    self.fluctuationLabel.text = @"Fluctuation";
+    self.fluctuationLabel.font = [UIFont systemFontOfSize:15.0 weight:UIFontWeightSemibold];
+    self.fluctuationLabel.textColor = UIColor.labelColor;
+    [self.fluctuationRow addSubview:self.fluctuationLabel];
+
+    self.fluctuationSwitch = [[UISwitch alloc] init];
+    self.fluctuationSwitch.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.fluctuationSwitch addTarget:self action:@selector(handleFluctuationToggle) forControlEvents:UIControlEventValueChanged];
+    [self.fluctuationRow addSubview:self.fluctuationSwitch];
+
+    self.fluctuationRadiusField = [[UITextField alloc] init];
+    self.fluctuationRadiusField.translatesAutoresizingMaskIntoConstraints = NO;
+    self.fluctuationRadiusField.placeholder = @"Radius (m)";
+    self.fluctuationRadiusField.keyboardType = UIKeyboardTypeNumberPad;
+    self.fluctuationRadiusField.font = [UIFont monospacedDigitSystemFontOfSize:14.0 weight:UIFontWeightMedium];
+    self.fluctuationRadiusField.textColor = UIColor.labelColor;
+    self.fluctuationRadiusField.textAlignment = NSTextAlignmentCenter;
+    self.fluctuationRadiusField.backgroundColor = UIColor.secondarySystemGroupedBackgroundColor;
+    self.fluctuationRadiusField.layer.cornerRadius = 10.0;
+    self.fluctuationRadiusField.layer.cornerCurve = kCACornerCurveContinuous;
+    self.fluctuationRadiusField.layer.borderWidth = 1.0 / UIScreen.mainScreen.scale;
+    self.fluctuationRadiusField.layer.borderColor = UIColor.separatorColor.CGColor;
+    self.fluctuationRadiusField.delegate = self;
+    [self.fluctuationRadiusField addTarget:self action:@selector(handleFluctuationRadiusChanged) forControlEvents:UIControlEventEditingDidEnd];
+    [staticPanel addSubview:self.fluctuationRadiusField];
+
+    UIToolbar *fluctuationToolbar = [[UIToolbar alloc] initWithFrame:CGRectMake(0, 0, 0, 44)];
+    UIBarButtonItem *flexItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemFlexibleSpace target:nil action:nil];
+    UIBarButtonItem *doneItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone target:self action:@selector(dismissKeyboard)];
+    fluctuationToolbar.items = @[flexItem, doneItem];
+    self.fluctuationRadiusField.inputAccessoryView = fluctuationToolbar;
+
     self.applyButton = [self primaryButtonWithTitle:@"Apply Location" action:@selector(handleApply)];
     self.cancelButton = [self secondaryButtonWithTitle:@"Cancel" action:@selector(handleCancel)];
     self.stopButton = [self destructiveOutlineButtonWithTitle:@"Stop Spoofing" action:@selector(handleStopSpoofing)];
@@ -561,10 +604,33 @@ static const CGFloat kLSMapHeightMultiplier = 0.30;
         [self.separatorHeadingActions.leadingAnchor constraintEqualToAnchor:self.staticControlsContainer.leadingAnchor],
         [self.separatorHeadingActions.trailingAnchor constraintEqualToAnchor:self.staticControlsContainer.trailingAnchor],
 
+        [self.separatorFluctuation.topAnchor constraintEqualToAnchor:self.separatorHeadingActions.bottomAnchor constant:8.0],
+        [self.separatorFluctuation.leadingAnchor constraintEqualToAnchor:self.staticControlsContainer.leadingAnchor],
+        [self.separatorFluctuation.trailingAnchor constraintEqualToAnchor:self.staticControlsContainer.trailingAnchor],
+
+        [self.fluctuationRow.topAnchor constraintEqualToAnchor:self.separatorFluctuation.bottomAnchor constant:8.0],
+        [self.fluctuationRow.leadingAnchor constraintEqualToAnchor:self.staticControlsContainer.leadingAnchor],
+        [self.fluctuationRow.trailingAnchor constraintEqualToAnchor:self.staticControlsContainer.trailingAnchor],
+
+        [self.fluctuationLabel.leadingAnchor constraintEqualToAnchor:self.fluctuationRow.leadingAnchor],
+        [self.fluctuationLabel.centerYAnchor constraintEqualToAnchor:self.fluctuationRow.centerYAnchor],
+
+        [self.fluctuationSwitch.trailingAnchor constraintEqualToAnchor:self.fluctuationRow.trailingAnchor],
+        [self.fluctuationSwitch.centerYAnchor constraintEqualToAnchor:self.fluctuationRow.centerYAnchor],
+
+        [self.fluctuationSwitch.leadingAnchor constraintGreaterThanOrEqualToAnchor:self.fluctuationLabel.trailingAnchor constant:12.0],
+
+        [self.fluctuationRow.heightAnchor constraintEqualToConstant:40.0],
+
+        [self.fluctuationRadiusField.topAnchor constraintEqualToAnchor:self.fluctuationRow.bottomAnchor constant:6.0],
+        [self.fluctuationRadiusField.leadingAnchor constraintEqualToAnchor:self.staticControlsContainer.leadingAnchor],
+        [self.fluctuationRadiusField.trailingAnchor constraintEqualToAnchor:self.staticControlsContainer.trailingAnchor],
+        [self.fluctuationRadiusField.heightAnchor constraintEqualToConstant:40.0],
+
         [self.cancelButton.heightAnchor constraintEqualToConstant:50.0],
         [self.applyButton.heightAnchor constraintEqualToConstant:50.0],
 
-        [self.actionRow.topAnchor constraintEqualToAnchor:self.separatorHeadingActions.bottomAnchor constant:8.0],
+        [self.actionRow.topAnchor constraintEqualToAnchor:self.fluctuationRadiusField.bottomAnchor constant:12.0],
         [self.actionRow.leadingAnchor constraintEqualToAnchor:self.staticControlsContainer.leadingAnchor],
         [self.actionRow.trailingAnchor constraintEqualToAnchor:self.staticControlsContainer.trailingAnchor],
 
@@ -914,6 +980,38 @@ static const CGFloat kLSMapHeightMultiplier = 0.30;
     NSInteger heading = (NSInteger)lroundf(self.headingSlider.value);
     [PersistenceManager shared].heading = (CLLocationDirection)heading;
     [self updateHeadingLabel];
+}
+
+- (void)syncFluctuationUI {
+    PersistenceManager *store = [PersistenceManager shared];
+    self.fluctuationSwitch.on = store.fluctuationEnabled;
+    self.fluctuationRadiusField.text = [NSString stringWithFormat:@"%.0f", store.fluctuationRadius];
+    self.fluctuationRadiusField.hidden = !store.fluctuationEnabled;
+}
+
+- (void)handleFluctuationToggle {
+    PersistenceManager *store = [PersistenceManager shared];
+    store.fluctuationEnabled = self.fluctuationSwitch.isOn;
+    self.fluctuationRadiusField.hidden = !self.fluctuationSwitch.isOn;
+    if (self.fluctuationSwitch.isOn) {
+        [self.fluctuationRadiusField becomeFirstResponder];
+    }
+}
+
+- (void)handleFluctuationRadiusChanged {
+    NSString *text = [self.fluctuationRadiusField.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    if (text.length == 0) {
+        return;
+    }
+    NSNumber *value = [self ls_parsedCoordinateComponentFromText:text] ?: @50.0;
+    double radius = value.doubleValue;
+    if (radius < 1.0) {
+        radius = 1.0;
+    } else if (radius > 1000.0) {
+        radius = 1000.0;
+    }
+    [PersistenceManager shared].fluctuationRadius = radius;
+    self.fluctuationRadiusField.text = [NSString stringWithFormat:@"%.0f", radius];
 }
 
 - (void)updateHeadingLabel {
