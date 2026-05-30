@@ -647,7 +647,7 @@ static const CGFloat kLSMapHeightMultiplier = 0.30;
     self.mapControlsBottomRouteEarlyConstraint = [self.getRouteButton.bottomAnchor constraintEqualToAnchor:self.routeControlsContainer.bottomAnchor constant:-12.0];
     self.mapControlsBottomStaticConstraint.active = YES;
 
-    self.stopButtonHeightConstraint = [self.stopButton.heightAnchor constraintEqualToConstant:44.0];
+    self.stopButtonHeightConstraint = [self.stopButton.heightAnchor constraintEqualToConstant:50.0];
     self.stopButtonHeightConstraint.active = YES;
 
     self.suggestionsHeightConstraint = [self.suggestionsPanel.heightAnchor constraintEqualToConstant:0.0];
@@ -747,12 +747,23 @@ static const CGFloat kLSMapHeightMultiplier = 0.30;
 }
 
 - (UIButton *)destructiveOutlineButtonWithTitle:(NSString *)title action:(SEL)action {
-    UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
+    UIButton *button = [UIButton buttonWithType:UIButtonTypeCustom];
     button.translatesAutoresizingMaskIntoConstraints = NO;
+
+    UIImage *icon = [UIImage systemImageNamed:@"stop.circle"];
+    [button setImage:icon forState:UIControlStateNormal];
     [button setTitle:title forState:UIControlStateNormal];
+    button.titleLabel.font = [UIFont systemFontOfSize:16.0 weight:UIFontWeightSemibold];
+
     [button setTitleColor:UIColor.systemRedColor forState:UIControlStateNormal];
-    button.titleLabel.font = [UIFont systemFontOfSize:15.0 weight:UIFontWeightSemibold];
-    button.backgroundColor = UIColor.clearColor;
+
+    button.backgroundColor = [UIColor.systemRedColor colorWithAlphaComponent:0.12];
+    button.layer.cornerRadius = 12.0;
+    button.layer.cornerCurve = kCACornerCurveContinuous;
+    button.layer.borderWidth = 1.0 / UIScreen.mainScreen.scale;
+    button.layer.borderColor = UIColor.systemRedColor.CGColor;
+    button.clipsToBounds = YES;
+
     [button addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
     return button;
 }
