@@ -1,4 +1,4 @@
-# LSpoofer
+# LSpoof
 
 Override your iOS device's GPS location from inside any app — no jailbreak required.
 
