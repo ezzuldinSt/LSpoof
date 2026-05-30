@@ -794,7 +794,7 @@ static const CGFloat kLSMapHeightMultiplier = 0.30;
     self.statusPill.backgroundColor = active ? [UIColor.systemRedColor colorWithAlphaComponent:0.12] : [UIColor.tertiarySystemFillColor colorWithAlphaComponent:0.9];
     BOOL showStop = active && self.coordinateMode == LSMapPickerCoordinateModeStatic && self.panelTab == LSMapPickerPanelTabMap;
     self.stopButton.hidden = !showStop;
-    self.stopButtonHeightConstraint.constant = showStop ? 44.0 : 0.0;
+    self.stopButtonHeightConstraint.constant = showStop ? 50.0 : 0.0;
     [self ls_updateMapControlsBottomConstraint];
 
     self.mapView.showsUserLocation = ![[PersistenceManager shared] isSpoofingEnabled];
@@ -897,7 +897,8 @@ static const CGFloat kLSMapHeightMultiplier = 0.30;
         formatter.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
     });
 
-    return [formatter numberFromString:trimmed];
+    NSString *normalized = [trimmed stringByReplacingOccurrencesOfString:@"," withString:@"."];
+    return [formatter numberFromString:normalized];
 }
 
 - (BOOL)applyFieldsToCoordinate {

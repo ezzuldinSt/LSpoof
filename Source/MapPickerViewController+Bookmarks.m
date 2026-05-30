@@ -303,10 +303,13 @@ typedef NS_ENUM(NSInteger, LSBookmarksSection) {
     }];
     [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
     __weak typeof(self) weakSelf = self;
+    __weak typeof(alert) weakAlert = alert;
     [alert addAction:[UIAlertAction actionWithTitle:@"Save" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
         typeof(self) strongSelf = weakSelf;
         if (!strongSelf) return;
-        NSString *name = alert.textFields.firstObject.text;
+        UIAlertController *strongAlert = weakAlert;
+        if (!strongAlert) return;
+        NSString *name = strongAlert.textFields.firstObject.text;
         if (name.length == 0) {
             return;
         }

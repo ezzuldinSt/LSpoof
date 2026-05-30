@@ -381,12 +381,14 @@
     (void)simulator;
     [PersistenceManager shared].simulationWasActive = NO;
 
-    CLLocationCoordinate2D finalCoord = self.destinationAnnotation.coordinate;
-    if (CLLocationCoordinate2DIsValid(finalCoord)) {
-        PersistenceManager *store = [PersistenceManager shared];
-        [store setSpoofCoordinate:finalCoord enabled:YES];
-        self.selectedCoordinate = finalCoord;
-        [self syncFieldsFromCoordinate];
+    if (self.destinationAnnotation) {
+        CLLocationCoordinate2D finalCoord = self.destinationAnnotation.coordinate;
+        if (CLLocationCoordinate2DIsValid(finalCoord)) {
+            PersistenceManager *store = [PersistenceManager shared];
+            [store setSpoofCoordinate:finalCoord enabled:YES];
+            self.selectedCoordinate = finalCoord;
+            [self syncFieldsFromCoordinate];
+        }
     }
 
     self.statusLabel.text = @"Route complete";
