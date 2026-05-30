@@ -156,7 +156,7 @@
         return;
     }
 
-    if (self.fetchedRoute != nil) {
+    if (self.fetchedRoute != nil || [[LSRouteSimulator shared] isSimulating]) {
         self.mapControlsBottomRouteConstraint.active = YES;
     } else {
         self.mapControlsBottomRouteEarlyConstraint.active = YES;
