@@ -360,6 +360,8 @@
 
     self.playRouteButton.hidden = YES;
     self.routeActionRow.hidden = NO;
+    self.pauseRouteButton.hidden = NO;
+    self.stopRouteButton.hidden = NO;
     [self.pauseRouteButton setTitle:simulator.isPaused ? @"Resume" : @"Pause" forState:UIControlStateNormal];
 }
 
