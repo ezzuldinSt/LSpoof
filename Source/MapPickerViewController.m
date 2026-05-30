@@ -885,7 +885,7 @@ static const CGFloat kLSMapHeightMultiplier = 0.30;
     dispatch_once(&onceToken, ^{
         formatter = [[NSNumberFormatter alloc] init];
         formatter.numberStyle = NSNumberFormatterDecimalStyle;
-        formatter.locale = NSLocale.currentLocale;
+        formatter.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
     });
 
     return [formatter numberFromString:trimmed];
@@ -1114,18 +1114,21 @@ static const CGFloat kLSMapHeightMultiplier = 0.30;
 
     MKLocalSearchRequest *request = [[MKLocalSearchRequest alloc] initWithCompletion:completion];
     MKLocalSearch *search = [[MKLocalSearch alloc] initWithRequest:request];
+    __weak typeof(self) weakSelf = self;
     [search startWithCompletionHandler:^(MKLocalSearchResponse * _Nullable response, NSError * _Nullable error) {
+        typeof(self) strongSelf = weakSelf;
+        if (!strongSelf) return;
         dispatch_async(dispatch_get_main_queue(), ^{
-            [self.searchSpinner stopAnimating];
-            [self ls_updateApplyButtonEnabled];
+            [strongSelf.searchSpinner stopAnimating];
+            [strongSelf ls_updateApplyButtonEnabled];
 
             if (error || response.mapItems.count == 0) {
-                [self showSearchFailureMessage];
+                [strongSelf showSearchFailureMessage];
                 return;
             }
 
             MKMapItem *item = response.mapItems.firstObject;
-            [self movePinToCoordinate:item.placemark.coordinate animated:YES];
+            [strongSelf movePinToCoordinate:item.placemark.coordinate animated:YES];
         });
     }];
 }
@@ -1146,18 +1149,21 @@ static const CGFloat kLSMapHeightMultiplier = 0.30;
     request.region = self.searchCompleter.region;
 
     MKLocalSearch *search = [[MKLocalSearch alloc] initWithRequest:request];
+    __weak typeof(self) weakSelf = self;
     [search startWithCompletionHandler:^(MKLocalSearchResponse * _Nullable response, NSError * _Nullable error) {
+        typeof(self) strongSelf = weakSelf;
+        if (!strongSelf) return;
         dispatch_async(dispatch_get_main_queue(), ^{
-            [self.searchSpinner stopAnimating];
-            [self ls_updateApplyButtonEnabled];
+            [strongSelf.searchSpinner stopAnimating];
+            [strongSelf ls_updateApplyButtonEnabled];
 
             if (error || response.mapItems.count == 0) {
-                [self showSearchFailureMessage];
+                [strongSelf showSearchFailureMessage];
                 return;
             }
 
             MKMapItem *item = response.mapItems.firstObject;
-            [self movePinToCoordinate:item.placemark.coordinate animated:YES];
+            [strongSelf movePinToCoordinate:item.placemark.coordinate animated:YES];
         });
     }];
 }
@@ -1478,8 +1484,11 @@ static const CGFloat kLSMapHeightMultiplier = 0.30;
         UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"Stop Spoofing?"
                                                                        message:nil
                                                                 preferredStyle:UIAlertControllerStyleActionSheet];
+        __weak typeof(self) weakSelf = self;
         [sheet addAction:[UIAlertAction actionWithTitle:@"Stop" style:UIAlertActionStyleDestructive handler:^(__unused UIAlertAction *action) {
-            [self handleStopSpoofing];
+            typeof(self) strongSelf = weakSelf;
+            if (!strongSelf) return;
+            [strongSelf handleStopSpoofing];
         }]];
         [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
         [self presentViewController:sheet animated:YES completion:nil];

@@ -249,30 +249,33 @@
     request.transportType = [self ls_directionsTransportType];
 
     MKDirections *directions = [[MKDirections alloc] initWithRequest:request];
+    __weak typeof(self) weakSelf = self;
     [directions calculateDirectionsWithCompletionHandler:^(MKDirectionsResponse * _Nullable response, NSError * _Nullable error) {
+        typeof(self) strongSelf = weakSelf;
+        if (!strongSelf) return;
         dispatch_async(dispatch_get_main_queue(), ^{
-            [self.routeSpinner stopAnimating];
+            [strongSelf.routeSpinner stopAnimating];
 
             if (error || response.routes.count == 0) {
-                [self playRouteFailureHaptic];
-                self.getRouteButton.hidden = NO;
-                self.statusLabel.text = @"Route fetch failed";
-                __weak typeof(self) weakSelf = self;
+                [strongSelf playRouteFailureHaptic];
+                strongSelf.getRouteButton.hidden = NO;
+                strongSelf.statusLabel.text = @"Route fetch failed";
+                __weak typeof(strongSelf) innerWeakSelf = strongSelf;
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                    [weakSelf refreshStatusPill];
+                    [innerWeakSelf refreshStatusPill];
                 });
                 return;
             }
 
-            [self playRouteSuccessHaptic];
-            self.fetchedRoute = response.routes.firstObject;
-            if (self.routePolyline) {
-                [self.mapView removeOverlay:self.routePolyline];
+            [strongSelf playRouteSuccessHaptic];
+            strongSelf.fetchedRoute = response.routes.firstObject;
+            if (strongSelf.routePolyline) {
+                [strongSelf.mapView removeOverlay:strongSelf.routePolyline];
             }
-            self.routePolyline = self.fetchedRoute.polyline;
-            [self.mapView addOverlay:self.routePolyline];
-            [self.mapView setVisibleMapRect:self.routePolyline.boundingMapRect edgePadding:UIEdgeInsetsMake(48, 48, 48, 48) animated:YES];
-            [self updateCoordinateModeVisibility];
+            strongSelf.routePolyline = strongSelf.fetchedRoute.polyline;
+            [strongSelf.mapView addOverlay:strongSelf.routePolyline];
+            [strongSelf.mapView setVisibleMapRect:strongSelf.routePolyline.boundingMapRect edgePadding:UIEdgeInsetsMake(48, 48, 48, 48) animated:YES];
+            [strongSelf updateCoordinateModeVisibility];
         });
     }];
 }
@@ -376,6 +379,15 @@
 - (void)routeSimulatorDidFinish:(LSRouteSimulator *)simulator {
     (void)simulator;
     [PersistenceManager shared].simulationWasActive = NO;
+
+    CLLocationCoordinate2D finalCoord = self.destinationAnnotation.coordinate;
+    if (CLLocationCoordinate2DIsValid(finalCoord)) {
+        PersistenceManager *store = [PersistenceManager shared];
+        [store setSpoofCoordinate:finalCoord enabled:YES];
+        self.selectedCoordinate = finalCoord;
+        [self syncFieldsFromCoordinate];
+    }
+
     self.statusLabel.text = @"Route complete";
     [self ls_updateRoutePlaybackButtons];
     [self refreshStatusPill];
