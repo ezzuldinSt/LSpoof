@@ -1,11 +1,6 @@
 #import "RouteSimulator.h"
 #import <os/lock.h>
 
-@interface LSRoutePoint : NSObject
-@property (nonatomic, assign) CLLocationCoordinate2D coordinate;
-@property (nonatomic, assign) double cumulativeDistance;
-@end
-
 @implementation LSRoutePoint
 @end
 
@@ -73,6 +68,14 @@
     os_unfair_lock_lock(&_coordLock);
     _currentHeading = heading;
     os_unfair_lock_unlock(&_coordLock);
+}
+
+- (CLLocationCoordinate2D)startCoordinate {
+    return self.routePoints.firstObject.coordinate;
+}
+
+- (CLLocationCoordinate2D)destinationCoordinate {
+    return self.routePoints.lastObject.coordinate;
 }
 
 + (double)speedMetersPerSecondForMode:(LSTransportMode)mode customSpeedKmh:(double)customSpeedKmh {

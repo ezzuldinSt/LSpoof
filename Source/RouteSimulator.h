@@ -13,6 +13,11 @@ typedef NS_ENUM(NSInteger, LSTransportMode) {
 
 @class LSRouteSimulator;
 
+@interface LSRoutePoint : NSObject
+@property (nonatomic, assign) CLLocationCoordinate2D coordinate;
+@property (nonatomic, assign) double cumulativeDistance;
+@end
+
 @protocol LSRouteSimulatorDelegate <NSObject>
 - (void)routeSimulator:(LSRouteSimulator *)simulator
    didUpdateCoordinate:(CLLocationCoordinate2D)coordinate
@@ -31,6 +36,9 @@ typedef NS_ENUM(NSInteger, LSTransportMode) {
 @property (nonatomic, readonly) BOOL isPaused;
 @property (nonatomic, readonly) CLLocationCoordinate2D currentCoordinate;
 @property (nonatomic, readonly) CLLocationDirection currentHeading;
+@property (nonatomic, readonly, nullable) NSArray<LSRoutePoint *> *routePoints;
+@property (nonatomic, readonly) CLLocationCoordinate2D startCoordinate;
+@property (nonatomic, readonly) CLLocationCoordinate2D destinationCoordinate;
 
 - (void)startWithRoute:(MKRoute *)route;
 - (void)pause;
