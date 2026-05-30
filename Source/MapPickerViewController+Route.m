@@ -91,7 +91,7 @@
         [self.playRouteButton.leadingAnchor constraintEqualToAnchor:content.leadingAnchor],
         [self.playRouteButton.trailingAnchor constraintEqualToAnchor:content.trailingAnchor],
 
-        [self.routeActionRow.topAnchor constraintEqualToAnchor:self.playRouteButton.bottomAnchor constant:8.0],
+        [self.routeActionRow.topAnchor constraintEqualToAnchor:self.playRouteButton.topAnchor],
         [self.routeActionRow.leadingAnchor constraintEqualToAnchor:content.leadingAnchor],
         [self.routeActionRow.trailingAnchor constraintEqualToAnchor:content.trailingAnchor]
     ]];
@@ -105,7 +105,7 @@
     BOOL hasRoute = self.fetchedRoute != nil;
     self.transportModeSegment.hidden = !routeMode || !hasRoute;
     self.playRouteButton.hidden = !routeMode || !hasRoute;
-    self.routeActionRow.hidden = !routeMode || !hasRoute;
+    self.routeActionRow.hidden = YES;
 
     if (routeMode) {
         if (self.pinAnnotation) {
@@ -329,11 +329,20 @@
     } else {
         [simulator pause];
         [self.pauseRouteButton setTitle:@"Resume" forState:UIControlStateNormal];
+        CLLocationCoordinate2D coord = simulator.currentCoordinate;
+        if (CLLocationCoordinate2DIsValid(coord)) {
+            [[PersistenceManager shared] setSpoofCoordinate:coord enabled:YES];
+        }
     }
 }
 
 - (void)handleStopRouteTapped {
-    [[LSRouteSimulator shared] stop];
+    LSRouteSimulator *simulator = [LSRouteSimulator shared];
+    CLLocationCoordinate2D coord = simulator.currentCoordinate;
+    if (CLLocationCoordinate2DIsValid(coord)) {
+        [[PersistenceManager shared] setSpoofCoordinate:coord enabled:YES];
+    }
+    [simulator stop];
     [PersistenceManager shared].simulationWasActive = NO;
     [self playSimulationStopHaptic];
     [self ls_updateRoutePlaybackButtons];
