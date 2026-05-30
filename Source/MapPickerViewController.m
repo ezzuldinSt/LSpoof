@@ -750,8 +750,6 @@ static const CGFloat kLSMapHeightMultiplier = 0.30;
     UIButton *button = [UIButton buttonWithType:UIButtonTypeCustom];
     button.translatesAutoresizingMaskIntoConstraints = NO;
 
-    UIImage *icon = [UIImage systemImageNamed:@"stop.circle"];
-    [button setImage:icon forState:UIControlStateNormal];
     [button setTitle:title forState:UIControlStateNormal];
     button.titleLabel.font = [UIFont systemFontOfSize:16.0 weight:UIFontWeightSemibold];
 
