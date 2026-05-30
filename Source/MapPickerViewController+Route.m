@@ -215,9 +215,10 @@
         case 0:
             return MKDirectionsTransportTypeWalking;
         case 2:
+        case 3:
             return MKDirectionsTransportTypeAutomobile;
         default:
-            return MKDirectionsTransportTypeAny;
+            return MKDirectionsTransportTypeAutomobile;
     }
 }
 
