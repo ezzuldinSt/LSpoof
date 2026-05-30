@@ -91,7 +91,7 @@
         [self.playRouteButton.leadingAnchor constraintEqualToAnchor:content.leadingAnchor],
         [self.playRouteButton.trailingAnchor constraintEqualToAnchor:content.trailingAnchor],
 
-        [self.routeActionRow.topAnchor constraintEqualToAnchor:self.playRouteButton.bottomAnchor constant:8.0],
+        [self.routeActionRow.topAnchor constraintEqualToAnchor:self.playRouteButton.topAnchor],
         [self.routeActionRow.leadingAnchor constraintEqualToAnchor:content.leadingAnchor],
         [self.routeActionRow.trailingAnchor constraintEqualToAnchor:content.trailingAnchor]
     ]];
@@ -105,7 +105,7 @@
     BOOL hasRoute = self.fetchedRoute != nil;
     self.transportModeSegment.hidden = !routeMode || !hasRoute;
     self.playRouteButton.hidden = !routeMode || !hasRoute;
-    self.routeActionRow.hidden = !routeMode || !hasRoute;
+    self.routeActionRow.hidden = YES;
 
     if (routeMode) {
         if (self.pinAnnotation) {
@@ -116,11 +116,13 @@
             self.mapHintLabel.text = @"  Tap map for route start  ";
         }
     } else {
-        [self ls_clearRouteAnnotationsAndOverlay];
+        if (![[LSRouteSimulator shared] isSimulating]) {
+            [self ls_clearRouteAnnotationsAndOverlay];
+            self.mapHintLabel.text = @"  Tap map or drag pin  ";
+        }
         if (self.pinAnnotation && self.mapConfigured) {
             [self.mapView addAnnotation:self.pinAnnotation];
         }
-        self.mapHintLabel.text = @"  Tap map or drag pin  ";
     }
 
     [UIView animateWithDuration:0.2 animations:^{
@@ -156,7 +158,7 @@
         return;
     }
 
-    if (self.fetchedRoute != nil) {
+    if (self.fetchedRoute != nil || [[LSRouteSimulator shared] isSimulating]) {
         self.mapControlsBottomRouteConstraint.active = YES;
     } else {
         self.mapControlsBottomRouteEarlyConstraint.active = YES;
@@ -215,9 +217,10 @@
         case 0:
             return MKDirectionsTransportTypeWalking;
         case 2:
+        case 3:
             return MKDirectionsTransportTypeAutomobile;
         default:
-            return MKDirectionsTransportTypeAny;
+            return MKDirectionsTransportTypeAutomobile;
     }
 }
 
@@ -249,30 +252,33 @@
     request.transportType = [self ls_directionsTransportType];
 
     MKDirections *directions = [[MKDirections alloc] initWithRequest:request];
+    __weak typeof(self) weakSelf = self;
     [directions calculateDirectionsWithCompletionHandler:^(MKDirectionsResponse * _Nullable response, NSError * _Nullable error) {
+        typeof(self) strongSelf = weakSelf;
+        if (!strongSelf) return;
         dispatch_async(dispatch_get_main_queue(), ^{
-            [self.routeSpinner stopAnimating];
+            [strongSelf.routeSpinner stopAnimating];
 
             if (error || response.routes.count == 0) {
-                [self playRouteFailureHaptic];
-                self.getRouteButton.hidden = NO;
-                self.statusLabel.text = @"Route fetch failed";
-                __weak typeof(self) weakSelf = self;
+                [strongSelf playRouteFailureHaptic];
+                strongSelf.getRouteButton.hidden = NO;
+                strongSelf.statusLabel.text = @"Route fetch failed";
+                __weak typeof(strongSelf) innerWeakSelf = strongSelf;
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                    [weakSelf refreshStatusPill];
+                    [innerWeakSelf refreshStatusPill];
                 });
                 return;
             }
 
-            [self playRouteSuccessHaptic];
-            self.fetchedRoute = response.routes.firstObject;
-            if (self.routePolyline) {
-                [self.mapView removeOverlay:self.routePolyline];
+            [strongSelf playRouteSuccessHaptic];
+            strongSelf.fetchedRoute = response.routes.firstObject;
+            if (strongSelf.routePolyline) {
+                [strongSelf.mapView removeOverlay:strongSelf.routePolyline];
             }
-            self.routePolyline = self.fetchedRoute.polyline;
-            [self.mapView addOverlay:self.routePolyline];
-            [self.mapView setVisibleMapRect:self.routePolyline.boundingMapRect edgePadding:UIEdgeInsetsMake(48, 48, 48, 48) animated:YES];
-            [self updateCoordinateModeVisibility];
+            strongSelf.routePolyline = strongSelf.fetchedRoute.polyline;
+            [strongSelf.mapView addOverlay:strongSelf.routePolyline];
+            [strongSelf.mapView setVisibleMapRect:strongSelf.routePolyline.boundingMapRect edgePadding:UIEdgeInsetsMake(48, 48, 48, 48) animated:YES];
+            [strongSelf updateCoordinateModeVisibility];
         });
     }];
 }
@@ -325,11 +331,20 @@
     } else {
         [simulator pause];
         [self.pauseRouteButton setTitle:@"Resume" forState:UIControlStateNormal];
+        CLLocationCoordinate2D coord = simulator.currentCoordinate;
+        if (CLLocationCoordinate2DIsValid(coord)) {
+            [[PersistenceManager shared] setSpoofCoordinate:coord enabled:YES];
+        }
     }
 }
 
 - (void)handleStopRouteTapped {
-    [[LSRouteSimulator shared] stop];
+    LSRouteSimulator *simulator = [LSRouteSimulator shared];
+    CLLocationCoordinate2D coord = simulator.currentCoordinate;
+    if (CLLocationCoordinate2DIsValid(coord)) {
+        [[PersistenceManager shared] setSpoofCoordinate:coord enabled:YES];
+    }
+    [simulator stop];
     [PersistenceManager shared].simulationWasActive = NO;
     [self playSimulationStopHaptic];
     [self ls_updateRoutePlaybackButtons];
@@ -347,10 +362,19 @@
 
     self.playRouteButton.hidden = YES;
     self.routeActionRow.hidden = NO;
+    self.pauseRouteButton.hidden = NO;
+    self.stopRouteButton.hidden = NO;
+    self.getRouteButton.hidden = YES;
     [self.pauseRouteButton setTitle:simulator.isPaused ? @"Resume" : @"Pause" forState:UIControlStateNormal];
 }
 
 - (void)restoreSimulationUIIfNeeded {
+    LSRouteSimulator *simulator = [LSRouteSimulator shared];
+    if (simulator.isSimulating) {
+        [self restoreRouteUIFromSimulator];
+        return;
+    }
+
     if (![PersistenceManager shared].simulationWasActive) {
         return;
     }
@@ -363,6 +387,64 @@
     });
 }
 
+- (void)restoreRouteUIFromSimulator {
+    LSRouteSimulator *simulator = [LSRouteSimulator shared];
+    NSArray<LSRoutePoint *> *points = simulator.routePoints;
+    if (points.count < 2) return;
+
+    self.startAnnotation = [[LSStartAnnotation alloc] init];
+    self.startAnnotation.title = @"Start";
+    self.startAnnotation.coordinate = simulator.startCoordinate;
+    [self.mapView addAnnotation:self.startAnnotation];
+
+    self.destinationAnnotation = [[LSDestinationAnnotation alloc] init];
+    self.destinationAnnotation.title = @"Destination";
+    self.destinationAnnotation.coordinate = simulator.destinationCoordinate;
+    [self.mapView addAnnotation:self.destinationAnnotation];
+
+    NSUInteger count = points.count;
+    CLLocationCoordinate2D *coords = malloc(sizeof(CLLocationCoordinate2D) * count);
+    for (NSUInteger i = 0; i < count; i++) {
+        coords[i] = points[i].coordinate;
+    }
+    self.routePolyline = [MKPolyline polylineWithCoordinates:coords count:count];
+    free(coords);
+    [self.mapView addOverlay:self.routePolyline];
+
+    [self.mapView setVisibleMapRect:self.routePolyline.boundingMapRect
+                        edgePadding:UIEdgeInsetsMake(48.0, 48.0, 48.0, 48.0)
+                           animated:NO];
+
+    if (self.pinAnnotation) {
+        [self.mapView removeAnnotation:self.pinAnnotation];
+    }
+
+    self.coordinateMode = LSMapPickerCoordinateModeRoute;
+    self.coordinateModeSegment.selectedSegmentIndex = LSMapPickerCoordinateModeRoute;
+    self.mapHintLabel.text = @"";
+
+    self.staticControlsContainer.alpha = 0.0;
+    self.staticControlsContainer.hidden = YES;
+    self.routeControlsContainer.alpha = 1.0;
+    self.routeControlsContainer.hidden = NO;
+
+    self.selectedCoordinate = simulator.currentCoordinate;
+    [self syncFieldsFromCoordinate];
+
+    self.getRouteButton.hidden = YES;
+    switch (simulator.transportMode) {
+        case LSTransportModeWalking: self.transportModeSegment.selectedSegmentIndex = 0; break;
+        case LSTransportModeCycling: self.transportModeSegment.selectedSegmentIndex = 1; break;
+        case LSTransportModeDriving: self.transportModeSegment.selectedSegmentIndex = 2; break;
+        case LSTransportModeCustom: self.transportModeSegment.selectedSegmentIndex = 3; break;
+    }
+    self.transportModeSegment.hidden = NO;
+    [self ls_updateCustomSpeedVisibility];
+    [self ls_updateRoutePlaybackButtons];
+    [self ls_updateMapControlsBottomConstraint];
+    [self refreshStatusPill];
+}
+
 #pragma mark - LSRouteSimulatorDelegate
 
 - (void)routeSimulator:(LSRouteSimulator *)simulator didUpdateCoordinate:(CLLocationCoordinate2D)coordinate heading:(CLLocationDirection)heading {
@@ -370,12 +452,31 @@
     double kmh = [LSRouteSimulator speedMetersPerSecondForMode:simulator.transportMode customSpeedKmh:simulator.customSpeedKmh] * 3.6;
     self.statusLabel.text = [NSString stringWithFormat:@"Simulating · %.1f km/h", kmh];
     self.statusDot.backgroundColor = UIColor.systemGreenColor;
-    (void)coordinate;
+
+    self.selectedCoordinate = coordinate;
+    self.startAnnotation.coordinate = coordinate;
+    self.pinAnnotation.coordinate = coordinate;
+    self.suppressFieldSync = YES;
+    self.latitudeField.text = [NSString stringWithFormat:@"%.6f", coordinate.latitude];
+    self.longitudeField.text = [NSString stringWithFormat:@"%.6f", coordinate.longitude];
+    self.suppressFieldSync = NO;
+    [self updateCoordinateLabel];
 }
 
 - (void)routeSimulatorDidFinish:(LSRouteSimulator *)simulator {
     (void)simulator;
     [PersistenceManager shared].simulationWasActive = NO;
+
+    if (self.destinationAnnotation) {
+        CLLocationCoordinate2D finalCoord = self.destinationAnnotation.coordinate;
+        if (CLLocationCoordinate2DIsValid(finalCoord)) {
+            PersistenceManager *store = [PersistenceManager shared];
+            [store setSpoofCoordinate:finalCoord enabled:YES];
+            self.selectedCoordinate = finalCoord;
+            [self syncFieldsFromCoordinate];
+        }
+    }
+
     self.statusLabel.text = @"Route complete";
     [self ls_updateRoutePlaybackButtons];
     [self refreshStatusPill];

@@ -1,25 +1,27 @@
 #import "RouteSimulator.h"
-
-@interface LSRoutePoint : NSObject
-@property (nonatomic, assign) CLLocationCoordinate2D coordinate;
-@property (nonatomic, assign) double cumulativeDistance;
-@end
+#import <os/lock.h>
 
 @implementation LSRoutePoint
 @end
 
-@interface LSRouteSimulator ()
+@interface LSRouteSimulator () {
+    os_unfair_lock _coordLock;
+}
 @property (nonatomic, strong) NSArray<LSRoutePoint *> *routePoints;
 @property (nonatomic, assign) double totalDistance;
 @property (nonatomic, assign) double distanceCovered;
 @property (nonatomic, strong, nullable) NSTimer *tickTimer;
 @property (nonatomic, assign) CLLocationCoordinate2D currentCoordinate;
 @property (nonatomic, assign) CLLocationDirection currentHeading;
+@property (nonatomic, assign) NSUInteger currentSegmentIndex;
 @property (nonatomic, assign) BOOL isSimulating;
 @property (nonatomic, assign) BOOL isPaused;
 @end
 
 @implementation LSRouteSimulator
+
+@synthesize currentCoordinate = _currentCoordinate;
+@synthesize currentHeading = _currentHeading;
 
 + (instancetype)shared {
     static LSRouteSimulator *instance = nil;
@@ -33,12 +35,47 @@
 - (instancetype)init {
     self = [super init];
     if (self) {
+        _coordLock = OS_UNFAIR_LOCK_INIT;
         _transportMode = LSTransportModeWalking;
         _customSpeedKmh = 30.0;
         _currentCoordinate = kCLLocationCoordinate2DInvalid;
         _currentHeading = 0.0;
     }
     return self;
+}
+
+- (CLLocationCoordinate2D)currentCoordinate {
+    os_unfair_lock_lock(&_coordLock);
+    CLLocationCoordinate2D coord = _currentCoordinate;
+    os_unfair_lock_unlock(&_coordLock);
+    return coord;
+}
+
+- (void)setCurrentCoordinate:(CLLocationCoordinate2D)coordinate {
+    os_unfair_lock_lock(&_coordLock);
+    _currentCoordinate = coordinate;
+    os_unfair_lock_unlock(&_coordLock);
+}
+
+- (CLLocationDirection)currentHeading {
+    os_unfair_lock_lock(&_coordLock);
+    CLLocationDirection heading = _currentHeading;
+    os_unfair_lock_unlock(&_coordLock);
+    return heading;
+}
+
+- (void)setCurrentHeading:(CLLocationDirection)heading {
+    os_unfair_lock_lock(&_coordLock);
+    _currentHeading = heading;
+    os_unfair_lock_unlock(&_coordLock);
+}
+
+- (CLLocationCoordinate2D)startCoordinate {
+    return self.routePoints.firstObject.coordinate;
+}
+
+- (CLLocationCoordinate2D)destinationCoordinate {
+    return self.routePoints.lastObject.coordinate;
 }
 
 + (double)speedMetersPerSecondForMode:(LSTransportMode)mode customSpeedKmh:(double)customSpeedKmh {
@@ -73,11 +110,11 @@
     [self stop];
 
     MKPolyline *polyline = route.polyline;
-    if (!polyline || polyline.pointCount < 2) {
+    NSUInteger pointCount = polyline.pointCount;
+    if (!polyline || pointCount < 2) {
         return;
     }
 
-    NSUInteger pointCount = polyline.pointCount;
     CLLocationCoordinate2D *rawCoordinates = malloc(sizeof(CLLocationCoordinate2D) * pointCount);
     if (!rawCoordinates) {
         return;
@@ -115,6 +152,7 @@
     self.totalDistance = cumulative;
     self.distanceCovered = 0.0;
     self.currentCoordinate = firstPoint.coordinate;
+    self.currentSegmentIndex = 1;
     if (points.count >= 2) {
         self.currentHeading = [self headingFromCoordinate:((LSRoutePoint *)points[0]).coordinate
                                                toCoordinate:((LSRoutePoint *)points[1]).coordinate];
@@ -152,6 +190,7 @@
     self.isPaused = NO;
     self.distanceCovered = 0.0;
     self.routePoints = nil;
+    self.currentSegmentIndex = 0;
     self.totalDistance = 0.0;
 }
 
@@ -192,17 +231,13 @@
         return;
     }
 
-    NSUInteger low = 0;
-    NSUInteger high = self.routePoints.count - 1;
-    while (low < high) {
-        NSUInteger mid = low + (high - low) / 2;
-        if (self.routePoints[mid].cumulativeDistance < self.distanceCovered) {
-            low = mid + 1;
-        } else {
-            high = mid;
-        }
+    NSUInteger count = self.routePoints.count;
+    while (self.currentSegmentIndex < count &&
+           self.currentSegmentIndex + 1 < count &&
+           self.distanceCovered >= self.routePoints[self.currentSegmentIndex].cumulativeDistance) {
+        self.currentSegmentIndex++;
     }
-    NSUInteger index = low;
+    NSUInteger index = MIN(self.currentSegmentIndex, count - 1);
     LSRoutePoint *segmentEnd = self.routePoints[index];
     LSRoutePoint *segmentStart = index > 0 ? self.routePoints[index - 1] : segmentEnd;
 
@@ -225,7 +260,10 @@
 - (CLLocationDirection)headingFromCoordinate:(CLLocationCoordinate2D)from toCoordinate:(CLLocationCoordinate2D)to {
     double deltaX = to.longitude - from.longitude;
     double deltaY = to.latitude - from.latitude;
-    double radians = atan2(deltaX, deltaY);
+    double avgLat = (from.latitude + to.latitude) / 2.0 * M_PI / 180.0;
+    double cosLat = cos(avgLat);
+    if (cosLat < 1e-12) cosLat = 1e-12;
+    double radians = atan2(deltaX * cosLat, deltaY);
     double degrees = radians * 180.0 / M_PI;
     if (degrees < 0.0) {
         degrees += 360.0;

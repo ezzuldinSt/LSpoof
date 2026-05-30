@@ -46,8 +46,13 @@ static NSInteger LSActiveTouchCountForEvent(UIEvent * _Nullable event) {
         return 0;
     }
 
+    NSSet *touches = event.allTouches;
+    if (touches.count < 3) {
+        return 0;
+    }
+
     NSInteger activeTouches = 0;
-    for (UITouch *touch in event.allTouches) {
+    for (UITouch *touch in touches) {
         switch (touch.phase) {
             case UITouchPhaseBegan:
             case UITouchPhaseMoved:

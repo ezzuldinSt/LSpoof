@@ -225,12 +225,17 @@ typedef NS_ENUM(NSInteger, LSBookmarksSection) {
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Delete Bookmark"
                                                                    message:[NSString stringWithFormat:@"Delete \"%@\"?", name]
                                                             preferredStyle:UIAlertControllerStyleAlert];
+    __weak typeof(self) weakSelf = self;
     [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:^(__unused UIAlertAction *action) {
-        [self.bookmarksTableView reloadRowsAtIndexPaths:@[indexPath] withRowAnimation:UITableViewRowAnimationNone];
+        typeof(self) strongSelf = weakSelf;
+        if (!strongSelf) return;
+        [strongSelf.bookmarksTableView reloadRowsAtIndexPaths:@[indexPath] withRowAnimation:UITableViewRowAnimationNone];
     }]];
     [alert addAction:[UIAlertAction actionWithTitle:@"Delete" style:UIAlertActionStyleDestructive handler:^(__unused UIAlertAction *action) {
+        typeof(self) strongSelf = weakSelf;
+        if (!strongSelf) return;
         [[BookmarksManager shared] removeBookmarkAtIndex:(NSUInteger)indexPath.row];
-        [self.bookmarksTableView deleteRowsAtIndexPaths:@[indexPath] withRowAnimation:UITableViewRowAnimationLeft];
+        [strongSelf.bookmarksTableView deleteRowsAtIndexPaths:@[indexPath] withRowAnimation:UITableViewRowAnimationLeft];
     }]];
     [self presentViewController:alert animated:YES completion:nil];
 }
@@ -297,13 +302,19 @@ typedef NS_ENUM(NSInteger, LSBookmarksSection) {
         textField.text = bookmark.name;
     }];
     [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    __weak typeof(self) weakSelf = self;
+    __weak typeof(alert) weakAlert = alert;
     [alert addAction:[UIAlertAction actionWithTitle:@"Save" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
-        NSString *name = alert.textFields.firstObject.text;
+        typeof(self) strongSelf = weakSelf;
+        if (!strongSelf) return;
+        UIAlertController *strongAlert = weakAlert;
+        if (!strongAlert) return;
+        NSString *name = strongAlert.textFields.firstObject.text;
         if (name.length == 0) {
             return;
         }
         [[BookmarksManager shared] renameBookmark:name atIndex:(NSUInteger)indexPath.row];
-        [self.bookmarksTableView reloadData];
+        [strongSelf.bookmarksTableView reloadData];
     }]];
     [self presentViewController:alert animated:YES completion:nil];
 }
@@ -332,11 +343,16 @@ typedef NS_ENUM(NSInteger, LSBookmarksSection) {
 
 - (void)ls_presentStaticMapActionSheetAtCoordinate:(CLLocationCoordinate2D)coordinate {
     UIAlertController *sheet = [UIAlertController alertControllerWithTitle:nil message:nil preferredStyle:UIAlertControllerStyleActionSheet];
+    __weak typeof(self) weakSelf = self;
     [sheet addAction:[UIAlertAction actionWithTitle:@"Place Pin Here" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
-        [self movePinToCoordinate:coordinate animated:YES];
+        typeof(self) strongSelf = weakSelf;
+        if (!strongSelf) return;
+        [strongSelf movePinToCoordinate:coordinate animated:YES];
     }]];
     [sheet addAction:[UIAlertAction actionWithTitle:@"Save as Bookmark" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
-        [self presentSaveBookmarkAlertWithSuggestedName:nil coordinate:coordinate];
+        typeof(self) strongSelf = weakSelf;
+        if (!strongSelf) return;
+        [strongSelf presentSaveBookmarkAlertWithSuggestedName:nil coordinate:coordinate];
     }]];
     [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
     [self presentViewController:sheet animated:YES completion:nil];

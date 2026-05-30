@@ -647,7 +647,7 @@ static const CGFloat kLSMapHeightMultiplier = 0.30;
     self.mapControlsBottomRouteEarlyConstraint = [self.getRouteButton.bottomAnchor constraintEqualToAnchor:self.routeControlsContainer.bottomAnchor constant:-12.0];
     self.mapControlsBottomStaticConstraint.active = YES;
 
-    self.stopButtonHeightConstraint = [self.stopButton.heightAnchor constraintEqualToConstant:44.0];
+    self.stopButtonHeightConstraint = [self.stopButton.heightAnchor constraintEqualToConstant:50.0];
     self.stopButtonHeightConstraint.active = YES;
 
     self.suggestionsHeightConstraint = [self.suggestionsPanel.heightAnchor constraintEqualToConstant:0.0];
@@ -747,12 +747,21 @@ static const CGFloat kLSMapHeightMultiplier = 0.30;
 }
 
 - (UIButton *)destructiveOutlineButtonWithTitle:(NSString *)title action:(SEL)action {
-    UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
+    UIButton *button = [UIButton buttonWithType:UIButtonTypeCustom];
     button.translatesAutoresizingMaskIntoConstraints = NO;
+
     [button setTitle:title forState:UIControlStateNormal];
+    button.titleLabel.font = [UIFont systemFontOfSize:16.0 weight:UIFontWeightSemibold];
+
     [button setTitleColor:UIColor.systemRedColor forState:UIControlStateNormal];
-    button.titleLabel.font = [UIFont systemFontOfSize:15.0 weight:UIFontWeightSemibold];
-    button.backgroundColor = UIColor.clearColor;
+
+    button.backgroundColor = [UIColor.systemRedColor colorWithAlphaComponent:0.12];
+    button.layer.cornerRadius = 12.0;
+    button.layer.cornerCurve = kCACornerCurveContinuous;
+    button.layer.borderWidth = 1.0 / UIScreen.mainScreen.scale;
+    button.layer.borderColor = UIColor.systemRedColor.CGColor;
+    button.clipsToBounds = YES;
+
     [button addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
     return button;
 }
@@ -785,7 +794,7 @@ static const CGFloat kLSMapHeightMultiplier = 0.30;
     self.statusPill.backgroundColor = active ? [UIColor.systemRedColor colorWithAlphaComponent:0.12] : [UIColor.tertiarySystemFillColor colorWithAlphaComponent:0.9];
     BOOL showStop = active && self.coordinateMode == LSMapPickerCoordinateModeStatic && self.panelTab == LSMapPickerPanelTabMap;
     self.stopButton.hidden = !showStop;
-    self.stopButtonHeightConstraint.constant = showStop ? 44.0 : 0.0;
+    self.stopButtonHeightConstraint.constant = showStop ? 50.0 : 0.0;
     [self ls_updateMapControlsBottomConstraint];
 
     self.mapView.showsUserLocation = ![[PersistenceManager shared] isSpoofingEnabled];
@@ -885,10 +894,11 @@ static const CGFloat kLSMapHeightMultiplier = 0.30;
     dispatch_once(&onceToken, ^{
         formatter = [[NSNumberFormatter alloc] init];
         formatter.numberStyle = NSNumberFormatterDecimalStyle;
-        formatter.locale = NSLocale.currentLocale;
+        formatter.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
     });
 
-    return [formatter numberFromString:trimmed];
+    NSString *normalized = [trimmed stringByReplacingOccurrencesOfString:@"," withString:@"."];
+    return [formatter numberFromString:normalized];
 }
 
 - (BOOL)applyFieldsToCoordinate {
@@ -1114,18 +1124,21 @@ static const CGFloat kLSMapHeightMultiplier = 0.30;
 
     MKLocalSearchRequest *request = [[MKLocalSearchRequest alloc] initWithCompletion:completion];
     MKLocalSearch *search = [[MKLocalSearch alloc] initWithRequest:request];
+    __weak typeof(self) weakSelf = self;
     [search startWithCompletionHandler:^(MKLocalSearchResponse * _Nullable response, NSError * _Nullable error) {
+        typeof(self) strongSelf = weakSelf;
+        if (!strongSelf) return;
         dispatch_async(dispatch_get_main_queue(), ^{
-            [self.searchSpinner stopAnimating];
-            [self ls_updateApplyButtonEnabled];
+            [strongSelf.searchSpinner stopAnimating];
+            [strongSelf ls_updateApplyButtonEnabled];
 
             if (error || response.mapItems.count == 0) {
-                [self showSearchFailureMessage];
+                [strongSelf showSearchFailureMessage];
                 return;
             }
 
             MKMapItem *item = response.mapItems.firstObject;
-            [self movePinToCoordinate:item.placemark.coordinate animated:YES];
+            [strongSelf movePinToCoordinate:item.placemark.coordinate animated:YES];
         });
     }];
 }
@@ -1146,18 +1159,21 @@ static const CGFloat kLSMapHeightMultiplier = 0.30;
     request.region = self.searchCompleter.region;
 
     MKLocalSearch *search = [[MKLocalSearch alloc] initWithRequest:request];
+    __weak typeof(self) weakSelf = self;
     [search startWithCompletionHandler:^(MKLocalSearchResponse * _Nullable response, NSError * _Nullable error) {
+        typeof(self) strongSelf = weakSelf;
+        if (!strongSelf) return;
         dispatch_async(dispatch_get_main_queue(), ^{
-            [self.searchSpinner stopAnimating];
-            [self ls_updateApplyButtonEnabled];
+            [strongSelf.searchSpinner stopAnimating];
+            [strongSelf ls_updateApplyButtonEnabled];
 
             if (error || response.mapItems.count == 0) {
-                [self showSearchFailureMessage];
+                [strongSelf showSearchFailureMessage];
                 return;
             }
 
             MKMapItem *item = response.mapItems.firstObject;
-            [self movePinToCoordinate:item.placemark.coordinate animated:YES];
+            [strongSelf movePinToCoordinate:item.placemark.coordinate animated:YES];
         });
     }];
 }
@@ -1478,8 +1494,11 @@ static const CGFloat kLSMapHeightMultiplier = 0.30;
         UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"Stop Spoofing?"
                                                                        message:nil
                                                                 preferredStyle:UIAlertControllerStyleActionSheet];
+        __weak typeof(self) weakSelf = self;
         [sheet addAction:[UIAlertAction actionWithTitle:@"Stop" style:UIAlertActionStyleDestructive handler:^(__unused UIAlertAction *action) {
-            [self handleStopSpoofing];
+            typeof(self) strongSelf = weakSelf;
+            if (!strongSelf) return;
+            [strongSelf handleStopSpoofing];
         }]];
         [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
         [self presentViewController:sheet animated:YES completion:nil];

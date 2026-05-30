@@ -141,6 +141,7 @@ typedef NS_ENUM(NSInteger, LSRoutePlacementPhase) {
 - (void)updateCoordinateModeVisibility;
 - (void)ls_updateMapControlsBottomConstraint;
 - (void)restoreSimulationUIIfNeeded;
+- (void)restoreRouteUIFromSimulator;
 - (void)ls_installRouteConstraintsInRoutePanel;
 - (MKOverlayRenderer *)ls_rendererForMapOverlay:(id<MKOverlay>)overlay;
 - (nullable MKAnnotationView *)ls_viewForRouteAnnotation:(id<MKAnnotation>)annotation;
