@@ -227,11 +227,7 @@ static UIViewController *LSHostTopViewController(void) {
 + (void)setMapPickerVisible:(BOOL)visible {
     LSAssertMainThread();
     ls_mapPickerVisible = visible;
-    if (!visible) {
-        LSCancelThreeFingerHoldTimer();
-    } else {
-        LSCancelThreeFingerHoldTimer();
-    }
+    LSCancelThreeFingerHoldTimer();
 }
 
 + (void)restoreMapPickerSessionState {

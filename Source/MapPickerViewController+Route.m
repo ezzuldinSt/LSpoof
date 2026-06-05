@@ -475,19 +475,19 @@
     (void)simulator;
     [PersistenceManager shared].simulationWasActive = NO;
 
-    LSRouteSimulator *sim = [LSRouteSimulator shared];
-    NSArray<LSRoutePoint *> *points = sim.routePoints;
-    if (points.count > 0) {
-        CLLocationCoordinate2D finalCoord = points.lastObject.coordinate;
-        if (CLLocationCoordinate2DIsValid(finalCoord)) {
-            PersistenceManager *store = [PersistenceManager shared];
-            if ([store setSpoofCoordinate:finalCoord enabled:YES]) {
-                self.selectedCoordinate = finalCoord;
-                [self syncFieldsFromCoordinate];
-            } else {
-                [self playRouteFailureHaptic];
-                self.statusLabel.text = @"Route complete (spoof rejected)";
-            }
+    CLLocationCoordinate2D finalCoord = kCLLocationCoordinate2DInvalid;
+    if (self.routePolyline && self.routePolyline.pointCount > 0) {
+        [self.routePolyline getCoordinates:&finalCoord
+                                     range:NSMakeRange(self.routePolyline.pointCount - 1, 1)];
+    }
+    if (CLLocationCoordinate2DIsValid(finalCoord)) {
+        PersistenceManager *store = [PersistenceManager shared];
+        if ([store setSpoofCoordinate:finalCoord enabled:YES]) {
+            self.selectedCoordinate = finalCoord;
+            [self syncFieldsFromCoordinate];
+        } else {
+            [self playRouteFailureHaptic];
+            self.statusLabel.text = @"Route complete (spoof rejected)";
         }
     }
 
