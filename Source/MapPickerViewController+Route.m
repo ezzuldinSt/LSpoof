@@ -61,8 +61,7 @@
         [self.getRouteButton.heightAnchor constraintEqualToConstant:44.0],
         [self.playRouteButton.heightAnchor constraintEqualToConstant:44.0],
         [self.pauseRouteButton.heightAnchor constraintEqualToConstant:44.0],
-        [self.stopRouteButton.heightAnchor constraintEqualToConstant:44.0],
-        [self.customSpeedField.heightAnchor constraintEqualToConstant:40.0]
+        [self.stopRouteButton.heightAnchor constraintEqualToConstant:44.0]
     ]];
 
     self.customSpeedHeightConstraint = [self.customSpeedField.heightAnchor constraintEqualToConstant:0.0];
@@ -315,7 +314,16 @@
     }
 
     CLLocationCoordinate2D start = self.startAnnotation.coordinate;
-    [[PersistenceManager shared] setSpoofCoordinate:start enabled:YES];
+    if (!CLLocationCoordinate2DIsValid(start) ||
+        ![[PersistenceManager shared] setSpoofCoordinate:start enabled:YES]) {
+        [self playRouteFailureHaptic];
+        self.statusLabel.text = @"Invalid route start";
+        __weak typeof(self) weakSelf = self;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [weakSelf refreshStatusPill];
+        });
+        return;
+    }
     [PersistenceManager shared].simulationWasActive = YES;
 
     [simulator startWithRoute:self.fetchedRoute];
@@ -467,13 +475,19 @@
     (void)simulator;
     [PersistenceManager shared].simulationWasActive = NO;
 
-    if (self.destinationAnnotation) {
-        CLLocationCoordinate2D finalCoord = self.destinationAnnotation.coordinate;
-        if (CLLocationCoordinate2DIsValid(finalCoord)) {
-            PersistenceManager *store = [PersistenceManager shared];
-            [store setSpoofCoordinate:finalCoord enabled:YES];
+    CLLocationCoordinate2D finalCoord = kCLLocationCoordinate2DInvalid;
+    if (self.routePolyline && self.routePolyline.pointCount > 0) {
+        [self.routePolyline getCoordinates:&finalCoord
+                                     range:NSMakeRange(self.routePolyline.pointCount - 1, 1)];
+    }
+    if (CLLocationCoordinate2DIsValid(finalCoord)) {
+        PersistenceManager *store = [PersistenceManager shared];
+        if ([store setSpoofCoordinate:finalCoord enabled:YES]) {
             self.selectedCoordinate = finalCoord;
             [self syncFieldsFromCoordinate];
+        } else {
+            [self playRouteFailureHaptic];
+            self.statusLabel.text = @"Route complete (spoof rejected)";
         }
     }
 

@@ -1410,7 +1410,7 @@ static const CGFloat kLSMapHeightMultiplier = 0.30;
         return;
     }
 
-    [self movePinToCoordinate:coordinate animated:YES];
+    [self ls_handleRouteMapTap:coordinate];
 }
 
 - (MKOverlayRenderer *)mapView:(MKMapView *)mapView rendererForOverlay:(id<MKOverlay>)overlay {

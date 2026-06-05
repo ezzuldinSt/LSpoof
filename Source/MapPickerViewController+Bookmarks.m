@@ -334,7 +334,15 @@ typedef NS_ENUM(NSInteger, LSBookmarksSection) {
 
     LSBookmark *bookmark = bookmarks[index];
     PersistenceManager *store = [PersistenceManager shared];
-    [store setSpoofCoordinate:bookmark.coordinate enabled:YES];
+    if (![store setSpoofCoordinate:bookmark.coordinate enabled:YES]) {
+        [self playRouteFailureHaptic];
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Error"
+                                                                       message:@"This bookmark has an invalid coordinate."
+                                                                preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+        [self presentViewController:alert animated:YES completion:nil];
+        return;
+    }
     [store recordRecentCoordinate:bookmark.coordinate name:bookmark.name];
     [self playApplyHaptic];
     LSSetHooksBypassed(NO);
