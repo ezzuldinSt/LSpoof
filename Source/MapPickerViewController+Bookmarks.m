@@ -334,7 +334,12 @@ typedef NS_ENUM(NSInteger, LSBookmarksSection) {
 
     LSBookmark *bookmark = bookmarks[index];
     PersistenceManager *store = [PersistenceManager shared];
-    [store setSpoofCoordinate:bookmark.coordinate enabled:YES];
+    if (![store setSpoofCoordinate:bookmark.coordinate enabled:YES]) {
+        [self playRouteFailureHaptic];
+        self.coordinateValueLabel.text = @"This bookmark has an invalid coordinate";
+        self.coordinateValueLabel.textColor = UIColor.systemRedColor;
+        return;
+    }
     [store recordRecentCoordinate:bookmark.coordinate name:bookmark.name];
     [self playApplyHaptic];
     LSSetHooksBypassed(NO);

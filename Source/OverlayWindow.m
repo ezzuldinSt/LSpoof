@@ -228,7 +228,7 @@ static UIViewController *LSHostTopViewController(void) {
     LSAssertMainThread();
     ls_mapPickerVisible = visible;
     if (!visible) {
-        [self resetGestureTriggerState];
+        LSCancelThreeFingerHoldTimer();
     } else {
         LSCancelThreeFingerHoldTimer();
     }
