@@ -109,7 +109,7 @@ static const CGFloat kLSMapHeightMultiplier = 0.30;
 
     self.titleLabel = [[UILabel alloc] init];
     self.titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    self.titleLabel.text = @"Location Spoofer";
+    self.titleLabel.text = @"ÙØ²ÙÙÙ Ø§ÙÙÙÙØ¹";
     self.titleLabel.font = [UIFont systemFontOfSize:28.0 weight:UIFontWeightBold];
     self.titleLabel.textColor = UIColor.labelColor;
     self.titleLabel.accessibilityTraits = UIAccessibilityTraitHeader;
@@ -117,7 +117,7 @@ static const CGFloat kLSMapHeightMultiplier = 0.30;
 
     self.subtitleLabel = [[UILabel alloc] init];
     self.subtitleLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    self.subtitleLabel.text = @"Choose where apps think you are";
+    self.subtitleLabel.text = @"Ø§Ø®ØªØ± Ø§ÙÙÙÙØ¹ Ø§ÙØ°Ù Ø³ØªØ¹ØªÙØ¯ Ø§ÙØªØ·Ø¨ÙÙØ§Øª Ø£ÙÙ ÙÙÙ";
     self.subtitleLabel.font = [UIFont systemFontOfSize:15.0 weight:UIFontWeightRegular];
     self.subtitleLabel.textColor = UIColor.secondaryLabelColor;
     self.subtitleLabel.numberOfLines = 2;
@@ -144,7 +144,7 @@ static const CGFloat kLSMapHeightMultiplier = 0.30;
 
     self.pillStopLabel = [[UILabel alloc] init];
     self.pillStopLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    self.pillStopLabel.text = @"Stop";
+    self.pillStopLabel.text = @"Ø¥ÙÙØ§Ù";
     self.pillStopLabel.font = [UIFont systemFontOfSize:12.0 weight:UIFontWeightSemibold];
     self.pillStopLabel.textColor = UIColor.systemRedColor;
     self.pillStopLabel.hidden = YES;
@@ -158,7 +158,7 @@ static const CGFloat kLSMapHeightMultiplier = 0.30;
     UIImage *closeImage = [UIImage systemImageNamed:@"xmark.circle.fill"];
     [self.closeButton setImage:closeImage forState:UIControlStateNormal];
     self.closeButton.tintColor = UIColor.tertiaryLabelColor;
-    self.closeButton.accessibilityLabel = @"Close";
+    self.closeButton.accessibilityLabel = @"Ø¥ØºÙØ§Ù";
     [self.closeButton addTarget:self action:@selector(handleCancel) forControlEvents:UIControlEventTouchUpInside];
     [self.headerView addSubview:self.closeButton];
 }
@@ -166,7 +166,7 @@ static const CGFloat kLSMapHeightMultiplier = 0.30;
 - (void)buildSearchBar {
     self.searchBar = [[UISearchBar alloc] init];
     self.searchBar.translatesAutoresizingMaskIntoConstraints = NO;
-    self.searchBar.placeholder = @"Search city, address, or landmark";
+    self.searchBar.placeholder = @"Ø§Ø¨Ø­Ø« Ø¹Ù ÙØ¯ÙÙØ© Ø£Ù Ø¹ÙÙØ§Ù Ø£Ù ÙØ¹ÙÙ";
     self.searchBar.delegate = self;
     self.searchBar.searchBarStyle = UISearchBarStyleMinimal;
     self.searchBar.backgroundImage = [[UIImage alloc] init];
@@ -291,7 +291,7 @@ static const CGFloat kLSMapHeightMultiplier = 0.30;
 
     UIView *content = self.controlPanel.contentView;
 
-    self.panelTabSegment = [[UISegmentedControl alloc] initWithItems:@[@"Map", @"Bookmarks"]];
+    self.panelTabSegment = [[UISegmentedControl alloc] initWithItems:@[@"Ø§ÙØ®Ø±ÙØ·Ø©", @"Ø§ÙÙØ­ÙÙØ¸Ø§Øª"]];
     self.panelTabSegment.translatesAutoresizingMaskIntoConstraints = NO;
     self.panelTabSegment.selectedSegmentIndex = LSMapPickerPanelTabMap;
     [self.panelTabSegment addTarget:self action:@selector(handlePanelTabChanged:) forControlEvents:UIControlEventValueChanged];
@@ -312,7 +312,7 @@ static const CGFloat kLSMapHeightMultiplier = 0.30;
     self.mapControlsStack.axis = UILayoutConstraintAxisVertical;
     self.mapControlsStack.spacing = 12.0;
 
-    self.coordinateModeSegment = [[UISegmentedControl alloc] initWithItems:@[@"Static", @"Route"]];
+    self.coordinateModeSegment = [[UISegmentedControl alloc] initWithItems:@[@"Ø«Ø§Ø¨Øª", @"ÙØ³Ø§Ø±"]];
     self.coordinateModeSegment.translatesAutoresizingMaskIntoConstraints = NO;
     self.coordinateModeSegment.selectedSegmentIndex = LSMapPickerCoordinateModeStatic;
     [self.coordinateModeSegment addTarget:self action:@selector(handleCoordinateModeChanged:) forControlEvents:UIControlEventValueChanged];
@@ -323,7 +323,7 @@ static const CGFloat kLSMapHeightMultiplier = 0.30;
 
     self.coordinateTitleLabel = [[UILabel alloc] init];
     self.coordinateTitleLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    self.coordinateTitleLabel.text = @"Selected coordinates";
+    self.coordinateTitleLabel.text = @"Ø§ÙØ¥Ø­Ø¯Ø§Ø«ÙØ§Øª Ø§ÙÙØ­Ø¯Ø¯Ø©";
     self.coordinateTitleLabel.font = [UIFont systemFontOfSize:13.0 weight:UIFontWeightSemibold];
     self.coordinateTitleLabel.textColor = UIColor.secondaryLabelColor;
     [staticPanel addSubview:self.coordinateTitleLabel];
@@ -341,11 +341,11 @@ static const CGFloat kLSMapHeightMultiplier = 0.30;
     self.bookmarkSaveButton.translatesAutoresizingMaskIntoConstraints = NO;
     UIImage *bookmarkImage = [UIImage systemImageNamed:@"bookmark"];
     if (!bookmarkImage) {
-        [self.bookmarkSaveButton setTitle:@"★" forState:UIControlStateNormal];
+        [self.bookmarkSaveButton setTitle:@"â" forState:UIControlStateNormal];
     } else {
         [self.bookmarkSaveButton setImage:bookmarkImage forState:UIControlStateNormal];
     }
-    self.bookmarkSaveButton.accessibilityLabel = @"Save bookmark";
+    self.bookmarkSaveButton.accessibilityLabel = @"Ø­ÙØ¸ Ø§ÙÙÙÙØ¹";
     [self.bookmarkSaveButton addTarget:self action:@selector(handleBookmarkSaveTapped) forControlEvents:UIControlEventTouchUpInside];
     [staticPanel addSubview:self.bookmarkSaveButton];
 
@@ -354,17 +354,17 @@ static const CGFloat kLSMapHeightMultiplier = 0.30;
 
     UITextField *latitudeInput = nil;
     UITextField *longitudeInput = nil;
-    UIView *latitudeContainer = [self coordinateFieldWithTitle:@"Latitude"
+    UIView *latitudeContainer = [self coordinateFieldWithTitle:@"Ø®Ø· Ø§ÙØ¹Ø±Ø¶"
                                                    placeholder:@"37.774900"
                                                      textField:&latitudeInput];
-    UIView *longitudeContainer = [self coordinateFieldWithTitle:@"Longitude"
+    UIView *longitudeContainer = [self coordinateFieldWithTitle:@"Ø®Ø· Ø§ÙØ·ÙÙ"
                                                     placeholder:@"-122.419400"
                                                       textField:&longitudeInput];
     self.latitudeField = latitudeInput;
     self.longitudeField = longitudeInput;
 
     UITextField *altitudeInput = nil;
-    UIView *altitudeContainer = [self coordinateFieldWithTitle:@"Alt (m)" placeholder:@"0" textField:&altitudeInput];
+    UIView *altitudeContainer = [self coordinateFieldWithTitle:@"Ø§ÙØ§Ø±ØªÙØ§Ø¹ (Ù)" placeholder:@"0" textField:&altitudeInput];
     self.altitudeField = altitudeInput;
 
     self.fieldStack = [[UIStackView alloc] initWithArrangedSubviews:@[latitudeContainer, longitudeContainer, altitudeContainer]];
@@ -410,7 +410,7 @@ static const CGFloat kLSMapHeightMultiplier = 0.30;
 
     self.fluctuationLabel = [[UILabel alloc] init];
     self.fluctuationLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    self.fluctuationLabel.text = @"Fluctuation";
+    self.fluctuationLabel.text = @"Ø§ÙØªØ°Ø¨Ø°Ø¨";
     self.fluctuationLabel.font = [UIFont systemFontOfSize:15.0 weight:UIFontWeightSemibold];
     self.fluctuationLabel.textColor = UIColor.labelColor;
     [self.fluctuationRow addSubview:self.fluctuationLabel];
@@ -422,7 +422,7 @@ static const CGFloat kLSMapHeightMultiplier = 0.30;
 
     self.fluctuationRadiusField = [[UITextField alloc] init];
     self.fluctuationRadiusField.translatesAutoresizingMaskIntoConstraints = NO;
-    self.fluctuationRadiusField.placeholder = @"Radius (m)";
+    self.fluctuationRadiusField.placeholder = @"ÙØµÙ Ø§ÙÙØ·Ø± (Ù)";
     self.fluctuationRadiusField.keyboardType = UIKeyboardTypeNumberPad;
     self.fluctuationRadiusField.font = [UIFont monospacedDigitSystemFontOfSize:14.0 weight:UIFontWeightMedium];
     self.fluctuationRadiusField.textColor = UIColor.labelColor;
@@ -442,9 +442,9 @@ static const CGFloat kLSMapHeightMultiplier = 0.30;
     fluctuationToolbar.items = @[flexItem, doneItem];
     self.fluctuationRadiusField.inputAccessoryView = fluctuationToolbar;
 
-    self.applyButton = [self primaryButtonWithTitle:@"Apply Location" action:@selector(handleApply)];
-    self.cancelButton = [self secondaryButtonWithTitle:@"Cancel" action:@selector(handleCancel)];
-    self.stopButton = [self destructiveOutlineButtonWithTitle:@"Stop Spoofing" action:@selector(handleStopSpoofing)];
+    self.applyButton = [self primaryButtonWithTitle:@"ØªØ·Ø¨ÙÙ Ø§ÙÙÙÙØ¹" action:@selector(handleApply)];
+    self.cancelButton = [self secondaryButtonWithTitle:@"Ø¥ÙØºØ§Ø¡" action:@selector(handleCancel)];
+    self.stopButton = [self destructiveOutlineButtonWithTitle:@"Ø¥ÙÙØ§Ù Ø§ÙØªØ²ÙÙÙ" action:@selector(handleStopSpoofing)];
 
     UIStackView *actionRow = [[UIStackView alloc] initWithArrangedSubviews:@[self.cancelButton, self.applyButton]];
     actionRow.translatesAutoresizingMaskIntoConstraints = NO;
@@ -781,11 +781,11 @@ static const CGFloat kLSMapHeightMultiplier = 0.30;
     LSRouteSimulator *simulator = [LSRouteSimulator shared];
     if (simulator.isSimulating) {
         double kmh = [LSRouteSimulator speedMetersPerSecondForMode:simulator.transportMode customSpeedKmh:simulator.customSpeedKmh] * 3.6;
-        self.statusLabel.text = [NSString stringWithFormat:@"Simulating · %.1f km/h", kmh];
+        self.statusLabel.text = [NSString stringWithFormat:@"ÙØ­Ø§ÙØ§Ø© Â· %.1f ÙÙ/Ø³", kmh];
         self.statusDot.backgroundColor = UIColor.systemGreenColor;
     } else {
         BOOL active = [[PersistenceManager shared] isSpoofingEnabled];
-        self.statusLabel.text = active ? @"Spoofing active" : @"Spoofing inactive";
+        self.statusLabel.text = active ? @"Ø§ÙØªØ²ÙÙÙ ÙÙØ¹Ù" : @"Ø§ÙØªØ²ÙÙÙ ÙØªÙÙÙ";
         self.statusDot.backgroundColor = active ? UIColor.systemGreenColor : UIColor.systemOrangeColor;
     }
 
@@ -830,8 +830,8 @@ static const CGFloat kLSMapHeightMultiplier = 0.30;
     [self.mapSpinner startAnimating];
 
     self.pinAnnotation = [[MKPointAnnotation alloc] init];
-    self.pinAnnotation.title = @"Spoofed location";
-    self.pinAnnotation.subtitle = @"Drag to adjust";
+    self.pinAnnotation.title = @"Ø§ÙÙÙÙØ¹ Ø§ÙÙØ²ÙÙÙ";
+    self.pinAnnotation.subtitle = @"Ø§Ø³Ø­Ø¨ ÙÙØªØ¹Ø¯ÙÙ";
     self.pinAnnotation.coordinate = self.selectedCoordinate;
     [self.mapView addAnnotation:self.pinAnnotation];
 
@@ -934,7 +934,7 @@ static const CGFloat kLSMapHeightMultiplier = 0.30;
     [self.fieldStack.layer addAnimation:shake forKey:@"shake"];
 
     self.coordinateValueLabel.textColor = UIColor.systemRedColor;
-    self.coordinateValueLabel.text = @"Enter valid latitude (-90 to 90) and longitude (-180 to 180)";
+    self.coordinateValueLabel.text = @"Ø£Ø¯Ø®Ù ÙÙÙØ§Ù ØµØ­ÙØ­Ø© ÙØ®Ø· Ø§ÙØ¹Ø±Ø¶ (-90 Ø¥ÙÙ 90) ÙØ®Ø· Ø§ÙØ·ÙÙ (-180 Ø¥ÙÙ 180)";
 
     __weak typeof(self) weakSelf = self;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.8 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
@@ -1035,7 +1035,7 @@ static const CGFloat kLSMapHeightMultiplier = 0.30;
 
 - (void)updateHeadingLabel {
     NSInteger heading = (NSInteger)lroundf(self.headingSlider.value);
-    self.headingValueLabel.text = [NSString stringWithFormat:@"Heading: %03ld°", (long)heading];
+    self.headingValueLabel.text = [NSString stringWithFormat:@"Ø§ÙØ§ØªØ¬Ø§Ù: %03ldÂ°", (long)heading];
 
     NSArray<NSString *> *directions = @[@"N", @"NE", @"E", @"SE", @"S", @"SW", @"W", @"NW"];
     NSInteger index = (NSInteger)(((double)heading + 22.5) / 45.0) % 8;
@@ -1182,7 +1182,7 @@ static const CGFloat kLSMapHeightMultiplier = 0.30;
     UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
     [feedback impactOccurred];
     self.coordinateValueLabel.textColor = UIColor.systemOrangeColor;
-    self.coordinateValueLabel.text = @"No results found. Try a different search.";
+    self.coordinateValueLabel.text = @"ÙÙ ÙØªÙ Ø§ÙØ¹Ø«ÙØ± Ø¹ÙÙ ÙØªØ§Ø¦Ø¬Ø Ø¬Ø±ÙØ¨ Ø¨Ø­Ø«Ø§Ù Ø¢Ø®Ø±";
     __weak typeof(self) weakSelf = self;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.6 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         typeof(self) strongSelf = weakSelf;
@@ -1491,16 +1491,16 @@ static const CGFloat kLSMapHeightMultiplier = 0.30;
 - (void)handleStatusPillTapped {
     LSRouteSimulator *simulator = [LSRouteSimulator shared];
     if (simulator.isSimulating || [[PersistenceManager shared] isSpoofingEnabled]) {
-        UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"Stop Spoofing?"
+        UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"ÙÙ ØªØ±ÙØ¯ Ø¥ÙÙØ§Ù Ø§ÙØªØ²ÙÙÙØ"
                                                                        message:nil
                                                                 preferredStyle:UIAlertControllerStyleActionSheet];
         __weak typeof(self) weakSelf = self;
-        [sheet addAction:[UIAlertAction actionWithTitle:@"Stop" style:UIAlertActionStyleDestructive handler:^(__unused UIAlertAction *action) {
+        [sheet addAction:[UIAlertAction actionWithTitle:@"Ø¥ÙÙØ§Ù" style:UIAlertActionStyleDestructive handler:^(__unused UIAlertAction *action) {
             typeof(self) strongSelf = weakSelf;
             if (!strongSelf) return;
             [strongSelf handleStopSpoofing];
         }]];
-        [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+        [sheet addAction:[UIAlertAction actionWithTitle:@"Ø¥ÙØºØ§Ø¡" style:UIAlertActionStyleCancel handler:nil]];
         [self presentViewController:sheet animated:YES completion:nil];
     }
 }
