@@ -15,6 +15,9 @@ static dispatch_once_t ls_delegateTablesOnceToken;
 static dispatch_once_t ls_hookSelectorsOnceToken;
 static os_log_t ls_log = NULL;
 
+static const void *ls_userLocationMarkKey = &ls_userLocationMarkKey;
+static const void *ls_spoofedCoordinateKey = &ls_spoofedCoordinateKey;
+
 static SEL ls_hookDidUpdateLocationsSEL = NULL;
 static SEL ls_hookDidUpdateToLocationSEL = NULL;
 
@@ -93,18 +96,10 @@ static CLLocationCoordinate2D LSApplyFluctuation(CLLocationCoordinate2D coordina
     return CLLocationCoordinate2DMake(newLat, newLon);
 }
 
-CLLocation *LSCreateSpoofedLocation(void) {
+CLLocationCoordinate2D LSCalculateSpoofedCoordinate(void) {
     LSRouteSimulator *simulator = [LSRouteSimulator shared];
     if (simulator.isSimulating) {
-        LSTransportMode mode = simulator.transportMode;
-        double speed = [LSRouteSimulator speedMetersPerSecondForMode:mode customSpeedKmh:simulator.customSpeedKmh];
-        double accuracy = [LSRouteSimulator horizontalAccuracyForMode:mode];
-        PersistenceManager *store = [PersistenceManager shared];
-        return LSBuildSpoofedLocation(simulator.currentCoordinate,
-                                      simulator.currentHeading,
-                                      store.altitude,
-                                      accuracy,
-                                      speed);
+        return simulator.currentCoordinate;
     }
 
     PersistenceManager *store = [PersistenceManager shared];
@@ -112,11 +107,58 @@ CLLocation *LSCreateSpoofedLocation(void) {
     if (store.fluctuationEnabled) {
         baseCoordinate = LSApplyFluctuation(baseCoordinate, store.fluctuationRadius);
     }
-    return LSBuildSpoofedLocation(baseCoordinate,
-                                store.heading,
-                                store.altitude,
-                                6.0,
-                                0.0);
+    return baseCoordinate;
+}
+
+void LSMarkUserLocation(CLLocation *location) {
+    if (!location || ![location isKindOfClass:[CLLocation class]]) {
+        return;
+    }
+    objc_setAssociatedObject(location, ls_userLocationMarkKey,
+                             (__bridge id)ls_userLocationMarkKey,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+BOOL LSIsMarkedUserLocation(CLLocation *location) {
+    if (!location || ![location isKindOfClass:[CLLocation class]]) {
+        return NO;
+    }
+    return objc_getAssociatedObject(location, ls_userLocationMarkKey) != nil;
+}
+
+CLLocationCoordinate2D LSGetOrComputeSpoofedCoordinate(CLLocation *location) {
+    NSValue *cached = objc_getAssociatedObject(location, ls_spoofedCoordinateKey);
+    if (cached) {
+        CLLocationCoordinate2D coord;
+        [cached getValue:&coord size:sizeof(coord)];
+        return coord;
+    }
+    CLLocationCoordinate2D coord = LSCalculateSpoofedCoordinate();
+    NSValue *boxed = [NSValue valueWithBytes:&coord objCType:@encode(CLLocationCoordinate2D)];
+    objc_setAssociatedObject(location, ls_spoofedCoordinateKey, boxed,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return coord;
+}
+
+CLLocation *LSCreateSpoofedLocation(void) {
+    LSRouteSimulator *simulator = [LSRouteSimulator shared];
+    PersistenceManager *store = [PersistenceManager shared];
+    if (simulator.isSimulating) {
+        LSTransportMode mode = simulator.transportMode;
+        double speed = [LSRouteSimulator speedMetersPerSecondForMode:mode customSpeedKmh:simulator.customSpeedKmh];
+        double accuracy = [LSRouteSimulator horizontalAccuracyForMode:mode];
+        return LSBuildSpoofedLocation(simulator.currentCoordinate,
+                                      simulator.currentHeading,
+                                      store.altitude,
+                                      accuracy,
+                                      speed);
+    }
+
+    return LSBuildSpoofedLocation(LSCalculateSpoofedCoordinate(),
+                                  store.heading,
+                                  store.altitude,
+                                  6.0,
+                                  0.0);
 }
 
 static BOOL LSIsSystemFrameworkBundle(NSBundle *bundle) {
@@ -234,8 +276,13 @@ static void LSSwizzleDelegateIfNeeded(id delegate) {
 static void LSHookDidUpdateLocations(id self, SEL _cmd, CLLocationManager *manager, NSArray<CLLocation *> *locations) {
     (void)_cmd;
     NSArray<CLLocation *> *deliveredLocations = locations;
+    for (CLLocation *loc in deliveredLocations) {
+        LSMarkUserLocation(loc);
+    }
     if (LSShouldSpoof()) {
-        deliveredLocations = @[LSCreateSpoofedLocation()];
+        CLLocation *spoofed = LSCreateSpoofedLocation();
+        LSMarkUserLocation(spoofed);
+        deliveredLocations = @[spoofed];
     }
 
     void (*originalIMP)(id, SEL, CLLocationManager *, NSArray<CLLocation *> *) =
@@ -245,9 +292,12 @@ static void LSHookDidUpdateLocations(id self, SEL _cmd, CLLocationManager *manag
 
 static void LSHookDidUpdateToLocation(id self, SEL _cmd, CLLocationManager *manager, CLLocation *newLocation, CLLocation *oldLocation) {
     (void)_cmd;
+    LSMarkUserLocation(newLocation);
+    LSMarkUserLocation(oldLocation);
     CLLocation *deliveredLocation = newLocation;
     if (LSShouldSpoof()) {
         deliveredLocation = LSCreateSpoofedLocation();
+        LSMarkUserLocation(deliveredLocation);
     }
 
     void (*originalIMP)(id, SEL, CLLocationManager *, CLLocation *, CLLocation *) =
@@ -270,10 +320,31 @@ static void LSHookDidUpdateToLocation(id self, SEL _cmd, CLLocationManager *mana
 }
 
 - (CLLocation *)lsp_location {
-    if (LSShouldSpoof()) {
-        return LSCreateSpoofedLocation();
+    CLLocation *original = [self lsp_location];
+    if (original) {
+        LSMarkUserLocation(original);
     }
-    return [self lsp_location];
+    if (LSShouldSpoof()) {
+        CLLocation *spoofed = LSCreateSpoofedLocation();
+        LSMarkUserLocation(spoofed);
+        return spoofed;
+    }
+    return original;
+}
+
+@end
+
+@interface CLLocation (LSHooks)
+- (CLLocationCoordinate2D)lsp_coordinate;
+@end
+
+@implementation CLLocation (LSHooks)
+
+- (CLLocationCoordinate2D)lsp_coordinate {
+    if (LSShouldSpoof() && LSIsMarkedUserLocation(self)) {
+        return LSGetOrComputeSpoofedCoordinate(self);
+    }
+    return [self lsp_coordinate];
 }
 
 @end
@@ -310,6 +381,25 @@ static void LSInstallCLLocationManagerHooks(void) {
     }
 }
 
+static void LSInstallCLLocationHooks(void) {
+    Class locationClass = NSClassFromString(@"CLLocation");
+    if (!locationClass) {
+        if (ls_log) {
+            os_log_error(ls_log, "CLLocation class missing at hook install");
+        }
+        return;
+    }
+
+    if (!class_getInstanceMethod(locationClass, @selector(coordinate))) {
+        if (ls_log) {
+            os_log_error(ls_log, "CLLocation coordinate missing at hook install");
+        }
+        return;
+    }
+
+    LSExchangeInstanceMethods(locationClass, @selector(coordinate), @selector(lsp_coordinate));
+}
+
 @implementation LocationSpoofer
 
 + (void)installHooks {
@@ -318,6 +408,7 @@ static void LSInstallCLLocationManagerHooks(void) {
         ls_log = os_log_create("com.locationspoofer.dylib", "hooks");
         LSInitializeDelegateHookSelectors();
         LSInstallCLLocationManagerHooks();
+        LSInstallCLLocationHooks();
     });
 }
 
