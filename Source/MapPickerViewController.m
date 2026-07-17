@@ -54,6 +54,8 @@ static const CGFloat kLSMapHeightMultiplier = 0.30;
 
     [self syncFluctuationUI];
 
+    self.keepLastSpoofSwitch.on = [PersistenceManager shared].keepLastSpoof;
+
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(ls_keyboardWillShow:) name:UIKeyboardWillShowNotification object:nil];
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(ls_keyboardWillHide:) name:UIKeyboardWillHideNotification object:nil];
 }
@@ -442,6 +444,22 @@ static const CGFloat kLSMapHeightMultiplier = 0.30;
     fluctuationToolbar.items = @[flexItem, doneItem];
     self.fluctuationRadiusField.inputAccessoryView = fluctuationToolbar;
 
+    self.keepLastSpoofRow = [[UIView alloc] init];
+    self.keepLastSpoofRow.translatesAutoresizingMaskIntoConstraints = NO;
+    [staticPanel addSubview:self.keepLastSpoofRow];
+
+    self.keepLastSpoofLabel = [[UILabel alloc] init];
+    self.keepLastSpoofLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    self.keepLastSpoofLabel.text = @"Keep last location";
+    self.keepLastSpoofLabel.font = [UIFont systemFontOfSize:15.0 weight:UIFontWeightSemibold];
+    self.keepLastSpoofLabel.textColor = UIColor.labelColor;
+    [self.keepLastSpoofRow addSubview:self.keepLastSpoofLabel];
+
+    self.keepLastSpoofSwitch = [[UISwitch alloc] init];
+    self.keepLastSpoofSwitch.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.keepLastSpoofSwitch addTarget:self action:@selector(handleKeepLastSpoofToggle) forControlEvents:UIControlEventValueChanged];
+    [self.keepLastSpoofRow addSubview:self.keepLastSpoofSwitch];
+
     self.applyButton = [self primaryButtonWithTitle:@"Apply Location" action:@selector(handleApply)];
     self.cancelButton = [self secondaryButtonWithTitle:@"Cancel" action:@selector(handleCancel)];
     self.stopButton = [self destructiveOutlineButtonWithTitle:@"Stop Spoofing" action:@selector(handleStopSpoofing)];
@@ -627,10 +645,24 @@ static const CGFloat kLSMapHeightMultiplier = 0.30;
         [self.fluctuationRadiusField.trailingAnchor constraintEqualToAnchor:self.staticControlsContainer.trailingAnchor],
         (self.fluctuationRadiusHeightConstraint = [self.fluctuationRadiusField.heightAnchor constraintEqualToConstant:40.0]),
 
+        [self.keepLastSpoofRow.topAnchor constraintEqualToAnchor:self.fluctuationRadiusField.bottomAnchor constant:10.0],
+        [self.keepLastSpoofRow.leadingAnchor constraintEqualToAnchor:self.staticControlsContainer.leadingAnchor],
+        [self.keepLastSpoofRow.trailingAnchor constraintEqualToAnchor:self.staticControlsContainer.trailingAnchor],
+
+        [self.keepLastSpoofLabel.leadingAnchor constraintEqualToAnchor:self.keepLastSpoofRow.leadingAnchor],
+        [self.keepLastSpoofLabel.centerYAnchor constraintEqualToAnchor:self.keepLastSpoofRow.centerYAnchor],
+
+        [self.keepLastSpoofSwitch.trailingAnchor constraintEqualToAnchor:self.keepLastSpoofRow.trailingAnchor],
+        [self.keepLastSpoofSwitch.centerYAnchor constraintEqualToAnchor:self.keepLastSpoofRow.centerYAnchor],
+
+        [self.keepLastSpoofSwitch.leadingAnchor constraintGreaterThanOrEqualToAnchor:self.keepLastSpoofLabel.trailingAnchor constant:12.0],
+
+        [self.keepLastSpoofRow.heightAnchor constraintEqualToConstant:40.0],
+
         [self.cancelButton.heightAnchor constraintEqualToConstant:50.0],
         [self.applyButton.heightAnchor constraintEqualToConstant:50.0],
 
-        [self.actionRow.topAnchor constraintEqualToAnchor:self.fluctuationRadiusField.bottomAnchor constant:12.0],
+        [self.actionRow.topAnchor constraintEqualToAnchor:self.keepLastSpoofRow.bottomAnchor constant:12.0],
         [self.actionRow.leadingAnchor constraintEqualToAnchor:self.staticControlsContainer.leadingAnchor],
         [self.actionRow.trailingAnchor constraintEqualToAnchor:self.staticControlsContainer.trailingAnchor],
 
@@ -1031,6 +1063,10 @@ static const CGFloat kLSMapHeightMultiplier = 0.30;
     }
     [PersistenceManager shared].fluctuationRadius = radius;
     self.fluctuationRadiusField.text = [NSString stringWithFormat:@"%.0f", radius];
+}
+
+- (void)handleKeepLastSpoofToggle {
+    [PersistenceManager shared].keepLastSpoof = self.keepLastSpoofSwitch.isOn;
 }
 
 - (void)updateHeadingLabel {

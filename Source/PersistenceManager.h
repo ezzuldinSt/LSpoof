@@ -18,12 +18,14 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, assign) CLLocationDirection heading;
 @property (nonatomic, assign) BOOL fluctuationEnabled;
 @property (nonatomic, assign) double fluctuationRadius;
+@property (nonatomic, assign) BOOL keepLastSpoof;
 
 - (NSArray<NSDictionary *> *)recentLocations;
 - (void)recordRecentCoordinate:(CLLocationCoordinate2D)coordinate name:(nullable NSString *)name;
 
 - (BOOL)setSpoofCoordinate:(CLLocationCoordinate2D)coordinate enabled:(BOOL)enabled;
 - (void)clearSpoof;
+- (void)clearLastSpoof;
 
 @end
 

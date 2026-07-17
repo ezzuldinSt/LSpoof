@@ -40,7 +40,8 @@ static BOOL LSHooksBypassed(void) {
 static BOOL LSShouldSpoof(void) {
     return !ls_internalCreate &&
            !LSHooksBypassed() &&
-           [[PersistenceManager shared] isSpoofingEnabled];
+           ([[PersistenceManager shared] isSpoofingEnabled] ||
+            [[PersistenceManager shared] keepLastSpoof]);
 }
 
 static CLLocation *LSBuildSpoofedLocation(CLLocationCoordinate2D coordinate,
