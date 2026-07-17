@@ -56,6 +56,8 @@ static const CGFloat kLSMapHeightMultiplier = 0.30;
 
     self.keepLastSpoofSwitch.on = [PersistenceManager shared].keepLastSpoof;
 
+    self.showRealLocationSwitch.on = [PersistenceManager shared].showRealLocation;
+
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(ls_keyboardWillShow:) name:UIKeyboardWillShowNotification object:nil];
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(ls_keyboardWillHide:) name:UIKeyboardWillHideNotification object:nil];
 }
@@ -71,15 +73,20 @@ static const CGFloat kLSMapHeightMultiplier = 0.30;
     [super viewDidAppear:animated];
     LSSetHooksBypassed(YES);
     [self configureMapIfNeeded];
+    if ([PersistenceManager shared].showRealLocation) {
+        [self startRealLocationTracking];
+    }
 }
 
 - (void)viewWillDisappear:(BOOL)animated {
     [super viewWillDisappear:animated];
+    [self stopRealLocationTracking];
     [LSOverlayManager restoreMapPickerSessionState];
 }
 
 - (void)viewDidDisappear:(BOOL)animated {
     [super viewDidDisappear:animated];
+    [self stopRealLocationTracking];
     [LSOverlayManager restoreMapPickerSessionState];
 }
 
@@ -460,6 +467,22 @@ static const CGFloat kLSMapHeightMultiplier = 0.30;
     [self.keepLastSpoofSwitch addTarget:self action:@selector(handleKeepLastSpoofToggle) forControlEvents:UIControlEventValueChanged];
     [self.keepLastSpoofRow addSubview:self.keepLastSpoofSwitch];
 
+    self.showRealLocationRow = [[UIView alloc] init];
+    self.showRealLocationRow.translatesAutoresizingMaskIntoConstraints = NO;
+    [staticPanel addSubview:self.showRealLocationRow];
+
+    self.showRealLocationLabel = [[UILabel alloc] init];
+    self.showRealLocationLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    self.showRealLocationLabel.text = @"Show real location";
+    self.showRealLocationLabel.font = [UIFont systemFontOfSize:15.0 weight:UIFontWeightSemibold];
+    self.showRealLocationLabel.textColor = UIColor.labelColor;
+    [self.showRealLocationRow addSubview:self.showRealLocationLabel];
+
+    self.showRealLocationSwitch = [[UISwitch alloc] init];
+    self.showRealLocationSwitch.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.showRealLocationSwitch addTarget:self action:@selector(handleShowRealLocationToggle) forControlEvents:UIControlEventValueChanged];
+    [self.showRealLocationRow addSubview:self.showRealLocationSwitch];
+
     self.applyButton = [self primaryButtonWithTitle:@"Apply Location" action:@selector(handleApply)];
     self.cancelButton = [self secondaryButtonWithTitle:@"Cancel" action:@selector(handleCancel)];
     self.stopButton = [self destructiveOutlineButtonWithTitle:@"Stop Spoofing" action:@selector(handleStopSpoofing)];
@@ -659,10 +682,24 @@ static const CGFloat kLSMapHeightMultiplier = 0.30;
 
         [self.keepLastSpoofRow.heightAnchor constraintEqualToConstant:40.0],
 
+        [self.showRealLocationRow.topAnchor constraintEqualToAnchor:self.keepLastSpoofRow.bottomAnchor constant:10.0],
+        [self.showRealLocationRow.leadingAnchor constraintEqualToAnchor:self.staticControlsContainer.leadingAnchor],
+        [self.showRealLocationRow.trailingAnchor constraintEqualToAnchor:self.staticControlsContainer.trailingAnchor],
+
+        [self.showRealLocationLabel.leadingAnchor constraintEqualToAnchor:self.showRealLocationRow.leadingAnchor],
+        [self.showRealLocationLabel.centerYAnchor constraintEqualToAnchor:self.showRealLocationRow.centerYAnchor],
+
+        [self.showRealLocationSwitch.trailingAnchor constraintEqualToAnchor:self.showRealLocationRow.trailingAnchor],
+        [self.showRealLocationSwitch.centerYAnchor constraintEqualToAnchor:self.showRealLocationRow.centerYAnchor],
+
+        [self.showRealLocationSwitch.leadingAnchor constraintGreaterThanOrEqualToAnchor:self.showRealLocationLabel.trailingAnchor constant:12.0],
+
+        [self.showRealLocationRow.heightAnchor constraintEqualToConstant:40.0],
+
         [self.cancelButton.heightAnchor constraintEqualToConstant:50.0],
         [self.applyButton.heightAnchor constraintEqualToConstant:50.0],
 
-        [self.actionRow.topAnchor constraintEqualToAnchor:self.keepLastSpoofRow.bottomAnchor constant:12.0],
+        [self.actionRow.topAnchor constraintEqualToAnchor:self.showRealLocationRow.bottomAnchor constant:12.0],
         [self.actionRow.leadingAnchor constraintEqualToAnchor:self.staticControlsContainer.leadingAnchor],
         [self.actionRow.trailingAnchor constraintEqualToAnchor:self.staticControlsContainer.trailingAnchor],
 
@@ -1069,6 +1106,70 @@ static const CGFloat kLSMapHeightMultiplier = 0.30;
     [PersistenceManager shared].keepLastSpoof = self.keepLastSpoofSwitch.isOn;
 }
 
+- (void)handleShowRealLocationToggle {
+    BOOL enabled = self.showRealLocationSwitch.isOn;
+    [PersistenceManager shared].showRealLocation = enabled;
+    if (enabled) {
+        [self startRealLocationTracking];
+    } else {
+        [self stopRealLocationTracking];
+    }
+}
+
+- (void)startRealLocationTracking {
+    LSSetHooksBypassed(YES);
+    self.realLocationManager = [[CLLocationManager alloc] init];
+    self.realLocationManager.desiredAccuracy = kCLLocationAccuracyBest;
+    self.realLocationManager.delegate = (id<CLLocationManagerDelegate>)self;
+    [self.realLocationManager requestWhenInUseAuthorization];
+    [self.realLocationManager startUpdatingLocation];
+}
+
+- (void)stopRealLocationTracking {
+    [self.realLocationManager stopUpdatingLocation];
+    self.realLocationManager = nil;
+    if (self.realLocationAnnotation) {
+        [self.mapView removeAnnotation:self.realLocationAnnotation];
+        self.realLocationAnnotation = nil;
+    }
+}
+
+- (void)locationManager:(CLLocationManager *)manager didUpdateLocations:(NSArray<CLLocation *> *)locations {
+    CLLocation *location = locations.firstObject;
+    if (!location) {
+        return;
+    }
+
+    CLLocationCoordinate2D realCoord = location.coordinate;
+
+    if (!self.realLocationAnnotation) {
+        self.realLocationAnnotation = [[LSRealLocationAnnotation alloc] init];
+        self.realLocationAnnotation.title = @"Real location";
+        [self.mapView addAnnotation:self.realLocationAnnotation];
+    }
+    self.realLocationAnnotation.coordinate = realCoord;
+
+    [manager stopUpdatingLocation];
+}
+
+- (UIImage *)ls_blueDotImage {
+    CGFloat size = 24;
+    UIGraphicsBeginImageContextWithOptions(CGSizeMake(size, size), NO, 0);
+    CGContextRef ctx = UIGraphicsGetCurrentContext();
+
+    CGRect outerRect = CGRectMake(1, 1, size - 2, size - 2);
+    CGContextSetFillColorWithColor(ctx, UIColor.whiteColor.CGColor);
+    CGContextFillEllipseInRect(ctx, outerRect);
+
+    CGRect innerRect = CGRectMake(4, 4, size - 8, size - 8);
+    CGContextSetFillColorWithColor(ctx, UIColor.systemBlueColor.CGColor);
+    CGContextFillEllipseInRect(ctx, innerRect);
+
+    UIImage *image = UIGraphicsGetImageFromCurrentImageContext();
+    UIGraphicsEndImageContext();
+    return image;
+}
+
 - (void)updateHeadingLabel {
     NSInteger heading = (NSInteger)lroundf(self.headingSlider.value);
     self.headingValueLabel.text = [NSString stringWithFormat:@"Heading: %03ld°", (long)heading];
@@ -1463,6 +1564,20 @@ static const CGFloat kLSMapHeightMultiplier = 0.30;
     MKAnnotationView *routeView = [self ls_viewForRouteAnnotation:annotation];
     if (routeView) {
         return routeView;
+    }
+
+    if ([annotation isKindOfClass:[LSRealLocationAnnotation class]]) {
+        static NSString * const reuseIdentifier = @"LSRealLocation";
+        MKAnnotationView *view = [mapView dequeueReusableAnnotationViewWithIdentifier:reuseIdentifier];
+        if (!view) {
+            view = [[MKAnnotationView alloc] initWithAnnotation:annotation reuseIdentifier:reuseIdentifier];
+            view.image = [self ls_blueDotImage];
+            view.calloutOffset = CGPointMake(0, -8);
+            view.canShowCallout = YES;
+        } else {
+            view.annotation = annotation;
+        }
+        return view;
     }
 
     if (annotation != self.pinAnnotation) {
