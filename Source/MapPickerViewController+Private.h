@@ -26,6 +26,9 @@ typedef NS_ENUM(NSInteger, LSRoutePlacementPhase) {
 @interface LSDestinationAnnotation : MKPointAnnotation
 @end
 
+@interface LSRealLocationAnnotation : MKPointAnnotation
+@end
+
 @interface MapPickerViewController ()
 
 @property (nonatomic, strong) UIView *headerView;
@@ -76,6 +79,11 @@ typedef NS_ENUM(NSInteger, LSRoutePlacementPhase) {
 @property (nonatomic, strong) UIView *keepLastSpoofRow;
 @property (nonatomic, strong) UILabel *keepLastSpoofLabel;
 @property (nonatomic, strong) UISwitch *keepLastSpoofSwitch;
+@property (nonatomic, strong, nullable) LSRealLocationAnnotation *realLocationAnnotation;
+@property (nonatomic, strong, nullable) CLLocationManager *realLocationManager;
+@property (nonatomic, strong) UIView *showRealLocationRow;
+@property (nonatomic, strong) UILabel *showRealLocationLabel;
+@property (nonatomic, strong) UISwitch *showRealLocationSwitch;
 @property (nonatomic, strong) UIStackView *fieldStack;
 @property (nonatomic, strong) UITextField *latitudeField;
 @property (nonatomic, strong) UITextField *longitudeField;

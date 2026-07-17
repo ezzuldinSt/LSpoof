@@ -8,6 +8,9 @@
 @implementation LSDestinationAnnotation
 @end
 
+@implementation LSRealLocationAnnotation
+@end
+
 @implementation MapPickerViewController (LSRouteUI)
 
 - (void)buildRouteControls {
