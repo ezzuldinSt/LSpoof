@@ -1,4 +1,5 @@
 #import "PersistenceManager.h"
+#import "LSTimeZoneSync.h"
 #import <os/lock.h>
 
 // Plaintext NSUserDefaults in the host sandbox; readable by the host process and device backups.
@@ -11,6 +12,8 @@ static NSString * const kKeyAltitude = @"LSAltitude";
 static NSString * const kKeyHeading = @"LSHeading";
 static NSString * const kKeyFluctuationEnabled = @"LSFluctuationEnabled";
 static NSString * const kKeyFluctuationRadius = @"LSFluctuationRadius";
+static NSString * const kKeyTimeZoneSyncEnabled = @"LSTimeZoneSyncEnabled";
+static NSString * const kKeyTimeZoneIdentifier = @"LSTimeZoneIdentifier";
 static NSString * const kKeyRecentLocations = @"LSRecentLocations";
 static NSString * const kRecentLatitudeKey = @"LSRecentLat";
 static NSString * const kRecentLongitudeKey = @"LSRecentLon";
@@ -30,13 +33,15 @@ static const NSUInteger kLSMaxRecentLocations = 5;
 @property (nonatomic, assign) CLLocationDirection cachedHeading;
 @property (nonatomic, assign) BOOL cachedFluctuationEnabled;
 @property (nonatomic, assign) double cachedFluctuationRadius;
+@property (nonatomic, assign) BOOL cachedTimeZoneSyncEnabled;
+@property (nonatomic, copy, nullable) NSString *cachedTimeZoneIdentifier;
 @property (nonatomic, strong) NSMutableArray<NSDictionary *> *cachedRecents;
 @property (nonatomic, assign) BOOL recentsLoaded;
 @end
 
 @implementation PersistenceManager
 
-@dynamic simulationWasActive, altitude, heading, fluctuationEnabled, fluctuationRadius;
+@dynamic simulationWasActive, altitude, heading, fluctuationEnabled, fluctuationRadius, timezoneSyncEnabled, timeZoneIdentifier;
 
 + (instancetype)shared {
     static PersistenceManager *instance = nil;
@@ -59,6 +64,8 @@ static const NSUInteger kLSMaxRecentLocations = 5;
         _cachedHeading = 0.0;
         _cachedFluctuationEnabled = NO;
         _cachedFluctuationRadius = 50.0;
+        _cachedTimeZoneSyncEnabled = NO;
+        _cachedTimeZoneIdentifier = nil;
         _cachedRecents = [NSMutableArray array];
     }
     return self;
@@ -95,6 +102,9 @@ static const NSUInteger kLSMaxRecentLocations = 5;
     if (self.cachedFluctuationRadius <= 0.0) {
         self.cachedFluctuationRadius = 50.0;
     }
+    self.cachedTimeZoneSyncEnabled = [self.defaults boolForKey:kKeyTimeZoneSyncEnabled];
+    NSString *storedTimeZone = [self.defaults stringForKey:kKeyTimeZoneIdentifier];
+    self.cachedTimeZoneIdentifier = storedTimeZone.length > 0 ? [storedTimeZone copy] : nil;
 
     if ([self.defaults objectForKey:kKeyLatitude] != nil &&
         [self.defaults objectForKey:kKeyLongitude] != nil) {
@@ -218,6 +228,39 @@ static const NSUInteger kLSMaxRecentLocations = 5;
     os_unfair_lock_unlock(&_lock);
 }
 
+- (BOOL)timezoneSyncEnabled {
+    os_unfair_lock_lock(&_lock);
+    BOOL enabled = self.cachedTimeZoneSyncEnabled;
+    os_unfair_lock_unlock(&_lock);
+    return enabled;
+}
+
+- (void)setTimezoneSyncEnabled:(BOOL)timezoneSyncEnabled {
+    os_unfair_lock_lock(&_lock);
+    self.cachedTimeZoneSyncEnabled = timezoneSyncEnabled;
+    [self.defaults setBool:timezoneSyncEnabled forKey:kKeyTimeZoneSyncEnabled];
+    os_unfair_lock_unlock(&_lock);
+}
+
+- (NSString *)timeZoneIdentifier {
+    os_unfair_lock_lock(&_lock);
+    NSString *identifier = [self.cachedTimeZoneIdentifier copy];
+    os_unfair_lock_unlock(&_lock);
+    return identifier;
+}
+
+- (void)setTimeZoneIdentifier:(NSString *)timeZoneIdentifier {
+    os_unfair_lock_lock(&_lock);
+    NSString *normalized = timeZoneIdentifier.length > 0 ? [timeZoneIdentifier copy] : nil;
+    self.cachedTimeZoneIdentifier = normalized;
+    if (normalized) {
+        [self.defaults setObject:normalized forKey:kKeyTimeZoneIdentifier];
+    } else {
+        [self.defaults removeObjectForKey:kKeyTimeZoneIdentifier];
+    }
+    os_unfair_lock_unlock(&_lock);
+}
+
 - (NSArray<NSDictionary *> *)recentLocations {
     os_unfair_lock_lock(&_lock);
     [self reloadRecentsLocked];
@@ -269,6 +312,12 @@ static const NSUInteger kLSMaxRecentLocations = 5;
     [self.defaults setBool:self.cachedFluctuationEnabled forKey:kKeyFluctuationEnabled];
     [self.defaults setDouble:self.cachedFluctuationRadius forKey:kKeyFluctuationRadius];
     os_unfair_lock_unlock(&_lock);
+
+    if (enabled) {
+        [LSTimeZoneSync notifySpoofCoordinateChanged:coordinate];
+    } else {
+        [LSTimeZoneSync clearApplied];
+    }
     return YES;
 }
 
@@ -284,6 +333,8 @@ static const NSUInteger kLSMaxRecentLocations = 5;
     [self.defaults removeObjectForKey:kKeyLongitude];
     [self.defaults setBool:NO forKey:kKeySimulationWasActive];
     os_unfair_lock_unlock(&_lock);
+
+    [LSTimeZoneSync clearApplied];
 }
 
 @end

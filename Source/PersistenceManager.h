@@ -18,6 +18,8 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, assign) CLLocationDirection heading;
 @property (nonatomic, assign) BOOL fluctuationEnabled;
 @property (nonatomic, assign) double fluctuationRadius;
+@property (nonatomic, assign) BOOL timezoneSyncEnabled;
+@property (nonatomic, copy, nullable) NSString *timeZoneIdentifier;
 
 - (NSArray<NSDictionary *> *)recentLocations;
 - (void)recordRecentCoordinate:(CLLocationCoordinate2D)coordinate name:(nullable NSString *)name;

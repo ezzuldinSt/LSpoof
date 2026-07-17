@@ -4,6 +4,7 @@
 #import "OverlayWindow.h"
 #import "PersistenceManager.h"
 #import "RouteSimulator.h"
+#import "LSTimeZoneSync.h"
 
 #import <CoreLocation/CoreLocation.h>
 #import <MapKit/MapKit.h>
@@ -53,6 +54,7 @@ static const CGFloat kLSMapHeightMultiplier = 0.30;
     [self updatePanelTabVisibility];
 
     [self syncFluctuationUI];
+    [self syncTimeZoneUI];
 
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(ls_keyboardWillShow:) name:UIKeyboardWillShowNotification object:nil];
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(ls_keyboardWillHide:) name:UIKeyboardWillHideNotification object:nil];
@@ -63,6 +65,7 @@ static const CGFloat kLSMapHeightMultiplier = 0.30;
     LSSetHooksBypassed(YES);
     [LSOverlayManager setMapPickerVisible:YES];
     [self refreshStatusPill];
+    [self syncTimeZoneUI];
 }
 
 - (void)viewDidAppear:(BOOL)animated {
@@ -442,6 +445,33 @@ static const CGFloat kLSMapHeightMultiplier = 0.30;
     fluctuationToolbar.items = @[flexItem, doneItem];
     self.fluctuationRadiusField.inputAccessoryView = fluctuationToolbar;
 
+    self.separatorTimeZone = [self ls_separatorView];
+    [staticPanel addSubview:self.separatorTimeZone];
+
+    self.timeZoneRow = [[UIView alloc] init];
+    self.timeZoneRow.translatesAutoresizingMaskIntoConstraints = NO;
+    [staticPanel addSubview:self.timeZoneRow];
+
+    self.timeZoneLabel = [[UILabel alloc] init];
+    self.timeZoneLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    self.timeZoneLabel.text = @"Sync Time Zone";
+    self.timeZoneLabel.font = [UIFont systemFontOfSize:15.0 weight:UIFontWeightSemibold];
+    self.timeZoneLabel.textColor = UIColor.labelColor;
+    [self.timeZoneRow addSubview:self.timeZoneLabel];
+
+    self.timeZoneSwitch = [[UISwitch alloc] init];
+    self.timeZoneSwitch.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.timeZoneSwitch addTarget:self action:@selector(handleTimeZoneSyncToggle) forControlEvents:UIControlEventValueChanged];
+    [self.timeZoneRow addSubview:self.timeZoneSwitch];
+
+    self.timeZoneIdentifierLabel = [[UILabel alloc] init];
+    self.timeZoneIdentifierLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    self.timeZoneIdentifierLabel.font = [UIFont monospacedDigitSystemFontOfSize:12.0 weight:UIFontWeightRegular];
+    self.timeZoneIdentifierLabel.textColor = UIColor.secondaryLabelColor;
+    self.timeZoneIdentifierLabel.numberOfLines = 1;
+    self.timeZoneIdentifierLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
+    [staticPanel addSubview:self.timeZoneIdentifierLabel];
+
     self.applyButton = [self primaryButtonWithTitle:@"Apply Location" action:@selector(handleApply)];
     self.cancelButton = [self secondaryButtonWithTitle:@"Cancel" action:@selector(handleCancel)];
     self.stopButton = [self destructiveOutlineButtonWithTitle:@"Stop Spoofing" action:@selector(handleStopSpoofing)];
@@ -627,10 +657,30 @@ static const CGFloat kLSMapHeightMultiplier = 0.30;
         [self.fluctuationRadiusField.trailingAnchor constraintEqualToAnchor:self.staticControlsContainer.trailingAnchor],
         (self.fluctuationRadiusHeightConstraint = [self.fluctuationRadiusField.heightAnchor constraintEqualToConstant:40.0]),
 
+        [self.separatorTimeZone.topAnchor constraintEqualToAnchor:self.fluctuationRadiusField.bottomAnchor constant:8.0],
+        [self.separatorTimeZone.leadingAnchor constraintEqualToAnchor:self.staticControlsContainer.leadingAnchor],
+        [self.separatorTimeZone.trailingAnchor constraintEqualToAnchor:self.staticControlsContainer.trailingAnchor],
+
+        [self.timeZoneRow.topAnchor constraintEqualToAnchor:self.separatorTimeZone.bottomAnchor constant:8.0],
+        [self.timeZoneRow.leadingAnchor constraintEqualToAnchor:self.staticControlsContainer.leadingAnchor],
+        [self.timeZoneRow.trailingAnchor constraintEqualToAnchor:self.staticControlsContainer.trailingAnchor],
+        [self.timeZoneRow.heightAnchor constraintEqualToConstant:40.0],
+
+        [self.timeZoneLabel.leadingAnchor constraintEqualToAnchor:self.timeZoneRow.leadingAnchor],
+        [self.timeZoneLabel.centerYAnchor constraintEqualToAnchor:self.timeZoneRow.centerYAnchor],
+        [self.timeZoneSwitch.trailingAnchor constraintEqualToAnchor:self.timeZoneRow.trailingAnchor],
+        [self.timeZoneSwitch.centerYAnchor constraintEqualToAnchor:self.timeZoneRow.centerYAnchor],
+        [self.timeZoneSwitch.leadingAnchor constraintGreaterThanOrEqualToAnchor:self.timeZoneLabel.trailingAnchor constant:12.0],
+
+        (self.timeZoneIdentifierTopConstraint = [self.timeZoneIdentifierLabel.topAnchor constraintEqualToAnchor:self.timeZoneRow.bottomAnchor constant:4.0]),
+        [self.timeZoneIdentifierLabel.leadingAnchor constraintEqualToAnchor:self.staticControlsContainer.leadingAnchor],
+        [self.timeZoneIdentifierLabel.trailingAnchor constraintEqualToAnchor:self.staticControlsContainer.trailingAnchor],
+        (self.timeZoneIdentifierHeightConstraint = [self.timeZoneIdentifierLabel.heightAnchor constraintEqualToConstant:18.0]),
+
         [self.cancelButton.heightAnchor constraintEqualToConstant:50.0],
         [self.applyButton.heightAnchor constraintEqualToConstant:50.0],
 
-        [self.actionRow.topAnchor constraintEqualToAnchor:self.fluctuationRadiusField.bottomAnchor constant:12.0],
+        [self.actionRow.topAnchor constraintEqualToAnchor:self.timeZoneIdentifierLabel.bottomAnchor constant:12.0],
         [self.actionRow.leadingAnchor constraintEqualToAnchor:self.staticControlsContainer.leadingAnchor],
         [self.actionRow.trailingAnchor constraintEqualToAnchor:self.staticControlsContainer.trailingAnchor],
 
@@ -1031,6 +1081,44 @@ static const CGFloat kLSMapHeightMultiplier = 0.30;
     }
     [PersistenceManager shared].fluctuationRadius = radius;
     self.fluctuationRadiusField.text = [NSString stringWithFormat:@"%.0f", radius];
+}
+
+- (void)syncTimeZoneUI {
+    PersistenceManager *store = [PersistenceManager shared];
+    self.timeZoneSwitch.on = store.timezoneSyncEnabled;
+    NSString *identifier = store.timeZoneIdentifier;
+    BOOL showIdentifier = NO;
+    if (!store.timezoneSyncEnabled) {
+        self.timeZoneIdentifierLabel.text = @"";
+    } else if (identifier.length > 0) {
+        self.timeZoneIdentifierLabel.text = [NSString stringWithFormat:@"TZ · %@", identifier];
+        showIdentifier = YES;
+    } else if ([store isSpoofingEnabled]) {
+        self.timeZoneIdentifierLabel.text = @"TZ · Resolving…";
+        showIdentifier = YES;
+    } else {
+        self.timeZoneIdentifierLabel.text = @"TZ · Applies with spoofed location";
+        showIdentifier = YES;
+    }
+    self.timeZoneIdentifierLabel.hidden = !showIdentifier;
+    self.timeZoneIdentifierHeightConstraint.constant = showIdentifier ? 18.0 : 0.0;
+    self.timeZoneIdentifierTopConstraint.constant = showIdentifier ? 4.0 : 0.0;
+}
+
+- (void)handleTimeZoneSyncToggle {
+    PersistenceManager *store = [PersistenceManager shared];
+    store.timezoneSyncEnabled = self.timeZoneSwitch.isOn;
+    if (self.timeZoneSwitch.isOn) {
+        if ([store isSpoofingEnabled]) {
+            [LSTimeZoneSync notifySpoofCoordinateChanged:[store spoofCoordinate]];
+        }
+    } else {
+        [LSTimeZoneSync clearApplied];
+    }
+    [self syncTimeZoneUI];
+    [UIView animateWithDuration:0.25 animations:^{
+        [self.view layoutIfNeeded];
+    }];
 }
 
 - (void)updateHeadingLabel {

@@ -19,6 +19,8 @@ The gesture detection (`sendEvent:` on `UIApplication`/`UIWindow`) is reinstalle
 
 **What is NOT hooked:** Swift `CLLocationUpdate.liveUpdates()` (iOS 17+ async sequence), `CLBackgroundActivitySession`, telephony/WiFi/IP-based geolocation, or server-side IP checks.
 
+**Time zone sync (optional):** When enabled, the dylib reverse-geocodes the spoofed coordinate (`CLGeocoder` → IANA id such as `Asia/Tokyo`), sets `NSTimeZone.defaultTimeZone`, and swizzles `systemTimeZone` / `localTimeZone` / `defaultTimeZone` so the **host process** sees a zone consistent with the spoofed GPS. This is process-local only — it cannot change iOS Settings or the real device time zone. WebView/`Intl` JS and pure C `localtime` paths may still use the system zone.
+
 ---
 
 ## Trigger
@@ -42,6 +44,8 @@ Two modes switchable via a segment control:
 - Interactive map with draggable pin
 - Manual Lat/Lon/Altitude text fields
 - Heading slider (0–359 degrees with compass direction indicator)
+- **Fluctuation** — optional random jitter within a radius
+- **Sync Time Zone** — optional; reverse-geocodes the spoofed coordinate and overrides in-process `NSTimeZone` / `TimeZone.current` (does **not** change device Settings)
 - **Apply Location** — persists the coordinate and enables spoofing
 - **Stop Spoofing** — disables spoofing and clears saved state
 
