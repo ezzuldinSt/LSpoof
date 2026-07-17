@@ -259,6 +259,8 @@ static void LSHookDidUpdateToLocation(id self, SEL _cmd, CLLocationManager *mana
 @interface CLLocationManager (LSHooks)
 - (void)lsp_setDelegate:(id<CLLocationManagerDelegate>)delegate;
 - (CLLocation *)lsp_location;
++ (CLAuthorizationStatus)lsp_authorizationStatus;
++ (BOOL)lsp_locationServicesEnabled;
 @end
 
 @implementation CLLocationManager (LSHooks)
@@ -275,6 +277,14 @@ static void LSHookDidUpdateToLocation(id self, SEL _cmd, CLLocationManager *mana
         return LSCreateSpoofedLocation();
     }
     return [self lsp_location];
+}
+
++ (CLAuthorizationStatus)lsp_authorizationStatus {
+    return kCLAuthorizationStatusAuthorizedWhenInUse;
+}
+
++ (BOOL)lsp_locationServicesEnabled {
+    return YES;
 }
 
 @end
@@ -317,6 +327,14 @@ static void LSInstallMKUserLocationHooks(void) {
     }
 }
 
+static void LSInstallCLLocationManagerClassHook(Class managerClass, SEL originalSelector, SEL hookSelector) {
+    Method originalMethod = class_getClassMethod(managerClass, originalSelector);
+    Method hookMethod = class_getClassMethod(managerClass, hookSelector);
+    if (originalMethod && hookMethod) {
+        method_exchangeImplementations(originalMethod, hookMethod);
+    }
+}
+
 static void LSInstallCLLocationManagerHooks(void) {
     Class managerClass = NSClassFromString(@"CLLocationManager");
     if (!managerClass) {
@@ -338,6 +356,14 @@ static void LSInstallCLLocationManagerHooks(void) {
     if (class_getInstanceMethod(managerClass, @selector(location))) {
         LSExchangeInstanceMethods(managerClass, @selector(location), @selector(lsp_location));
     }
+
+    LSInstallCLLocationManagerClassHook(managerClass,
+                                        @selector(authorizationStatus),
+                                        @selector(lsp_authorizationStatus));
+
+    LSInstallCLLocationManagerClassHook(managerClass,
+                                        @selector(locationServicesEnabled),
+                                        @selector(lsp_locationServicesEnabled));
 }
 
 @implementation LocationSpoofer
