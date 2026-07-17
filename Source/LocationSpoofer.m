@@ -278,6 +278,21 @@ static void LSHookDidUpdateToLocation(id self, SEL _cmd, CLLocationManager *mana
 
 @end
 
+@interface MKUserLocation (LSHooks)
+- (CLLocation *)lsp_userLocation;
+@end
+
+@implementation MKUserLocation (LSHooks)
+
+- (CLLocation *)lsp_userLocation {
+    if (LSShouldSpoof()) {
+        return LSCreateSpoofedLocation();
+    }
+    return [self lsp_userLocation];
+}
+
+@end
+
 static void LSExchangeInstanceMethods(Class cls, SEL originalSelector, SEL swizzledSelector) {
     Method originalMethod = class_getInstanceMethod(cls, originalSelector);
     Method swizzledMethod = class_getInstanceMethod(cls, swizzledSelector);
@@ -285,6 +300,20 @@ static void LSExchangeInstanceMethods(Class cls, SEL originalSelector, SEL swizz
         return;
     }
     method_exchangeImplementations(originalMethod, swizzledMethod);
+}
+
+static void LSInstallMKUserLocationHooks(void) {
+    Class userLocationClass = NSClassFromString(@"MKUserLocation");
+    if (!userLocationClass) {
+        return;
+    }
+
+    Method locationMethod = class_getInstanceMethod(userLocationClass, @selector(location));
+    if (locationMethod) {
+        LSExchangeInstanceMethods(userLocationClass,
+                                  @selector(location),
+                                  @selector(lsp_userLocation));
+    }
 }
 
 static void LSInstallCLLocationManagerHooks(void) {
@@ -318,6 +347,7 @@ static void LSInstallCLLocationManagerHooks(void) {
         ls_log = os_log_create("com.locationspoofer.dylib", "hooks");
         LSInitializeDelegateHookSelectors();
         LSInstallCLLocationManagerHooks();
+        LSInstallMKUserLocationHooks();
     });
 }
 
