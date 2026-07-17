@@ -73,6 +73,9 @@ typedef NS_ENUM(NSInteger, LSRoutePlacementPhase) {
 @property (nonatomic, strong) UITextField *fluctuationRadiusField;
 @property (nonatomic, strong) NSLayoutConstraint *fluctuationRadiusHeightConstraint;
 @property (nonatomic, strong) NSLayoutConstraint *fluctuationRadiusTopConstraint;
+@property (nonatomic, strong) UIView *keepLastSpoofRow;
+@property (nonatomic, strong) UILabel *keepLastSpoofLabel;
+@property (nonatomic, strong) UISwitch *keepLastSpoofSwitch;
 @property (nonatomic, strong) UIStackView *fieldStack;
 @property (nonatomic, strong) UITextField *latitudeField;
 @property (nonatomic, strong) UITextField *longitudeField;
