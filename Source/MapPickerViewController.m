@@ -73,20 +73,15 @@ static const CGFloat kLSMapHeightMultiplier = 0.30;
     [super viewDidAppear:animated];
     LSSetHooksBypassed(YES);
     [self configureMapIfNeeded];
-    if ([PersistenceManager shared].showRealLocation) {
-        [self startRealLocationTracking];
-    }
 }
 
 - (void)viewWillDisappear:(BOOL)animated {
     [super viewWillDisappear:animated];
-    [self stopRealLocationTracking];
     [LSOverlayManager restoreMapPickerSessionState];
 }
 
 - (void)viewDidDisappear:(BOOL)animated {
     [super viewDidDisappear:animated];
-    [self stopRealLocationTracking];
     [LSOverlayManager restoreMapPickerSessionState];
 }
 
@@ -866,7 +861,8 @@ static const CGFloat kLSMapHeightMultiplier = 0.30;
     self.stopButtonHeightConstraint.constant = showStop ? 50.0 : 0.0;
     [self ls_updateMapControlsBottomConstraint];
 
-    self.mapView.showsUserLocation = ![[PersistenceManager shared] isSpoofingEnabled];
+    BOOL showReal = [[PersistenceManager shared] isSpoofingEnabled] && [PersistenceManager shared].showRealLocation;
+    self.mapView.showsUserLocation = ![[PersistenceManager shared] isSpoofingEnabled] || showReal;
 }
 
 #pragma mark - Keyboard
@@ -1107,67 +1103,8 @@ static const CGFloat kLSMapHeightMultiplier = 0.30;
 }
 
 - (void)handleShowRealLocationToggle {
-    BOOL enabled = self.showRealLocationSwitch.isOn;
-    [PersistenceManager shared].showRealLocation = enabled;
-    if (enabled) {
-        [self startRealLocationTracking];
-    } else {
-        [self stopRealLocationTracking];
-    }
-}
-
-- (void)startRealLocationTracking {
-    LSSetHooksBypassed(YES);
-    self.realLocationManager = [[CLLocationManager alloc] init];
-    self.realLocationManager.desiredAccuracy = kCLLocationAccuracyBest;
-    self.realLocationManager.delegate = (id<CLLocationManagerDelegate>)self;
-    [self.realLocationManager requestWhenInUseAuthorization];
-    [self.realLocationManager startUpdatingLocation];
-}
-
-- (void)stopRealLocationTracking {
-    [self.realLocationManager stopUpdatingLocation];
-    self.realLocationManager = nil;
-    if (self.realLocationAnnotation) {
-        [self.mapView removeAnnotation:self.realLocationAnnotation];
-        self.realLocationAnnotation = nil;
-    }
-}
-
-- (void)locationManager:(CLLocationManager *)manager didUpdateLocations:(NSArray<CLLocation *> *)locations {
-    CLLocation *location = locations.firstObject;
-    if (!location) {
-        return;
-    }
-
-    CLLocationCoordinate2D realCoord = location.coordinate;
-
-    if (!self.realLocationAnnotation) {
-        self.realLocationAnnotation = [[LSRealLocationAnnotation alloc] init];
-        self.realLocationAnnotation.title = @"Real location";
-        [self.mapView addAnnotation:self.realLocationAnnotation];
-    }
-    self.realLocationAnnotation.coordinate = realCoord;
-
-    [manager stopUpdatingLocation];
-}
-
-- (UIImage *)ls_blueDotImage {
-    CGFloat size = 24;
-    UIGraphicsBeginImageContextWithOptions(CGSizeMake(size, size), NO, 0);
-    CGContextRef ctx = UIGraphicsGetCurrentContext();
-
-    CGRect outerRect = CGRectMake(1, 1, size - 2, size - 2);
-    CGContextSetFillColorWithColor(ctx, UIColor.whiteColor.CGColor);
-    CGContextFillEllipseInRect(ctx, outerRect);
-
-    CGRect innerRect = CGRectMake(4, 4, size - 8, size - 8);
-    CGContextSetFillColorWithColor(ctx, UIColor.systemBlueColor.CGColor);
-    CGContextFillEllipseInRect(ctx, innerRect);
-
-    UIImage *image = UIGraphicsGetImageFromCurrentImageContext();
-    UIGraphicsEndImageContext();
-    return image;
+    [PersistenceManager shared].showRealLocation = self.showRealLocationSwitch.isOn;
+    [self refreshStatusPill];
 }
 
 - (void)updateHeadingLabel {
@@ -1564,20 +1501,6 @@ static const CGFloat kLSMapHeightMultiplier = 0.30;
     MKAnnotationView *routeView = [self ls_viewForRouteAnnotation:annotation];
     if (routeView) {
         return routeView;
-    }
-
-    if ([annotation isKindOfClass:[LSRealLocationAnnotation class]]) {
-        static NSString * const reuseIdentifier = @"LSRealLocation";
-        MKAnnotationView *view = [mapView dequeueReusableAnnotationViewWithIdentifier:reuseIdentifier];
-        if (!view) {
-            view = [[MKAnnotationView alloc] initWithAnnotation:annotation reuseIdentifier:reuseIdentifier];
-            view.image = [self ls_blueDotImage];
-            view.calloutOffset = CGPointMake(0, -8);
-            view.canShowCallout = YES;
-        } else {
-            view.annotation = annotation;
-        }
-        return view;
     }
 
     if (annotation != self.pinAnnotation) {
