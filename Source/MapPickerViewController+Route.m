@@ -1,576 +1,306 @@
 #import "MapPickerViewController+Private.h"
 #import "PersistenceManager.h"
-#import "RouteSimulator.h"
 
-@implementation LSStartAnnotation
-@end
-
-@implementation LSDestinationAnnotation
-@end
+static NSString *LSDistance(double meters) {
+    MKDistanceFormatter *formatter = [[MKDistanceFormatter alloc] init];
+    formatter.unitStyle = MKDistanceFormatterUnitStyleAbbreviated;
+    return [formatter stringFromDistance:MAX(0, meters)];
+}
+static NSString *LSDuration(double seconds) {
+    NSDateComponentsFormatter *formatter = [[NSDateComponentsFormatter alloc] init];
+    formatter.allowedUnits = NSCalendarUnitHour | NSCalendarUnitMinute;
+    formatter.unitsStyle = NSDateComponentsFormatterUnitsStyleAbbreviated;
+    return seconds < 60 ? @"under 1 min" : ([formatter stringFromTimeInterval:seconds] ?: @"—");
+}
 
 @implementation MapPickerViewController (LSRouteUI)
-
-- (void)buildRouteControls {
-    UIView *container = self.routeControlsContainer;
-
-    self.getRouteButton = [self ls_primaryButtonWithTitle:@"Get Route" action:@selector(handleGetRouteTapped)];
-    self.getRouteButton.hidden = YES;
-    [container addSubview:self.getRouteButton];
-
+- (void)buildRouteUI {
+    self.endpoint = LSEndpointFrom;
+    self.draftSpeedKmh = 5;
+    self.fromButton = LSButton(@"From", @"1.circle", NO);
+    self.toButton = LSButton(@"To", @"flag", NO);
+    [self.fromButton addTarget:self action:@selector(chooseEndpoint:) forControlEvents:UIControlEventTouchUpInside];
+    [self.toButton addTarget:self action:@selector(chooseEndpoint:) forControlEvents:UIControlEventTouchUpInside];
+    self.swapButton = LSButton(@"Swap endpoints", @"arrow.up.arrow.down", NO);
+    [self.swapButton addTarget:self action:@selector(swapEndpoints) forControlEvents:UIControlEventTouchUpInside];
+    self.endpointSegment = [[UISegmentedControl alloc] initWithItems:@[@"From", @"To"]];
+    self.endpointSegment.selectedSegmentIndex = 0;
+    self.endpointSegment.accessibilityLabel = @"Endpoint edited by map taps";
+    [self.endpointSegment.heightAnchor constraintGreaterThanOrEqualToConstant:44].active = YES;
+    [self.endpointSegment addTarget:self action:@selector(endpointChanged) forControlEvents:UIControlEventValueChanged];
+    UILabel *mapTarget = LSLabel(@"Map taps edit", UIFontTextStyleSubheadline);
+    UIStackView *endpointContent = LSStack(@[self.fromButton, self.toButton, self.swapButton, mapTarget, self.endpointSegment], 12);
+    self.routeEndpointsPanel = LSInsetPanel(endpointContent);
+    self.profileSegment = [[UISegmentedControl alloc] initWithItems:@[@"Walking path", @"Driving path"]];
+    self.profileSegment.selectedSegmentIndex = 0;
+    self.profileSegment.accessibilityLabel = @"Route geometry";
+    [self.profileSegment.heightAnchor constraintGreaterThanOrEqualToConstant:44].active = YES;
+    [self.profileSegment addTarget:self action:@selector(profileChanged) forControlEvents:UIControlEventValueChanged];
+    self.speedButton = LSButton(@"Speed: 5 km/h", @"speedometer", NO);
+    [self.speedButton addTarget:self action:@selector(chooseSpeed) forControlEvents:UIControlEventTouchUpInside];
+    self.buildRouteButton = LSButton(@"Build route", @"point.topleft.down.to.point.bottomright.curvepath", NO);
+    [self.buildRouteButton addTarget:self action:@selector(fetchRoute) forControlEvents:UIControlEventTouchUpInside];
     self.routeSpinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
-    self.routeSpinner.translatesAutoresizingMaskIntoConstraints = NO;
     self.routeSpinner.hidesWhenStopped = YES;
-    [container addSubview:self.routeSpinner];
-
-    self.transportModeSegment = [[UISegmentedControl alloc] initWithItems:@[@"Walk", @"Cycle", @"Drive", @"Custom"]];
-    self.transportModeSegment.translatesAutoresizingMaskIntoConstraints = NO;
-    self.transportModeSegment.selectedSegmentIndex = 0;
-    self.transportModeSegment.hidden = YES;
-    [self.transportModeSegment addTarget:self action:@selector(handleTransportModeChanged:) forControlEvents:UIControlEventValueChanged];
-    [container addSubview:self.transportModeSegment];
-
-    self.customSpeedField = [[UITextField alloc] init];
-    self.customSpeedField.translatesAutoresizingMaskIntoConstraints = NO;
-    self.customSpeedField.placeholder = @"Custom km/h";
-    self.customSpeedField.keyboardType = UIKeyboardTypeDecimalPad;
-    self.customSpeedField.borderStyle = UITextBorderStyleRoundedRect;
-    self.customSpeedField.text = @"30";
-    self.customSpeedField.hidden = YES;
-    [self.customSpeedField addTarget:self action:@selector(textFieldDidChange:) forControlEvents:UIControlEventEditingChanged];
-    [container addSubview:self.customSpeedField];
-
-    self.playRouteButton = [self ls_primaryButtonWithTitle:@"Play" action:@selector(handlePlayRouteTapped)];
-    self.playRouteButton.hidden = YES;
-    [container addSubview:self.playRouteButton];
-
-    self.pauseRouteButton = [self ls_secondaryButtonWithTitle:@"Pause" action:@selector(handlePauseRouteTapped)];
-    self.pauseRouteButton.hidden = YES;
-
-    self.stopRouteButton = [self ls_secondaryButtonWithTitle:@"Stop" action:@selector(handleStopRouteTapped)];
-    self.stopRouteButton.hidden = YES;
-
-    self.routeActionRow = [[UIStackView alloc] initWithArrangedSubviews:@[self.pauseRouteButton, self.stopRouteButton]];
-    self.routeActionRow.translatesAutoresizingMaskIntoConstraints = NO;
-    self.routeActionRow.axis = UILayoutConstraintAxisHorizontal;
-    self.routeActionRow.spacing = 12.0;
-    self.routeActionRow.distribution = UIStackViewDistributionFillEqually;
-    self.routeActionRow.hidden = YES;
-    [container addSubview:self.routeActionRow];
-
-    [NSLayoutConstraint activateConstraints:@[
-        [self.getRouteButton.heightAnchor constraintEqualToConstant:44.0],
-        [self.playRouteButton.heightAnchor constraintEqualToConstant:44.0],
-        [self.pauseRouteButton.heightAnchor constraintEqualToConstant:44.0],
-        [self.stopRouteButton.heightAnchor constraintEqualToConstant:44.0]
-    ]];
-
-    self.customSpeedHeightConstraint = [self.customSpeedField.heightAnchor constraintEqualToConstant:0.0];
-    self.customSpeedHeightConstraint.active = YES;
+    self.routeFeedback = LSLabel(@"Choose both endpoints to build a route.", UIFontTextStyleSubheadline);
+    self.routeFeedback.textColor = UIColor.secondaryLabelColor;
+    self.routeSummary = LSLabel(@"", UIFontTextStyleHeadline);
+    self.progressView = [[UIProgressView alloc] initWithProgressViewStyle:UIProgressViewStyleDefault];
+    self.progressView.progressTintColor = LSRouteColor();
+    self.progressView.accessibilityLabel = @"Applied route progress";
+    self.progressLabel = LSLabel(@"", UIFontTextStyleSubheadline);
+    UILabel *explanation = LSLabel(@"Path type controls directions. Playback speed controls movement; cycling presets use the selected walking or driving path.", UIFontTextStyleFootnote);
+    explanation.textColor = UIColor.secondaryLabelColor;
+    UIStackView *content = LSStack(@[LSLabel(@"Route & speed", UIFontTextStyleHeadline), self.profileSegment,
+        self.speedButton, explanation, self.buildRouteButton, self.routeSpinner, self.routeFeedback,
+        self.routeSummary, self.progressView, self.progressLabel], 12);
+    self.routeDetailsPanel = LSInsetPanel(content);
 }
-
-- (void)ls_installRouteConstraintsInRoutePanel {
-    UIView *content = self.routeControlsContainer;
-    [NSLayoutConstraint activateConstraints:@[
-        [self.getRouteButton.topAnchor constraintEqualToAnchor:content.topAnchor],
-        [self.getRouteButton.leadingAnchor constraintEqualToAnchor:content.leadingAnchor],
-        [self.getRouteButton.trailingAnchor constraintEqualToAnchor:content.trailingAnchor],
-
-        [self.routeSpinner.centerXAnchor constraintEqualToAnchor:self.getRouteButton.centerXAnchor],
-        [self.routeSpinner.centerYAnchor constraintEqualToAnchor:self.getRouteButton.centerYAnchor],
-
-        [self.transportModeSegment.topAnchor constraintEqualToAnchor:self.getRouteButton.bottomAnchor constant:10.0],
-        [self.transportModeSegment.leadingAnchor constraintEqualToAnchor:content.leadingAnchor],
-        [self.transportModeSegment.trailingAnchor constraintEqualToAnchor:content.trailingAnchor],
-
-        [self.customSpeedField.topAnchor constraintEqualToAnchor:self.transportModeSegment.bottomAnchor constant:8.0],
-        [self.customSpeedField.leadingAnchor constraintEqualToAnchor:content.leadingAnchor],
-        [self.customSpeedField.trailingAnchor constraintEqualToAnchor:content.trailingAnchor],
-
-        [self.playRouteButton.topAnchor constraintEqualToAnchor:self.customSpeedField.bottomAnchor constant:10.0],
-        [self.playRouteButton.leadingAnchor constraintEqualToAnchor:content.leadingAnchor],
-        [self.playRouteButton.trailingAnchor constraintEqualToAnchor:content.trailingAnchor],
-
-        [self.routeActionRow.topAnchor constraintEqualToAnchor:self.playRouteButton.topAnchor],
-        [self.routeActionRow.leadingAnchor constraintEqualToAnchor:content.leadingAnchor],
-        [self.routeActionRow.trailingAnchor constraintEqualToAnchor:content.trailingAnchor]
-    ]];
-}
-
-- (void)updateCoordinateModeVisibility {
-    BOOL routeMode = self.coordinateMode == LSMapPickerCoordinateModeRoute;
-    BOOL staticMode = !routeMode;
-
-    self.getRouteButton.hidden = !routeMode;
-    BOOL hasRoute = self.fetchedRoute != nil;
-    self.transportModeSegment.hidden = !routeMode || !hasRoute;
-    self.playRouteButton.hidden = !routeMode || !hasRoute;
-    self.routeActionRow.hidden = YES;
-
-    if (routeMode) {
-        if (self.pinAnnotation) {
-            [self.mapView removeAnnotation:self.pinAnnotation];
-        }
-        if (!self.startAnnotation) {
-            self.routePlacementPhase = LSRoutePlacementPhaseStart;
-            self.mapHintLabel.text = @"  Tap map for route start  ";
-        }
-    } else {
-        if (![[LSRouteSimulator shared] isSimulating]) {
-            [self ls_clearRouteAnnotationsAndOverlay];
-            self.mapHintLabel.text = @"  Tap map or drag pin  ";
-        }
-        if (self.pinAnnotation && self.mapConfigured) {
-            [self.mapView addAnnotation:self.pinAnnotation];
-        }
-    }
-
-    [UIView animateWithDuration:0.2 animations:^{
-        self.staticControlsContainer.alpha = staticMode ? 1.0 : 0.0;
-        self.routeControlsContainer.alpha = routeMode ? 1.0 : 0.0;
-    } completion:^(BOOL finished) {
-        (void)finished;
-        self.staticControlsContainer.hidden = !staticMode;
-        self.routeControlsContainer.hidden = !routeMode;
-    }];
-    self.staticControlsContainer.hidden = NO;
-    self.routeControlsContainer.hidden = NO;
-    [self refreshStatusPill];
-
-    [self ls_updateCustomSpeedVisibility];
-    [self ls_updateRoutePlaybackButtons];
-    [self ls_updateMapControlsBottomConstraint];
-}
-
-- (void)ls_updateMapControlsBottomConstraint {
-    self.mapControlsBottomStaticConstraint.active = NO;
-    self.mapControlsBottomStaticNoStopConstraint.active = NO;
-    self.mapControlsBottomRouteConstraint.active = NO;
-    self.mapControlsBottomRouteEarlyConstraint.active = NO;
-
-    BOOL routeMode = self.coordinateMode == LSMapPickerCoordinateModeRoute;
-    if (!routeMode) {
-        if (self.stopButton.hidden) {
-            self.mapControlsBottomStaticNoStopConstraint.active = YES;
-        } else {
-            self.mapControlsBottomStaticConstraint.active = YES;
-        }
-        return;
-    }
-
-    if (self.fetchedRoute != nil || [[LSRouteSimulator shared] isSimulating]) {
-        self.mapControlsBottomRouteConstraint.active = YES;
-    } else {
-        self.mapControlsBottomRouteEarlyConstraint.active = YES;
-    }
-}
-
-- (void)ls_clearRouteAnnotationsAndOverlay {
-    if (self.startAnnotation) {
-        [self.mapView removeAnnotation:self.startAnnotation];
-        self.startAnnotation = nil;
-    }
-    if (self.destinationAnnotation) {
-        [self.mapView removeAnnotation:self.destinationAnnotation];
-        self.destinationAnnotation = nil;
-    }
-    if (self.routePolyline) {
-        [self.mapView removeOverlay:self.routePolyline];
-        self.routePolyline = nil;
-    }
-    self.fetchedRoute = nil;
-}
-
-- (void)ls_handleRouteMapTap:(CLLocationCoordinate2D)coordinate {
-    if (self.routePlacementPhase == LSRoutePlacementPhaseStart || !self.startAnnotation) {
-        if (!self.startAnnotation) {
-            self.startAnnotation = [[LSStartAnnotation alloc] init];
-            self.startAnnotation.title = @"Start";
-            [self.mapView addAnnotation:self.startAnnotation];
-        }
-        self.startAnnotation.coordinate = coordinate;
-        self.routePlacementPhase = LSRoutePlacementPhaseDestination;
-        self.mapHintLabel.text = @"  Tap map for destination  ";
-    } else {
-        if (!self.destinationAnnotation) {
-            self.destinationAnnotation = [[LSDestinationAnnotation alloc] init];
-            self.destinationAnnotation.title = @"Destination";
-            [self.mapView addAnnotation:self.destinationAnnotation];
-        }
-        self.destinationAnnotation.coordinate = coordinate;
-        self.routePlacementPhase = LSRoutePlacementPhaseStart;
-        self.mapHintLabel.text = @"  Tap map to move start  ";
-    }
-
-    self.fetchedRoute = nil;
-    if (self.routePolyline) {
-        [self.mapView removeOverlay:self.routePolyline];
-        self.routePolyline = nil;
-    }
-    self.getRouteButton.hidden = NO;
-    [self updateCoordinateModeVisibility];
-}
-
-- (MKDirectionsTransportType)ls_directionsTransportType {
-    switch (self.transportModeSegment.selectedSegmentIndex) {
-        case 1:
-        case 0:
-            return MKDirectionsTransportTypeWalking;
-        case 2:
-        case 3:
-            return MKDirectionsTransportTypeAutomobile;
-        default:
-            return MKDirectionsTransportTypeAutomobile;
-    }
-}
-
-- (LSTransportMode)ls_selectedTransportMode {
-    switch (self.transportModeSegment.selectedSegmentIndex) {
-        case 0:
-            return LSTransportModeWalking;
-        case 1:
-            return LSTransportModeCycling;
-        case 2:
-            return LSTransportModeDriving;
-        default:
-            return LSTransportModeCustom;
-    }
-}
-
-- (void)handleGetRouteTapped {
-    if (!self.startAnnotation || !self.destinationAnnotation) {
-        [self playRouteFailureHaptic];
-        return;
-    }
-
-    self.getRouteButton.hidden = YES;
-    [self.routeSpinner startAnimating];
-
-    MKDirectionsRequest *request = [[MKDirectionsRequest alloc] init];
-    request.source = [[MKMapItem alloc] initWithPlacemark:[[MKPlacemark alloc] initWithCoordinate:self.startAnnotation.coordinate]];
-    request.destination = [[MKMapItem alloc] initWithPlacemark:[[MKPlacemark alloc] initWithCoordinate:self.destinationAnnotation.coordinate]];
-    request.transportType = [self ls_directionsTransportType];
-
-    MKDirections *directions = [[MKDirections alloc] initWithRequest:request];
-    __weak typeof(self) weakSelf = self;
-    [directions calculateDirectionsWithCompletionHandler:^(MKDirectionsResponse * _Nullable response, NSError * _Nullable error) {
-        typeof(self) strongSelf = weakSelf;
-        if (!strongSelf) return;
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [strongSelf.routeSpinner stopAnimating];
-
-            if (error || response.routes.count == 0) {
-                [strongSelf playRouteFailureHaptic];
-                strongSelf.getRouteButton.hidden = NO;
-                strongSelf.statusLabel.text = @"Route fetch failed";
-                __weak typeof(strongSelf) innerWeakSelf = strongSelf;
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                    [innerWeakSelf refreshStatusPill];
-                });
-                return;
-            }
-
-            [strongSelf playRouteSuccessHaptic];
-            strongSelf.fetchedRoute = response.routes.firstObject;
-            if (strongSelf.routePolyline) {
-                [strongSelf.mapView removeOverlay:strongSelf.routePolyline];
-            }
-            strongSelf.routePolyline = strongSelf.fetchedRoute.polyline;
-            [strongSelf.mapView addOverlay:strongSelf.routePolyline];
-            [strongSelf.mapView setVisibleMapRect:strongSelf.routePolyline.boundingMapRect edgePadding:UIEdgeInsetsMake(48, 48, 48, 48) animated:YES];
-            [strongSelf updateCoordinateModeVisibility];
-        });
-    }];
-}
-
-- (void)handleTransportModeChanged:(UISegmentedControl *)sender {
-    (void)sender;
-    [self ls_updateCustomSpeedVisibility];
-    LSRouteSimulator *simulator = [LSRouteSimulator shared];
-    if (simulator.isSimulating) {
-        simulator.transportMode = [self ls_selectedTransportMode];
-        if (simulator.transportMode == LSTransportModeCustom) {
-            NSNumber *parsed = [self ls_parsedCoordinateComponentFromText:self.customSpeedField.text];
-            simulator.customSpeedKmh = parsed ? parsed.doubleValue : 30.0;
-        }
-    }
-}
-
-- (void)ls_updateCustomSpeedVisibility {
-    self.customSpeedField.hidden = self.transportModeSegment.hidden || self.transportModeSegment.selectedSegmentIndex != 3;
-    self.customSpeedHeightConstraint.constant = self.customSpeedField.hidden ? 0.0 : 40.0;
-}
-
-- (void)handlePlayRouteTapped {
-    if (!self.fetchedRoute) {
-        return;
-    }
-
-    LSRouteSimulator *simulator = [LSRouteSimulator shared];
-    simulator.delegate = self;
-    simulator.transportMode = [self ls_selectedTransportMode];
-    if (simulator.transportMode == LSTransportModeCustom) {
-        NSNumber *parsed = [self ls_parsedCoordinateComponentFromText:self.customSpeedField.text];
-        simulator.customSpeedKmh = MAX(parsed ? parsed.doubleValue : 30.0, 1.0);
-    }
-
-    CLLocationCoordinate2D start = self.startAnnotation.coordinate;
-    if (!CLLocationCoordinate2DIsValid(start) ||
-        ![[PersistenceManager shared] setSpoofCoordinate:start enabled:YES]) {
-        [self playRouteFailureHaptic];
-        self.statusLabel.text = @"Invalid route start";
-        __weak typeof(self) weakSelf = self;
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            [weakSelf refreshStatusPill];
-        });
-        return;
-    }
-    [PersistenceManager shared].simulationWasActive = YES;
-
-    [simulator startWithRoute:self.fetchedRoute];
-    [self ls_updateRoutePlaybackButtons];
-    [self refreshStatusPill];
-}
-
-- (void)handlePauseRouteTapped {
-    LSRouteSimulator *simulator = [LSRouteSimulator shared];
-    if (simulator.isPaused) {
-        [simulator resume];
-        [self.pauseRouteButton setTitle:@"Pause" forState:UIControlStateNormal];
-    } else {
-        [simulator pause];
-        [self.pauseRouteButton setTitle:@"Resume" forState:UIControlStateNormal];
-        CLLocationCoordinate2D coord = simulator.currentCoordinate;
-        if (CLLocationCoordinate2DIsValid(coord)) {
-            [[PersistenceManager shared] setSpoofCoordinate:coord enabled:YES];
-        }
-    }
-}
-
-- (void)handleStopRouteTapped {
-    LSRouteSimulator *simulator = [LSRouteSimulator shared];
-    CLLocationCoordinate2D coord = simulator.currentCoordinate;
-    if (CLLocationCoordinate2DIsValid(coord)) {
-        [[PersistenceManager shared] setSpoofCoordinate:coord enabled:YES];
-    }
-    [simulator stop];
-    [PersistenceManager shared].simulationWasActive = NO;
-    [self playSimulationStopHaptic];
-    [self ls_updateRoutePlaybackButtons];
-    [self refreshStatusPill];
-}
-
-- (void)ls_updateRoutePlaybackButtons {
-    LSRouteSimulator *simulator = [LSRouteSimulator shared];
-    if (!simulator.isSimulating) {
-        [self.playRouteButton setTitle:@"Play" forState:UIControlStateNormal];
-        self.playRouteButton.hidden = self.fetchedRoute == nil || self.coordinateMode != LSMapPickerCoordinateModeRoute;
-        self.routeActionRow.hidden = YES;
-        return;
-    }
-
-    self.playRouteButton.hidden = YES;
-    self.routeActionRow.hidden = NO;
-    self.pauseRouteButton.hidden = NO;
-    self.stopRouteButton.hidden = NO;
-    self.getRouteButton.hidden = YES;
-    [self.pauseRouteButton setTitle:simulator.isPaused ? @"Resume" : @"Pause" forState:UIControlStateNormal];
-}
-
-- (void)restoreSimulationUIIfNeeded {
-    LSRouteSimulator *simulator = [LSRouteSimulator shared];
-    if (simulator.isSimulating) {
-        [self restoreRouteUIFromSimulator];
-        return;
-    }
-
-    if (![PersistenceManager shared].simulationWasActive) {
-        return;
-    }
-
-    [PersistenceManager shared].simulationWasActive = NO;
-    self.statusLabel.text = @"Previous route session expired";
-    __weak typeof(self) weakSelf = self;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        [weakSelf refreshStatusPill];
-    });
-}
-
-- (void)restoreRouteUIFromSimulator {
-    LSRouteSimulator *simulator = [LSRouteSimulator shared];
-    NSArray<LSRoutePoint *> *points = simulator.routePoints;
-    if (points.count < 2) return;
-
-    self.startAnnotation = [[LSStartAnnotation alloc] init];
-    self.startAnnotation.title = @"Start";
-    self.startAnnotation.coordinate = simulator.startCoordinate;
-    [self.mapView addAnnotation:self.startAnnotation];
-
-    self.destinationAnnotation = [[LSDestinationAnnotation alloc] init];
-    self.destinationAnnotation.title = @"Destination";
-    self.destinationAnnotation.coordinate = simulator.destinationCoordinate;
-    [self.mapView addAnnotation:self.destinationAnnotation];
-
-    NSUInteger count = points.count;
-    CLLocationCoordinate2D *coords = malloc(sizeof(CLLocationCoordinate2D) * count);
-    for (NSUInteger i = 0; i < count; i++) {
-        coords[i] = points[i].coordinate;
-    }
-    self.routePolyline = [MKPolyline polylineWithCoordinates:coords count:count];
-    free(coords);
+- (void)restoreRoute {
+    LSSessionController *session = LSSessionController.shared;
+    if (!session.retainedRoute) return;
+    LSRouteSimulator *engine = LSRouteSimulator.shared;
+    self.fetchedRoute = session.retainedRoute;
+    self.routePolyline = session.retainedRoute.polyline;
+    self.startPin = [[LSStartAnnotation alloc] init];
+    self.startPin.coordinate = engine.startCoordinate;
+    self.startPin.title = @"From";
+    self.startPin.subtitle = @"Route start";
+    self.endPin = [[LSDestinationAnnotation alloc] init];
+    self.endPin.coordinate = engine.destinationCoordinate;
+    self.endPin.title = @"To";
+    self.endPin.subtitle = @"Route destination";
+    self.draftSpeedKmh = [LSRouteSimulator speedMetersPerSecondForMode:engine.transportMode customSpeedKmh:engine.customSpeedKmh] * 3.6;
+    self.profileSegment.selectedSegmentIndex = session.retainedRoute.transportType == MKDirectionsTransportTypeAutomobile ? 1 : 0;
+    self.tab = LSPickerTabRoute;
+    self.tabs.selectedSegmentIndex = self.tab;
+    [self.mapView addAnnotations:@[self.startPin, self.endPin]];
     [self.mapView addOverlay:self.routePolyline];
-
-    [self.mapView setVisibleMapRect:self.routePolyline.boundingMapRect
-                        edgePadding:UIEdgeInsetsMake(48.0, 48.0, 48.0, 48.0)
-                           animated:NO];
-
-    if (self.pinAnnotation) {
-        [self.mapView removeAnnotation:self.pinAnnotation];
-    }
-
-    self.coordinateMode = LSMapPickerCoordinateModeRoute;
-    self.coordinateModeSegment.selectedSegmentIndex = LSMapPickerCoordinateModeRoute;
-    self.mapHintLabel.text = @"";
-
-    self.staticControlsContainer.alpha = 0.0;
-    self.staticControlsContainer.hidden = YES;
-    self.routeControlsContainer.alpha = 1.0;
-    self.routeControlsContainer.hidden = NO;
-
-    self.selectedCoordinate = simulator.currentCoordinate;
-    [self syncFieldsFromCoordinate];
-
-    self.getRouteButton.hidden = YES;
-    switch (simulator.transportMode) {
-        case LSTransportModeWalking: self.transportModeSegment.selectedSegmentIndex = 0; break;
-        case LSTransportModeCycling: self.transportModeSegment.selectedSegmentIndex = 1; break;
-        case LSTransportModeDriving: self.transportModeSegment.selectedSegmentIndex = 2; break;
-        case LSTransportModeCustom: self.transportModeSegment.selectedSegmentIndex = 3; break;
-    }
-    self.transportModeSegment.hidden = NO;
-    [self ls_updateCustomSpeedVisibility];
-    [self ls_updateRoutePlaybackButtons];
-    [self ls_updateMapControlsBottomConstraint];
-    [self refreshStatusPill];
+    [self.mapView setVisibleMapRect:self.routePolyline.boundingMapRect edgePadding:UIEdgeInsetsMake(44, 32, 44, 60) animated:NO];
+    self.routeFeedback.text = engine.isSimulating ? @"The applied route continues when you close the picker." : @"Route retained. Start it again when you’re ready.";
+    [self updateRouteUI];
 }
-
-#pragma mark - LSRouteSimulatorDelegate
-
-- (void)routeSimulator:(LSRouteSimulator *)simulator didUpdateCoordinate:(CLLocationCoordinate2D)coordinate heading:(CLLocationDirection)heading {
-    (void)heading;
-    double kmh = [LSRouteSimulator speedMetersPerSecondForMode:simulator.transportMode customSpeedKmh:simulator.customSpeedKmh] * 3.6;
-    self.statusLabel.text = [NSString stringWithFormat:@"Simulating · %.1f km/h", kmh];
-    self.statusDot.backgroundColor = UIColor.systemGreenColor;
-
-    self.selectedCoordinate = coordinate;
-    self.startAnnotation.coordinate = coordinate;
-    self.pinAnnotation.coordinate = coordinate;
-    self.suppressFieldSync = YES;
-    self.latitudeField.text = [NSString stringWithFormat:@"%.6f", coordinate.latitude];
-    self.longitudeField.text = [NSString stringWithFormat:@"%.6f", coordinate.longitude];
-    self.suppressFieldSync = NO;
-    [self updateCoordinateLabel];
+- (void)chooseEndpoint:(UIButton *)sender {
+    LSEndpoint endpoint = sender == self.fromButton ? LSEndpointFrom : LSEndpointTo;
+    self.endpoint = endpoint;
+    self.endpointSegment.selectedSegmentIndex = endpoint;
+    MKPointAnnotation *pin = endpoint == LSEndpointFrom ? self.startPin : self.endPin;
+    __weak typeof(self) weakSelf = self;
+    [self openPlaceChooser:endpoint == LSEndpointFrom ? @"Choose From" : @"Choose To" coordinate:pin ? pin.coordinate : kCLLocationCoordinate2DInvalid completion:^(CLLocationCoordinate2D coordinate, NSString *name) {
+        typeof(self) self = weakSelf;
+        if (!self) return;
+        [self assignEndpoint:endpoint coordinate:coordinate name:name];
+        [self.mapView setRegion:MKCoordinateRegionMakeWithDistance(coordinate, 2000, 2000) animated:LSMapAnimationsEnabled()];
+    }];
+    [self endpointChanged];
 }
-
-- (void)routeSimulatorDidFinish:(LSRouteSimulator *)simulator {
-    (void)simulator;
-    [PersistenceManager shared].simulationWasActive = NO;
-
-    CLLocationCoordinate2D finalCoord = kCLLocationCoordinate2DInvalid;
-    if (self.routePolyline && self.routePolyline.pointCount > 0) {
-        [self.routePolyline getCoordinates:&finalCoord
-                                     range:NSMakeRange(self.routePolyline.pointCount - 1, 1)];
+- (void)endpointChanged {
+    self.endpoint = self.endpointSegment.selectedSegmentIndex;
+    self.mapHintLabel.text = self.endpoint == LSEndpointFrom ? @"Tap the map to set From, or tap From to search." : @"Tap the map to set To, or tap To to search.";
+}
+- (void)assignEndpoint:(LSEndpoint)endpoint coordinate:(CLLocationCoordinate2D)coordinate name:(NSString *)name {
+    if (!CLLocationCoordinate2DIsValid(coordinate)) return;
+    [self invalidateRouteDraft];
+    self.selectionRevision++;
+    if (endpoint == LSEndpointFrom) {
+        if (!self.startPin) self.startPin = [[LSStartAnnotation alloc] init];
+        self.startPin.coordinate = coordinate;
+        self.startPin.title = @"From";
+        self.startPin.subtitle = name;
+        if (![self.mapView.annotations containsObject:self.startPin]) [self.mapView addAnnotation:self.startPin];
+    } else {
+        if (!self.endPin) self.endPin = [[LSDestinationAnnotation alloc] init];
+        self.endPin.coordinate = coordinate;
+        self.endPin.title = @"To";
+        self.endPin.subtitle = name;
+        if (![self.mapView.annotations containsObject:self.endPin]) [self.mapView addAnnotation:self.endPin];
     }
-    if (CLLocationCoordinate2DIsValid(finalCoord)) {
-        PersistenceManager *store = [PersistenceManager shared];
-        if ([store setSpoofCoordinate:finalCoord enabled:YES]) {
-            self.selectedCoordinate = finalCoord;
-            [self syncFieldsFromCoordinate];
+    [self updateRouteUI];
+}
+- (void)swapEndpoints {
+    if (!self.startPin || !self.endPin) return;
+    CLLocationCoordinate2D from = self.startPin.coordinate, to = self.endPin.coordinate;
+    NSString *fromName = self.startPin.subtitle ?: @"Map point", *toName = self.endPin.subtitle ?: @"Map point";
+    [self assignEndpoint:LSEndpointFrom coordinate:to name:toName];
+    [self assignEndpoint:LSEndpointTo coordinate:from name:fromName];
+}
+- (void)cancelDirections {
+    if (self.directions) self.routeFeedback.text = @"Route lookup canceled. Tap Build route to try again.";
+    self.routeRevision++;
+    [self.directions cancel];
+    self.directions = nil;
+    [self.routeSpinner stopAnimating];
+    self.buildRouteButton.enabled = self.startPin && self.endPin;
+    [self updateFooter];
+}
+- (void)invalidateRouteDraft {
+    [self cancelDirections];
+    if (self.routePolyline) [self.mapView removeOverlay:self.routePolyline];
+    self.routePolyline = nil;
+    self.fetchedRoute = nil;
+    self.routeDraftChanged = YES;
+    self.routeFeedback.textColor = UIColor.secondaryLabelColor;
+    self.routeFeedback.text = LSSessionController.shared.snapshot.mode != LSSessionModeOff
+        ? @"Editing a new route. The applied session continues until you replace it."
+        : @"Choose both endpoints, then build the route.";
+}
+- (void)profileChanged {
+    BOOL shouldRefetch = self.fetchedRoute != nil || self.directions != nil;
+    [self invalidateRouteDraft];
+    [self updateRouteUI];
+    if (shouldRefetch && self.startPin && self.endPin) [self fetchRoute];
+}
+- (void)fetchRoute {
+    if (!self.startPin || !self.endPin || self.closed) return;
+    [self cancelDirections];
+    self.routeFeedback.textColor = UIColor.secondaryLabelColor;
+    self.routeFeedback.text = @"Building route… You can keep using the current session.";
+    MKDirectionsRequest *request = [[MKDirectionsRequest alloc] init];
+    request.source = [[MKMapItem alloc] initWithPlacemark:[[MKPlacemark alloc] initWithCoordinate:self.startPin.coordinate]];
+    request.destination = [[MKMapItem alloc] initWithPlacemark:[[MKPlacemark alloc] initWithCoordinate:self.endPin.coordinate]];
+    request.transportType = self.profileSegment.selectedSegmentIndex == 1 ? MKDirectionsTransportTypeAutomobile : MKDirectionsTransportTypeWalking;
+    request.requestsAlternateRoutes = NO;
+    self.directions = [self directionsForRequest:request];
+    NSUInteger revision = self.routeRevision;
+    [self.routeSpinner startAnimating];
+    [self updateRouteUI];
+    __weak typeof(self) weakSelf = self;
+    [self.directions calculateDirectionsWithCompletionHandler:^(MKDirectionsResponse *response, NSError *error) {
+        typeof(self) self = weakSelf;
+        if (!self || self.closed || revision != self.routeRevision || self.tab != LSPickerTabRoute) return;
+        self.directions = nil;
+        [self.routeSpinner stopAnimating];
+        MKRoute *route = response.routes.firstObject;
+        if (error || !route || route.polyline.pointCount < 2 || !isfinite(route.distance) || route.distance <= 0) {
+            self.routeFeedback.textColor = LSErrorColor();
+            self.routeFeedback.text = @"No route found. Check the endpoints or path type, then try Build route again.";
+            LSAnnounce(self.routeFeedback.text);
+            [self updateRouteUI];
+            return;
+        }
+        if (self.routePolyline) [self.mapView removeOverlay:self.routePolyline];
+        self.fetchedRoute = route;
+        self.routePolyline = route.polyline;
+        [self.mapView addOverlay:self.routePolyline];
+        [self.mapView setVisibleMapRect:self.routePolyline.boundingMapRect edgePadding:UIEdgeInsetsMake(44, 32, 44, 60) animated:LSMapAnimationsEnabled()];
+        self.routeFeedback.text = @"Route preview ready. Start or replace the route when you’re ready.";
+        [self updateRouteUI];
+        LSAnnounce(@"Route ready");
+    }];
+}
+- (MKDirections *)directionsForRequest:(MKDirectionsRequest *)request {
+    return [[MKDirections alloc] initWithRequest:request];
+}
+- (void)updateRouteUI {
+    for (UIButton *button in @[self.fromButton, self.toButton]) {
+        MKPointAnnotation *pin = button == self.fromButton ? self.startPin : self.endPin;
+        NSString *name = button == self.fromButton ? @"From" : @"To";
+        UIButtonConfiguration *config = button.configuration;
+        config.title = name;
+        config.subtitle = pin ? (pin.subtitle ?: LSCoordinateText(pin.coordinate)) : @"Search or enter coordinates";
+        config.titleAlignment = UIButtonConfigurationTitleAlignmentLeading;
+        button.configuration = config;
+        button.accessibilityLabel = [NSString stringWithFormat:@"%@: %@", name, config.subtitle];
+        button.accessibilityHint = @"Choose a place or enter coordinates for this endpoint.";
+    }
+    self.swapButton.enabled = self.startPin && self.endPin;
+    self.buildRouteButton.enabled = self.startPin && self.endPin && !self.directions;
+    UIButtonConfiguration *speed = self.speedButton.configuration;
+    speed.title = [NSString stringWithFormat:@"Playback speed: %@ km/h", LSFormatDecimal(self.draftSpeedKmh, 1)];
+    self.speedButton.configuration = speed;
+    self.speedButton.accessibilityLabel = speed.title;
+    self.routeSummary.hidden = !self.fetchedRoute;
+    self.routeSummary.text = self.fetchedRoute ? [NSString stringWithFormat:@"Preview: %@ • %@ at %@ km/h", LSDistance(self.fetchedRoute.distance), LSDuration(self.fetchedRoute.distance / (self.draftSpeedKmh / 3.6)), LSFormatDecimal(self.draftSpeedKmh, 1)] : @"";
+    [self updatePlayback];
+    [self updateFooter];
+}
+- (void)startDraftRoute {
+    MKRoute *route = self.fetchedRoute;
+    if (!route || self.directions) return;
+    double speed = self.draftSpeedKmh;
+    __weak typeof(self) weakSelf = self;
+    dispatch_block_t start = ^{
+        typeof(self) self = weakSelf;
+        if (!self || self.closed) return;
+        if ([LSSessionController.shared startRoute:route transportMode:LSTransportModeCustom customSpeedKmh:speed]) {
+            self.routeDraftChanged = NO;
+            self.routeFeedback.text = @"Route started. Close the picker to return to your app. Backgrounding pauses movement.";
+            self.routeFeedback.textColor = UIColor.secondaryLabelColor;
+            [self refreshSession];
         } else {
-            [self playRouteFailureHaptic];
-            self.statusLabel.text = @"Route complete (spoof rejected)";
+            self.routeFeedback.text = @"This route could not be started. Rebuild it and try again.";
+            self.routeFeedback.textColor = LSErrorColor();
         }
+        LSAnnounce(self.routeFeedback.text);
+    };
+    if (LSSessionController.shared.snapshot.mode == LSSessionModeOff ||
+        (LSSessionController.shared.snapshot.mode == LSSessionModeStatic && route == LSSessionController.shared.retainedRoute && !self.routeDraftChanged)) start();
+    else [self confirmAction:@"Replace applied session?" message:@"The app will start at From and follow this route. The currently applied location or route will be replaced." button:@"Replace and start" action:start];
+}
+- (void)chooseSpeed {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Playback speed" message:@"Speed changes movement only. The walking or driving path stays the same." preferredStyle:UIAlertControllerStyleActionSheet];
+    NSArray *names = @[@"Walking · 5 km/h", @"Cycling · 15 km/h", @"Driving · 50 km/h"];
+    NSArray *speeds = @[@5, @15, @50];
+    __weak typeof(self) weakSelf = self;
+    for (NSUInteger i = 0; i < names.count; i++) {
+        double speed = [speeds[i] doubleValue];
+        [alert addAction:[UIAlertAction actionWithTitle:names[i] style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) { [weakSelf setPlaybackSpeed:speed]; }]];
     }
-
-    self.statusLabel.text = @"Route complete";
-    [self ls_updateRoutePlaybackButtons];
-    [self refreshStatusPill];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Custom speed…" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) { [weakSelf enterCustomSpeed]; }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    alert.popoverPresentationController.sourceView = self.speedButton;
+    alert.popoverPresentationController.sourceRect = self.speedButton.bounds;
+    [self presentViewController:alert animated:LSMapAnimationsEnabled() completion:nil];
 }
-
-- (MKOverlayRenderer *)ls_rendererForMapOverlay:(id<MKOverlay>)overlay {
-    if (overlay == self.routePolyline) {
-        MKPolylineRenderer *renderer = [[MKPolylineRenderer alloc] initWithPolyline:(MKPolyline *)overlay];
-        renderer.strokeColor = UIColor.systemBlueColor;
-        renderer.lineWidth = 4.0;
-        return renderer;
+- (void)setPlaybackSpeed:(double)speed {
+    if (!isfinite(speed) || speed < 1 || speed > 500) return;
+    self.draftSpeedKmh = speed;
+    if (!self.routeDraftChanged && self.fetchedRoute == LSSessionController.shared.retainedRoute && LSRouteSimulator.shared.isSimulating) {
+        [LSSessionController.shared updateTransportMode:LSTransportModeCustom customSpeedKmh:speed];
+        self.routeFeedback.text = @"Playback speed updated. The route path is unchanged.";
     }
-    return nil;
+    [self updateRouteUI];
 }
-
-- (nullable MKAnnotationView *)ls_viewForRouteAnnotation:(id<MKAnnotation>)annotation {
-    if ([annotation isKindOfClass:[LSStartAnnotation class]]) {
-        static NSString * const identifier = @"LSStartPin";
-        MKMarkerAnnotationView *view = (MKMarkerAnnotationView *)[self.mapView dequeueReusableAnnotationViewWithIdentifier:identifier];
-        if (!view) {
-            view = [[MKMarkerAnnotationView alloc] initWithAnnotation:annotation reuseIdentifier:identifier];
-            view.canShowCallout = YES;
-            view.draggable = YES;
-        } else {
-            view.annotation = annotation;
-        }
-        view.markerTintColor = UIColor.systemGreenColor;
-        return view;
+- (void)enterCustomSpeed {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Custom playback speed" message:@"Enter a speed from 1 to 500 km/h. Confirming updates the applied route if you are editing its speed." preferredStyle:UIAlertControllerStyleAlert];
+    [alert addTextFieldWithConfigurationHandler:^(UITextField *field) {
+        field.keyboardType = UIKeyboardTypeDecimalPad;
+        field.text = LSFormatDecimal(self.draftSpeedKmh, 1);
+        field.accessibilityLabel = @"Speed in kilometers per hour";
+    }];
+    __weak UIAlertController *weakAlert = alert;
+    __weak typeof(self) weakSelf = self;
+    UIAlertAction *save = [UIAlertAction actionWithTitle:@"Set speed" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
+        NSNumber *number = LSParseDecimal(weakAlert.textFields.firstObject.text, NSLocale.currentLocale);
+        if (number) [weakSelf setPlaybackSpeed:number.doubleValue];
+    }];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:save];
+    __weak UIAlertAction *weakSave = save;
+    [alert.textFields.firstObject addAction:[UIAction actionWithHandler:^(__unused UIAction *action) {
+        NSNumber *number = LSParseDecimal(weakAlert.textFields.firstObject.text, NSLocale.currentLocale);
+        weakSave.enabled = number && number.doubleValue >= 1 && number.doubleValue <= 500;
+        weakAlert.message = weakSave.enabled ? @"Confirming changes playback speed. The path stays the same." : @"Enter a number from 1 to 500 km/h.";
+    }] forControlEvents:UIControlEventEditingChanged];
+    [self presentViewController:alert animated:LSMapAnimationsEnabled() completion:nil];
+}
+- (void)updatePlayback {
+    LSRouteSimulator *engine = LSRouteSimulator.shared;
+    BOOL active = engine.isSimulating;
+    BOOL complete = LSSessionController.shared.retainedRoute && engine.totalDistance > 0 && engine.distanceCovered >= engine.totalDistance;
+    self.progressLabel.hidden = !active && !complete;
+    self.progressView.hidden = !active;
+    if (!active) {
+        if (complete) self.progressLabel.text = @"Applied route complete. Holding the destination. Replay when you’re ready.";
+        return;
     }
-
-    if ([annotation isKindOfClass:[LSDestinationAnnotation class]]) {
-        static NSString * const identifier = @"LSDestinationPin";
-        MKMarkerAnnotationView *view = (MKMarkerAnnotationView *)[self.mapView dequeueReusableAnnotationViewWithIdentifier:identifier];
-        if (!view) {
-            view = [[MKMarkerAnnotationView alloc] initWithAnnotation:annotation reuseIdentifier:identifier];
-            view.canShowCallout = YES;
-            view.draggable = YES;
-        } else {
-            view.annotation = annotation;
-        }
-        view.markerTintColor = UIColor.systemRedColor;
-        return view;
-    }
-
-    return nil;
+    double progress = engine.totalDistance > 0 ? MIN(1, engine.distanceCovered / engine.totalDistance) : 0;
+    double remaining = MAX(0, engine.totalDistance - engine.distanceCovered);
+    double speed = [LSRouteSimulator speedMetersPerSecondForMode:engine.transportMode customSpeedKmh:engine.customSpeedKmh];
+    self.progressView.progress = (float)progress;
+    self.progressView.accessibilityValue = [NSString stringWithFormat:@"%.0f percent", progress * 100];
+    self.progressLabel.text = engine.isPaused
+        ? [NSString stringWithFormat:@"Applied route paused · 0 km/h · %@ remaining", LSDistance(remaining)]
+        : [NSString stringWithFormat:@"Applied route: %.0f%% complete · %@ remaining · %@", progress * 100, LSDistance(remaining), LSDuration(remaining / speed)];
 }
-
-- (void)ls_routeAnnotationDragEnded:(MKAnnotationView *)view {
-    if (view.annotation == self.startAnnotation || view.annotation == self.destinationAnnotation) {
-        self.fetchedRoute = nil;
-        if (self.routePolyline) {
-            [self.mapView removeOverlay:self.routePolyline];
-            self.routePolyline = nil;
-        }
-        [self updateCoordinateModeVisibility];
-    }
-}
-
-- (UIButton *)ls_primaryButtonWithTitle:(NSString *)title action:(SEL)action {
-    UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
-    button.translatesAutoresizingMaskIntoConstraints = NO;
-    [button setTitle:title forState:UIControlStateNormal];
-    [button setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
-    button.titleLabel.font = [UIFont systemFontOfSize:16.0 weight:UIFontWeightSemibold];
-    button.backgroundColor = UIColor.systemBlueColor;
-    button.layer.cornerRadius = 12.0;
-    button.layer.cornerCurve = kCACornerCurveContinuous;
-    [button addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
-    return button;
-}
-
-- (UIButton *)ls_secondaryButtonWithTitle:(NSString *)title action:(SEL)action {
-    UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
-    button.translatesAutoresizingMaskIntoConstraints = NO;
-    [button setTitle:title forState:UIControlStateNormal];
-    button.titleLabel.font = [UIFont systemFontOfSize:15.0 weight:UIFontWeightSemibold];
-    button.backgroundColor = UIColor.secondarySystemGroupedBackgroundColor;
-    button.layer.cornerRadius = 12.0;
-    [button addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
-    return button;
-}
-
 @end

@@ -1,369 +1,141 @@
 #import "LocationSpoofer.h"
-#import "PersistenceManager.h"
-#import "RouteSimulator.h"
+#import "SessionController.h"
 #import "LSHooking.h"
-
 #import <objc/runtime.h>
-#import <objc/message.h>
-#import <os/log.h>
 
-static _Thread_local BOOL ls_internalCreate = NO;
-static BOOL ls_hooksBypassed = NO;
-static NSHashTable *ls_swizzledDelegateClasses = nil;
-static NSMutableSet *ls_observedDelegateClasses = nil;
-static dispatch_once_t ls_delegateTablesOnceToken;
-static dispatch_once_t ls_hookSelectorsOnceToken;
-static os_log_t ls_log = NULL;
+static _Thread_local BOOL ls_internalCreate;
+static char ls_libraryManagerKey;
+static char ls_historyKey;
 
-static SEL ls_hookDidUpdateLocationsSEL = NULL;
-static SEL ls_hookDidUpdateToLocationSEL = NULL;
+typedef struct {
+    void *receiver;
+    void *manager;
+    SEL selector;
+} LSDeliveryContext;
+static _Thread_local LSDeliveryContext ls_deliveryContext;
 
-static void LSHookDidUpdateLocations(id self, SEL _cmd, CLLocationManager *manager, NSArray<CLLocation *> *locations);
-static void LSHookDidUpdateToLocation(id self, SEL _cmd, CLLocationManager *manager, CLLocation *newLocation, CLLocation *oldLocation);
+@interface LSLocationHistory : NSObject
+@property (nonatomic, strong) CLLocation *location;
+@property (nonatomic, assign) uint64_t generation;
+@end
+@implementation LSLocationHistory
+@end
 
 BOOL LSIsInternalLocationCreate(void) {
     return ls_internalCreate;
 }
 
-void LSSetHooksBypassed(BOOL bypassed) {
-    @synchronized([LocationSpoofer class]) {
-        ls_hooksBypassed = bypassed;
-    }
+void LSMarkLibraryLocationManager(CLLocationManager *manager) {
+    objc_setAssociatedObject(manager, &ls_libraryManagerKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
-static BOOL LSHooksBypassed(void) {
-    @synchronized([LocationSpoofer class]) {
-        return ls_hooksBypassed;
-    }
+static BOOL LSIsLibraryLocationManager(CLLocationManager *manager) {
+    return [objc_getAssociatedObject(manager, &ls_libraryManagerKey) boolValue];
 }
 
-static BOOL LSShouldSpoof(void) {
-    return !ls_internalCreate &&
-           !LSHooksBypassed() &&
-           ([[PersistenceManager shared] isSpoofingEnabled] ||
-            [[PersistenceManager shared] keepLastSpoof]);
+static CLLocationCoordinate2D LSApplyFluctuation(CLLocationCoordinate2D coordinate, double radius) {
+    if (!isfinite(radius) || radius <= 0.0) return coordinate;
+    double angle = (double)arc4random_uniform(UINT32_MAX) / UINT32_MAX * 2.0 * M_PI;
+    double distance = sqrt((double)arc4random_uniform(UINT32_MAX) / UINT32_MAX) * radius;
+    double latitude = fmax(-90.0, fmin(90.0, coordinate.latitude + distance * cos(angle) / 111320.0));
+    double cosLatitude = cos(coordinate.latitude * M_PI / 180.0);
+    double longitude = coordinate.longitude;
+    if (fabs(cosLatitude) > 1e-6) longitude += distance * sin(angle) / (111320.0 * cosLatitude);
+    longitude = fmod(longitude + 180.0, 360.0);
+    if (longitude < 0.0) longitude += 360.0;
+    return CLLocationCoordinate2DMake(latitude, longitude - 180.0);
 }
 
-static CLLocation *LSBuildSpoofedLocation(CLLocationCoordinate2D coordinate,
-                                          CLLocationDirection course,
-                                          double altitude,
-                                          double horizontalAccuracy,
-                                          double speed) {
+static CLLocation *LSLocationForSnapshot(LSSessionSnapshot *snapshot) {
+    CLLocation *sample = snapshot.location;
+    if (snapshot.mode == LSSessionModeOff || !sample) return nil;
+    CLLocationCoordinate2D coordinate = sample.coordinate;
+    if (snapshot.fluctuationEnabled) coordinate = LSApplyFluctuation(coordinate, snapshot.fluctuationRadius);
+    BOOL previous = ls_internalCreate;
     ls_internalCreate = YES;
-    CLLocation *location = [[CLLocation alloc] initWithCoordinate:coordinate
-                                                         altitude:altitude
-                                               horizontalAccuracy:horizontalAccuracy
-                                                 verticalAccuracy:6.0
-                                                            course:course
-                                                             speed:speed
-                                                         timestamp:[NSDate date]];
-    ls_internalCreate = NO;
+    CLLocation *location;
+    @try {
+        location = [[CLLocation alloc] initWithCoordinate:coordinate altitude:sample.altitude
+                                     horizontalAccuracy:sample.horizontalAccuracy verticalAccuracy:sample.verticalAccuracy
+                                                 course:sample.course speed:sample.speed timestamp:[NSDate date]];
+    } @finally {
+        ls_internalCreate = previous;
+    }
     return location;
 }
 
-static CLLocationCoordinate2D LSApplyFluctuation(CLLocationCoordinate2D coordinate, double radiusMeters) {
-    if (radiusMeters <= 0.0) {
-        return coordinate;
-    }
-
-    double angle = (double)arc4random_uniform(UINT32_MAX) / (double)UINT32_MAX * 2.0 * M_PI;
-    double distance = sqrt((double)arc4random_uniform(UINT32_MAX) / (double)UINT32_MAX) * radiusMeters;
-
-    double latOffset = distance * cos(angle) / 111320.0;
-    double cosLat = cos(coordinate.latitude * M_PI / 180.0);
-    double lonOffset = 0.0;
-    if (fabs(cosLat) > 1e-6) {
-        lonOffset = distance * sin(angle) / (111320.0 * cosLat);
-    }
-
-    double newLat = coordinate.latitude + latOffset;
-    double newLon = coordinate.longitude + lonOffset;
-
-    if (newLat > 90.0) {
-        newLat = 90.0;
-    } else if (newLat < -90.0) {
-        newLat = -90.0;
-    }
-
-    if (newLon > 180.0) {
-        newLon -= 360.0;
-    } else if (newLon < -180.0) {
-        newLon += 360.0;
-    }
-
-    return CLLocationCoordinate2DMake(newLat, newLon);
-}
-
 CLLocation *LSCreateSpoofedLocation(void) {
-    LSRouteSimulator *simulator = [LSRouteSimulator shared];
-    if (simulator.isSimulating) {
-        LSTransportMode mode = simulator.transportMode;
-        double speed = [LSRouteSimulator speedMetersPerSecondForMode:mode customSpeedKmh:simulator.customSpeedKmh];
-        double accuracy = [LSRouteSimulator horizontalAccuracyForMode:mode];
-        PersistenceManager *store = [PersistenceManager shared];
-        return LSBuildSpoofedLocation(simulator.currentCoordinate,
-                                      simulator.currentHeading,
-                                      store.altitude,
-                                      accuracy,
-                                      speed);
-    }
-
-    PersistenceManager *store = [PersistenceManager shared];
-    CLLocationCoordinate2D baseCoordinate = [store spoofCoordinate];
-    if (store.fluctuationEnabled) {
-        baseCoordinate = LSApplyFluctuation(baseCoordinate, store.fluctuationRadius);
-    }
-    return LSBuildSpoofedLocation(baseCoordinate,
-                                store.heading,
-                                store.altitude,
-                                6.0,
-                                0.0);
+    if (ls_internalCreate) return nil;
+    return LSLocationForSnapshot([LSSessionController shared].snapshot);
 }
 
-static BOOL LSIsSystemFrameworkBundle(NSBundle *bundle) {
-    NSString *path = bundle.bundlePath;
-    if (path.length == 0) {
-        return YES;
-    }
-    if ([path hasPrefix:@"/System/"]) {
-        return YES;
-    }
-    if ([path hasPrefix:@"/private/preboot/Cryptexes/"]) {
-        return YES;
-    }
-    if ([path hasPrefix:@"/usr/"]) {
-        return YES;
-    }
-    return NO;
-}
-
-static void LSInitializeDelegateTables(void) {
-    dispatch_once(&ls_delegateTablesOnceToken, ^{
-        ls_swizzledDelegateClasses = [NSHashTable weakObjectsHashTable];
-        ls_observedDelegateClasses = [NSMutableSet set];
-    });
-}
-
-static void LSInitializeDelegateHookSelectors(void) {
-    dispatch_once(&ls_hookSelectorsOnceToken, ^{
-        NSString *suffix = NSUUID.UUID.UUIDString;
-        NSString *locationsName = [NSString stringWithFormat:@"lsp_locationManager_didUpdateLocations_%@:", suffix];
-        NSString *legacyName = [NSString stringWithFormat:@"lsp_locationManager_didUpdateToLocation_fromLocation_%@:", suffix];
-        ls_hookDidUpdateLocationsSEL = sel_registerName(locationsName.UTF8String);
-        ls_hookDidUpdateToLocationSEL = sel_registerName(legacyName.UTF8String);
-    });
-}
-
-static BOOL LSShouldSwizzleDelegateClass(Class delegateClass) {
-    if (!delegateClass || delegateClass == [NSObject class]) {
-        return NO;
-    }
-
-    NSString *className = NSStringFromClass(delegateClass);
-    if (className.length == 0 || [className hasPrefix:@"_"]) {
-        return NO;
-    }
-
-    if (LSIsSystemFrameworkBundle([NSBundle bundleForClass:delegateClass])) {
-        return NO;
-    }
-
-    LSInitializeDelegateTables();
-    @synchronized(ls_swizzledDelegateClasses) {
-        return [ls_observedDelegateClasses containsObject:delegateClass];
-    }
-}
-
-static void LSObserveDelegateClass(Class delegateClass) {
-    if (!delegateClass || delegateClass == [NSObject class]) {
-        return;
-    }
-
-    if (LSIsSystemFrameworkBundle([NSBundle bundleForClass:delegateClass])) {
-        return;
-    }
-
-    LSInitializeDelegateTables();
-    @synchronized(ls_swizzledDelegateClasses) {
-        [ls_observedDelegateClasses addObject:delegateClass];
-    }
-}
-
-static void LSSwizzleDelegateForClass(Class delegateClass) {
-    if (!delegateClass || !LSShouldSwizzleDelegateClass(delegateClass)) {
-        return;
-    }
-
-    LSInitializeDelegateHookSelectors();
-
-    LSInitializeDelegateTables();
-    @synchronized(ls_swizzledDelegateClasses) {
-        Class locationsClass = LSClassDefiningInstanceMethod(delegateClass,
-                                                             @selector(locationManager:didUpdateLocations:));
-        if (locationsClass && ![ls_swizzledDelegateClasses containsObject:locationsClass]) {
-            if (LSInstallInstanceHookWithIMP(locationsClass,
-                                             @selector(locationManager:didUpdateLocations:),
-                                             ls_hookDidUpdateLocationsSEL,
-                                             (IMP)LSHookDidUpdateLocations)) {
-                [ls_swizzledDelegateClasses addObject:locationsClass];
-            }
+// All history is simulated. Never fall back to a host's real legacy oldLocation.
+static CLLocation *LSRecordSample(CLLocationManager *manager, CLLocation *sample, uint64_t generation) {
+    @synchronized(manager) {
+        LSLocationHistory *history = objc_getAssociatedObject(manager, &ls_historyKey);
+        CLLocation *previous = history.generation == generation ? history.location : nil;
+        if (!sample) {
+            objc_setAssociatedObject(manager, &ls_historyKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            return nil;
         }
-
-        Class legacyClass = LSClassDefiningInstanceMethod(delegateClass,
-                                                          @selector(locationManager:didUpdateToLocation:fromLocation:));
-        if (legacyClass && ![ls_swizzledDelegateClasses containsObject:legacyClass]) {
-            if (LSInstallInstanceHookWithIMP(legacyClass,
-                                             @selector(locationManager:didUpdateToLocation:fromLocation:),
-                                             ls_hookDidUpdateToLocationSEL,
-                                             (IMP)LSHookDidUpdateToLocation)) {
-                [ls_swizzledDelegateClasses addObject:legacyClass];
-            }
-        }
+        if (!history) history = [[LSLocationHistory alloc] init];
+        history.location = sample;
+        history.generation = generation;
+        objc_setAssociatedObject(manager, &ls_historyKey, history, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        return previous ?: sample;
     }
 }
 
-static void LSSwizzleDelegateIfNeeded(id delegate) {
-    if (!delegate) {
-        return;
-    }
-
-    Class delegateClass = [delegate class];
-    LSObserveDelegateClass(delegateClass);
-    LSSwizzleDelegateForClass(delegateClass);
+static BOOL LSIsSystemClass(Class cls) {
+    NSString *path = [NSBundle bundleForClass:cls].bundlePath;
+    return path.length == 0 || [path hasPrefix:@"/System/"] ||
+        [path hasPrefix:@"/private/preboot/Cryptexes/"] || [path hasPrefix:@"/usr/"];
 }
 
-static void LSHookDidUpdateLocations(id self, SEL _cmd, CLLocationManager *manager, NSArray<CLLocation *> *locations) {
-    (void)_cmd;
-    NSArray<CLLocation *> *deliveredLocations = locations;
-    if (LSShouldSpoof()) {
-        deliveredLocations = @[LSCreateSpoofedLocation()];
-    }
-
-    void (*originalIMP)(id, SEL, CLLocationManager *, NSArray<CLLocation *> *) =
-        (void (*)(id, SEL, CLLocationManager *, NSArray<CLLocation *> *))objc_msgSend;
-    originalIMP(self, ls_hookDidUpdateLocationsSEL, manager, deliveredLocations);
+static BOOL LSIsNestedDelivery(id receiver, CLLocationManager *manager, SEL selector) {
+    return ls_deliveryContext.receiver == (__bridge void *)receiver &&
+        ls_deliveryContext.manager == (__bridge void *)manager && ls_deliveryContext.selector == selector;
 }
 
-static void LSHookDidUpdateToLocation(id self, SEL _cmd, CLLocationManager *manager, CLLocation *newLocation, CLLocation *oldLocation) {
-    (void)_cmd;
-    CLLocation *deliveredLocation = newLocation;
-    if (LSShouldSpoof()) {
-        deliveredLocation = LSCreateSpoofedLocation();
+static void LSInstallDelegateHooks(id delegate) {
+    for (Class cls = [delegate class]; cls && cls != NSObject.class; cls = class_getSuperclass(cls)) {
+        if (LSIsSystemClass(cls)) continue;
+        SEL modern = @selector(locationManager:didUpdateLocations:);
+        LSInstallInstanceHook(cls, modern, ^IMP(IMP implementation) {
+            void (*original)(id, SEL, CLLocationManager *, NSArray *) = (void *)implementation;
+            return imp_implementationWithBlock(^(id receiver, CLLocationManager *manager, NSArray *locations) {
+                NSArray *delivered = locations;
+                if (!LSIsNestedDelivery(receiver, manager, modern) && !LSIsLibraryLocationManager(manager)) {
+                    LSSessionSnapshot *snapshot = [LSSessionController shared].snapshot;
+                    CLLocation *sample = LSLocationForSnapshot(snapshot);
+                    if (sample) delivered = @[sample];
+                    LSRecordSample(manager, sample, snapshot.generation);
+                }
+                LSDeliveryContext previous = ls_deliveryContext;
+                ls_deliveryContext = (LSDeliveryContext){(__bridge void *)receiver, (__bridge void *)manager, modern};
+                @try { original(receiver, modern, manager, delivered); }
+                @finally { ls_deliveryContext = previous; }
+            });
+        });
+        SEL legacy = @selector(locationManager:didUpdateToLocation:fromLocation:);
+        LSInstallInstanceHook(cls, legacy, ^IMP(IMP implementation) {
+            void (*original)(id, SEL, CLLocationManager *, CLLocation *, CLLocation *) = (void *)implementation;
+            return imp_implementationWithBlock(^(id receiver, CLLocationManager *manager, CLLocation *newLocation, CLLocation *oldLocation) {
+                CLLocation *delivered = newLocation;
+                CLLocation *previousSample = oldLocation;
+                if (!LSIsNestedDelivery(receiver, manager, legacy) && !LSIsLibraryLocationManager(manager)) {
+                    LSSessionSnapshot *snapshot = [LSSessionController shared].snapshot;
+                    CLLocation *sample = LSLocationForSnapshot(snapshot);
+                    CLLocation *history = LSRecordSample(manager, sample, snapshot.generation);
+                    if (sample) { delivered = sample; previousSample = history; }
+                }
+                LSDeliveryContext previous = ls_deliveryContext;
+                ls_deliveryContext = (LSDeliveryContext){(__bridge void *)receiver, (__bridge void *)manager, legacy};
+                @try { original(receiver, legacy, manager, delivered, previousSample); }
+                @finally { ls_deliveryContext = previous; }
+            });
+        });
     }
-
-    void (*originalIMP)(id, SEL, CLLocationManager *, CLLocation *, CLLocation *) =
-        (void (*)(id, SEL, CLLocationManager *, CLLocation *, CLLocation *))objc_msgSend;
-    originalIMP(self, ls_hookDidUpdateToLocationSEL, manager, deliveredLocation, oldLocation);
-}
-
-@interface CLLocationManager (LSHooks)
-- (void)lsp_setDelegate:(id<CLLocationManagerDelegate>)delegate;
-- (CLLocation *)lsp_location;
-+ (CLAuthorizationStatus)lsp_authorizationStatus;
-+ (BOOL)lsp_locationServicesEnabled;
-@end
-
-@implementation CLLocationManager (LSHooks)
-
-- (void)lsp_setDelegate:(id<CLLocationManagerDelegate>)delegate {
-    [self lsp_setDelegate:delegate];
-    if (delegate) {
-        LSSwizzleDelegateIfNeeded(delegate);
-    }
-}
-
-- (CLLocation *)lsp_location {
-    if (LSShouldSpoof()) {
-        return LSCreateSpoofedLocation();
-    }
-    return [self lsp_location];
-}
-
-+ (CLAuthorizationStatus)lsp_authorizationStatus {
-    return kCLAuthorizationStatusAuthorizedWhenInUse;
-}
-
-+ (BOOL)lsp_locationServicesEnabled {
-    return YES;
-}
-
-@end
-
-@interface MKUserLocation (LSHooks)
-- (CLLocation *)lsp_userLocation;
-@end
-
-@implementation MKUserLocation (LSHooks)
-
-- (CLLocation *)lsp_userLocation {
-    if (LSShouldSpoof()) {
-        return LSCreateSpoofedLocation();
-    }
-    return [self lsp_userLocation];
-}
-
-@end
-
-static void LSExchangeInstanceMethods(Class cls, SEL originalSelector, SEL swizzledSelector) {
-    Method originalMethod = class_getInstanceMethod(cls, originalSelector);
-    Method swizzledMethod = class_getInstanceMethod(cls, swizzledSelector);
-    if (!originalMethod || !swizzledMethod) {
-        return;
-    }
-    method_exchangeImplementations(originalMethod, swizzledMethod);
-}
-
-static void LSInstallMKUserLocationHooks(void) {
-    Class userLocationClass = NSClassFromString(@"MKUserLocation");
-    if (!userLocationClass) {
-        return;
-    }
-
-    Method locationMethod = class_getInstanceMethod(userLocationClass, @selector(location));
-    if (locationMethod) {
-        LSExchangeInstanceMethods(userLocationClass,
-                                  @selector(location),
-                                  @selector(lsp_userLocation));
-    }
-}
-
-static void LSInstallCLLocationManagerClassHook(Class managerClass, SEL originalSelector, SEL hookSelector) {
-    Method originalMethod = class_getClassMethod(managerClass, originalSelector);
-    Method hookMethod = class_getClassMethod(managerClass, hookSelector);
-    if (originalMethod && hookMethod) {
-        method_exchangeImplementations(originalMethod, hookMethod);
-    }
-}
-
-static void LSInstallCLLocationManagerHooks(void) {
-    Class managerClass = NSClassFromString(@"CLLocationManager");
-    if (!managerClass) {
-        if (ls_log) {
-            os_log_error(ls_log, "CLLocationManager class missing at hook install");
-        }
-        return;
-    }
-
-    if (!class_getInstanceMethod(managerClass, @selector(setDelegate:))) {
-        if (ls_log) {
-            os_log_error(ls_log, "CLLocationManager setDelegate: missing at hook install");
-        }
-        return;
-    }
-
-    LSExchangeInstanceMethods(managerClass, @selector(setDelegate:), @selector(lsp_setDelegate:));
-
-    if (class_getInstanceMethod(managerClass, @selector(location))) {
-        LSExchangeInstanceMethods(managerClass, @selector(location), @selector(lsp_location));
-    }
-
-    LSInstallCLLocationManagerClassHook(managerClass,
-                                        @selector(authorizationStatus),
-                                        @selector(lsp_authorizationStatus));
-
-    LSInstallCLLocationManagerClassHook(managerClass,
-                                        @selector(locationServicesEnabled),
-                                        @selector(lsp_locationServicesEnabled));
 }
 
 @implementation LocationSpoofer
@@ -371,10 +143,34 @@ static void LSInstallCLLocationManagerHooks(void) {
 + (void)installHooks {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        ls_log = os_log_create("com.locationspoofer.dylib", "hooks");
-        LSInitializeDelegateHookSelectors();
-        LSInstallCLLocationManagerHooks();
-        LSInstallMKUserLocationHooks();
+        Class managerClass = CLLocationManager.class;
+        SEL setter = @selector(setDelegate:);
+        LSInstallInstanceHook(managerClass, setter, ^IMP(IMP implementation) {
+            void (*original)(id, SEL, id) = (void *)implementation;
+            return imp_implementationWithBlock(^(CLLocationManager *manager, id delegate) {
+                if (delegate && !LSIsLibraryLocationManager(manager)) LSInstallDelegateHooks(delegate);
+                original(manager, setter, delegate);
+            });
+        });
+        SEL getter = @selector(location);
+        LSInstallInstanceHook(managerClass, getter, ^IMP(IMP implementation) {
+            CLLocation *(*original)(id, SEL) = (void *)implementation;
+            return imp_implementationWithBlock(^CLLocation *(CLLocationManager *manager) {
+                if (!LSIsLibraryLocationManager(manager)) {
+                    CLLocation *sample = LSCreateSpoofedLocation();
+                    if (sample) return sample;
+                }
+                return original(manager, getter);
+            });
+        });
+        Class userLocationClass = NSClassFromString(@"MKUserLocation");
+        LSInstallInstanceHook(userLocationClass, getter, ^IMP(IMP implementation) {
+            CLLocation *(*original)(id, SEL) = (void *)implementation;
+            return imp_implementationWithBlock(^CLLocation *(id receiver) {
+                return LSCreateSpoofedLocation() ?: original(receiver, getter);
+            });
+        });
+        // Authorization and service availability remain entirely owned by the OS.
     });
 }
 

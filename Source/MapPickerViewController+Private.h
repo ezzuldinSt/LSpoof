@@ -1,181 +1,122 @@
 #import "MapPickerViewController.h"
-#import "RouteSimulator.h"
-
+#import "SessionController.h"
+#import "BookmarksManager.h"
+#import "LSUI.h"
 #import <MapKit/MapKit.h>
-
 NS_ASSUME_NONNULL_BEGIN
 
-typedef NS_ENUM(NSInteger, LSMapPickerPanelTab) {
-    LSMapPickerPanelTabMap = 0,
-    LSMapPickerPanelTabBookmarks = 1
-};
+typedef NS_ENUM(NSInteger, LSPickerTab) { LSPickerTabLocation, LSPickerTabRoute, LSPickerTabSaved };
+typedef NS_ENUM(NSInteger, LSEndpoint) { LSEndpointFrom, LSEndpointTo };
+@interface LSStartAnnotation : MKPointAnnotation @end
+@interface LSDestinationAnnotation : MKPointAnnotation @end
+@interface LSMovingAnnotation : MKPointAnnotation @end
+@interface LSRealAnnotation : MKPointAnnotation @end
 
-typedef NS_ENUM(NSInteger, LSMapPickerCoordinateMode) {
-    LSMapPickerCoordinateModeStatic = 0,
-    LSMapPickerCoordinateModeRoute = 1
-};
-
-typedef NS_ENUM(NSInteger, LSRoutePlacementPhase) {
-    LSRoutePlacementPhaseStart = 0,
-    LSRoutePlacementPhaseDestination = 1
-};
-
-@interface LSStartAnnotation : MKPointAnnotation
-@end
-
-@interface LSDestinationAnnotation : MKPointAnnotation
-@end
-
-@interface MapPickerViewController ()
-
-@property (nonatomic, strong) UIView *headerView;
-@property (nonatomic, strong) UILabel *titleLabel;
-@property (nonatomic, strong) UILabel *subtitleLabel;
-@property (nonatomic, strong) UIView *statusPill;
-@property (nonatomic, strong) UIView *statusDot;
+@interface MapPickerViewController () <UITableViewDataSource, UITableViewDelegate>
+@property (nonatomic) LSPickerTab tab;
+@property (nonatomic) LSEndpoint endpoint;
+@property (nonatomic) BOOL closed;
+@property (nonatomic) NSUInteger selectionRevision;
+@property (nonatomic, strong) UIScrollView *scroll;
+@property (nonatomic, strong) UIStackView *contentStack;
+@property (nonatomic, strong) UISegmentedControl *tabs;
 @property (nonatomic, strong) UILabel *statusLabel;
-@property (nonatomic, strong) UIButton *closeButton;
-@property (nonatomic, strong) UILabel *pillStopLabel;
-@property (nonatomic, strong) UISearchBar *searchBar;
-@property (nonatomic, strong) UIActivityIndicatorView *searchSpinner;
-@property (nonatomic, strong) MKLocalSearchCompleter *searchCompleter;
-@property (nonatomic, strong) NSArray<MKLocalSearchCompletion *> *searchCompletions;
-@property (nonatomic, strong) UIView *suggestionsPanel;
-@property (nonatomic, strong) UITableView *suggestionsTableView;
-@property (nonatomic, strong) NSLayoutConstraint *suggestionsHeightConstraint;
-@property (nonatomic, strong) NSLayoutConstraint *mapHeightConstraint;
-@property (nonatomic, assign) BOOL searchSuggestionsVisible;
-@property (nonatomic, strong) UIScrollView *contentScrollView;
-@property (nonatomic, strong) UIView *scrollContentView;
+@property (nonatomic, strong) UILabel *brandLabel;
+@property (nonatomic, strong) UILabel *appliedLabel;
 @property (nonatomic, strong) UIView *mapContainer;
 @property (nonatomic, strong) MKMapView *mapView;
+@property (nonatomic, strong) UIButton *mapRetryButton;
+@property (nonatomic, strong) UIButton *realCenterButton;
 @property (nonatomic, strong) UILabel *mapHintLabel;
-@property (nonatomic, strong) UIActivityIndicatorView *mapSpinner;
-@property (nonatomic, strong) UIVisualEffectView *controlPanel;
-@property (nonatomic, strong) UISegmentedControl *panelTabSegment;
-@property (nonatomic, strong) UISegmentedControl *coordinateModeSegment;
-@property (nonatomic, strong) UIView *mapControlsContainer;
-@property (nonatomic, strong) UIStackView *mapControlsStack;
-@property (nonatomic, strong) UIView *staticControlsContainer;
-@property (nonatomic, strong) UIView *routeControlsContainer;
-@property (nonatomic, strong) UIView *bookmarksContainer;
-@property (nonatomic, strong) UITableView *bookmarksTableView;
-@property (nonatomic, strong) UILabel *coordinateTitleLabel;
-@property (nonatomic, strong) UILabel *coordinateValueLabel;
-@property (nonatomic, strong) UIButton *bookmarkSaveButton;
-@property (nonatomic, strong) UIView *separatorCoordFields;
-@property (nonatomic, strong) UIView *separatorFieldsHeading;
-@property (nonatomic, strong) UIView *separatorHeadingActions;
-@property (nonatomic, strong) UIView *separatorFluctuation;
-@property (nonatomic, strong) UIView *fluctuationRow;
-@property (nonatomic, strong) UILabel *fluctuationLabel;
-@property (nonatomic, strong) UISwitch *fluctuationSwitch;
-@property (nonatomic, strong) UITextField *fluctuationRadiusField;
-@property (nonatomic, strong) NSLayoutConstraint *fluctuationRadiusHeightConstraint;
-@property (nonatomic, strong) NSLayoutConstraint *fluctuationRadiusTopConstraint;
-@property (nonatomic, strong) UIView *keepLastSpoofRow;
-@property (nonatomic, strong) UILabel *keepLastSpoofLabel;
-@property (nonatomic, strong) UISwitch *keepLastSpoofSwitch;
-@property (nonatomic, strong) UIView *showRealLocationRow;
-@property (nonatomic, strong) UILabel *showRealLocationLabel;
-@property (nonatomic, strong) UISwitch *showRealLocationSwitch;
-@property (nonatomic, strong) UIStackView *fieldStack;
-@property (nonatomic, strong) UITextField *latitudeField;
-@property (nonatomic, strong) UITextField *longitudeField;
-@property (nonatomic, strong) UITextField *altitudeField;
-@property (nonatomic, strong) UISlider *headingSlider;
-@property (nonatomic, strong) UILabel *headingValueLabel;
-@property (nonatomic, strong) UILabel *headingDirectionLabel;
-@property (nonatomic, strong) UIButton *applyButton;
-@property (nonatomic, strong) UIButton *cancelButton;
-@property (nonatomic, strong) UIButton *stopButton;
-@property (nonatomic, strong) UIStackView *actionRow;
-@property (nonatomic, strong) NSLayoutConstraint *stopButtonHeightConstraint;
-@property (nonatomic, strong) NSLayoutConstraint *mapControlsBottomStaticConstraint;
-@property (nonatomic, strong) NSLayoutConstraint *mapControlsBottomStaticNoStopConstraint;
-@property (nonatomic, strong) NSLayoutConstraint *mapControlsBottomRouteConstraint;
-@property (nonatomic, strong) NSLayoutConstraint *mapControlsBottomRouteEarlyConstraint;
-@property (nonatomic, strong) MKPointAnnotation *pinAnnotation;
-@property (nonatomic, strong, nullable) LSStartAnnotation *startAnnotation;
-@property (nonatomic, strong, nullable) LSDestinationAnnotation *destinationAnnotation;
-@property (nonatomic, assign) LSRoutePlacementPhase routePlacementPhase;
+@property (nonatomic, strong) UILabel *mapErrorLabel;
+@property (nonatomic) BOOL mapFailed;
+@property (nonatomic, strong) UILabel *realNoticeLabel;
+@property (nonatomic, strong) UIView *locationIntro;
+@property (nonatomic, strong) UIView *locationDetails;
+@property (nonatomic, strong) UILabel *placeLabel;
+@property (nonatomic, strong) UILabel *coordinateLabel;
+@property (nonatomic, strong) UIButton *savePlaceButton;
+@property (nonatomic) CLLocationCoordinate2D selectedCoordinate;
+@property (nonatomic) BOOL hasSelection;
+@property (nonatomic, copy) NSString *selectedName;
+@property (nonatomic, strong) MKPointAnnotation *pin;
+@property (nonatomic, strong, nullable) MKCircle *radiusCircle;
+@property (nonatomic, strong, nullable) LSMovingAnnotation *appliedPin;
+@property (nonatomic, strong, nullable) LSRealAnnotation *realPin;
+@property (nonatomic, strong, nullable) CLLocationManager *realManager;
+@property (nonatomic) NSUInteger realRevision;
+@property (nonatomic, strong) UIButton *primaryButton;
+@property (nonatomic, strong) UIButton *holdButton;
+@property (nonatomic, strong) UIButton *offButton;
+@property (nonatomic, strong) UIStackView *playbackRow;
+@property (nonatomic) LSSessionMode previousMode;
+@property (nonatomic) NSTimeInterval lastUIUpdate;
+
+@property (nonatomic, strong) UIView *routeEndpointsPanel;
+@property (nonatomic, strong) UIView *routeDetailsPanel;
+@property (nonatomic, strong) UIButton *fromButton;
+@property (nonatomic, strong) UIButton *toButton;
+@property (nonatomic, strong) UISegmentedControl *endpointSegment;
+@property (nonatomic, strong) UISegmentedControl *profileSegment;
+@property (nonatomic, strong) UIButton *speedButton;
+@property (nonatomic, strong) UIButton *buildRouteButton;
+@property (nonatomic, strong) UIButton *swapButton;
+@property (nonatomic, strong) UILabel *routeFeedback;
+@property (nonatomic, strong) UILabel *routeSummary;
+@property (nonatomic, strong) UILabel *progressLabel;
+@property (nonatomic, strong) UIProgressView *progressView;
+@property (nonatomic, strong) UIActivityIndicatorView *routeSpinner;
+@property (nonatomic, strong, nullable) LSStartAnnotation *startPin;
+@property (nonatomic, strong, nullable) LSDestinationAnnotation *endPin;
 @property (nonatomic, strong, nullable) MKRoute *fetchedRoute;
 @property (nonatomic, strong, nullable) MKPolyline *routePolyline;
-@property (nonatomic, strong) UIButton *getRouteButton;
-@property (nonatomic, strong) UISegmentedControl *transportModeSegment;
-@property (nonatomic, strong) UITextField *customSpeedField;
-@property (nonatomic, strong) UIButton *playRouteButton;
-@property (nonatomic, strong) UIActivityIndicatorView *routeSpinner;
-@property (nonatomic, strong) UIButton *pauseRouteButton;
-@property (nonatomic, strong) UIButton *stopRouteButton;
-@property (nonatomic, strong) UIStackView *routeActionRow;
-@property (nonatomic, strong) NSLayoutConstraint *customSpeedHeightConstraint;
-@property (nonatomic, assign) CLLocationCoordinate2D selectedCoordinate;
-@property (nonatomic, assign) BOOL hasSelectedCoordinate;
-@property (nonatomic, assign) BOOL mapConfigured;
-@property (nonatomic, assign) BOOL suppressFieldSync;
-@property (nonatomic, assign) LSMapPickerPanelTab panelTab;
-@property (nonatomic, assign) LSMapPickerCoordinateMode coordinateMode;
-@property (nonatomic, assign) BOOL bookmarksEditMode;
+@property (nonatomic, strong, nullable) MKDirections *directions;
+@property (nonatomic) NSUInteger routeRevision;
+@property (nonatomic) double draftSpeedKmh;
+@property (nonatomic) BOOL routeDraftChanged;
 
-- (void)refreshStatusPill;
-- (void)syncFieldsFromCoordinate;
-- (void)updateCoordinateLabel;
-- (void)movePinToCoordinate:(CLLocationCoordinate2D)coordinate animated:(BOOL)animated;
-- (void)updatePinOnMapAnimated:(BOOL)animated;
-- (nullable NSNumber *)ls_parsedCoordinateComponentFromText:(NSString *)text;
-- (BOOL)applyFieldsToCoordinate;
-- (BOOL)applyAltitudeField;
-- (void)updateHeadingLabel;
-- (void)showInvalidCoordinateFeedback;
-- (void)playApplyHaptic;
-- (void)playRouteSuccessHaptic;
-- (void)playRouteFailureHaptic;
-- (void)playBookmarkSavedHaptic;
-- (void)playSimulationStopHaptic;
-- (void)dismissKeyboard;
-- (void)handleMapTap:(UITapGestureRecognizer *)gesture;
-- (void)handleMapLongPress:(UILongPressGestureRecognizer *)gesture;
-- (void)handleHeadingSliderChanged:(UISlider *)sender;
+@property (nonatomic, strong) UITableView *savedTable;
+@property (nonatomic, strong) UIView *savedToolbar;
+@property (nonatomic, strong) UIButton *editSavedButton;
+@property (nonatomic, strong) UILabel *savedHint;
+@property (nonatomic, strong) NSArray<LSBookmark *> *savedPlaces;
+@property (nonatomic, strong) NSArray<NSDictionary *> *recents;
 
+- (void)updateWorkspace;
+- (void)updateFooter;
+- (void)refreshSession;
+- (void)setSelection:(CLLocationCoordinate2D)coordinate name:(NSString *)name;
+- (void)openPlaceChooser:(NSString *)title coordinate:(CLLocationCoordinate2D)coordinate completion:(void (^)(CLLocationCoordinate2D, NSString *))completion;
+- (void)showMessage:(NSString *)message;
+- (void)updateRadiusPreview;
+- (void)updateRealLocation;
+- (void)confirmAction:(NSString *)title message:(NSString *)message button:(NSString *)button action:(dispatch_block_t)action;
+- (void)dismissPicker;
 @end
 
-@interface MapPickerViewController (LSRouteUI) <LSRouteSimulatorDelegate>
-
-- (void)buildRouteControls;
-- (void)ls_handleRouteMapTap:(CLLocationCoordinate2D)coordinate;
-- (void)updateCoordinateModeVisibility;
-- (void)ls_updateMapControlsBottomConstraint;
-- (void)restoreSimulationUIIfNeeded;
-- (void)restoreRouteUIFromSimulator;
-- (void)ls_installRouteConstraintsInRoutePanel;
-- (MKOverlayRenderer *)ls_rendererForMapOverlay:(id<MKOverlay>)overlay;
-- (nullable MKAnnotationView *)ls_viewForRouteAnnotation:(id<MKAnnotation>)annotation;
-- (void)ls_routeAnnotationDragEnded:(MKAnnotationView *)view;
-
+@interface MapPickerViewController (LSRouteUI)
+- (void)buildRouteUI;
+- (void)restoreRoute;
+- (void)updateRouteUI;
+- (void)assignEndpoint:(LSEndpoint)endpoint coordinate:(CLLocationCoordinate2D)coordinate name:(NSString *)name;
+- (void)cancelDirections;
+- (void)invalidateRouteDraft;
+- (void)fetchRoute;
+- (MKDirections *)directionsForRequest:(MKDirectionsRequest *)request;
+- (void)startDraftRoute;
+- (void)chooseEndpoint:(UIButton *)sender;
+- (void)updatePlayback;
 @end
 
 @interface MapPickerViewController (LSBookmarksUI)
-
-- (void)buildBookmarksPanel;
-- (void)updatePanelTabVisibility;
-- (void)handlePanelTabChanged:(UISegmentedControl *)sender;
-- (void)handleCoordinateModeChanged:(UISegmentedControl *)sender;
-- (void)handleBookmarkSaveTapped;
-- (void)presentSaveBookmarkAlertWithSuggestedName:(nullable NSString *)name coordinate:(CLLocationCoordinate2D)coordinate;
-- (BOOL)ls_isBookmarksTableView:(UITableView *)tableView;
-- (NSInteger)ls_bookmarksNumberOfSections;
-- (NSInteger)ls_bookmarksNumberOfRowsInSection:(NSInteger)section;
-- (NSString *)ls_bookmarksTitleForHeaderInSection:(NSInteger)section;
-- (UITableViewCell *)ls_bookmarksCellForRowAtIndexPath:(NSIndexPath *)indexPath;
-- (void)ls_bookmarksDidSelectRowAtIndexPath:(NSIndexPath *)indexPath;
-- (BOOL)ls_bookmarksCanEditRowAtIndexPath:(NSIndexPath *)indexPath;
-- (void)ls_bookmarksCommitDeleteAtIndexPath:(NSIndexPath *)indexPath;
-- (BOOL)ls_bookmarksCanMoveRowAtIndexPath:(NSIndexPath *)indexPath;
-- (void)ls_bookmarksMoveFromIndexPath:(NSIndexPath *)source toIndexPath:(NSIndexPath *)destination;
-- (UIView *)ls_bookmarksHeaderForSection:(NSInteger)section;
-- (void)ls_presentStaticMapActionSheetAtCoordinate:(CLLocationCoordinate2D)coordinate;
-
+- (void)buildSavedUI;
+- (void)reloadSavedPlaces;
+- (void)layoutSavedHeader;
+- (void)saveSelectedPlace;
+- (NSInteger)savedRowsInSection:(NSInteger)section;
+- (UITableViewCell *)savedCell:(NSIndexPath *)path;
+- (void)previewSavedPlace:(NSIndexPath *)path;
+- (nullable UIContextMenuConfiguration *)savedMenu:(NSIndexPath *)path;
+- (void)moveSavedPlace:(NSIndexPath *)source to:(NSIndexPath *)destination;
 @end
-
 NS_ASSUME_NONNULL_END

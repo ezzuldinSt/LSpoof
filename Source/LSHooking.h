@@ -5,7 +5,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 BOOL LSClassDefinesInstanceMethodLocally(Class cls, SEL selector);
 Class LSClassDefiningInstanceMethod(Class cls, SEL selector);
-BOOL LSInstallInstanceHook(Class cls, SEL originalSelector, SEL hookSelector, Class templateClass);
-BOOL LSInstallInstanceHookWithIMP(Class cls, SEL originalSelector, SEL hookSelector, IMP hookIMP);
+typedef IMP _Nonnull (^LSHookFactory)(IMP originalImplementation);
+BOOL LSInstallInstanceHook(Class cls, SEL originalSelector, LSHookFactory factory);
 
 NS_ASSUME_NONNULL_END

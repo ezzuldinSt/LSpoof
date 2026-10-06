@@ -1,75 +1,96 @@
 # LSpoof
 
-Override your iOS device's GPS location from inside any app — no jailbreak required.
+Select the location reported by covered APIs inside a compatible sideloaded iOS app.
 
-Drop this dylib into a sideloaded IPA, and the app will report whatever coordinates you choose instead of your real location. Safari, Maps, Uber, Lyft, Pokemon GO — wherever the host app reads `CLLocation`, the spoofed value comes through.
+The dylib is designed for load-time injection into a sideloaded IPA. Covered Core Location and MapKit reads report a selected coordinate or a simulated route. It runs inside the host process; app compatibility requires testing with that host.
+
+## Download and update
+
+Download **LocationSpoofer.dylib** from the [latest release](https://github.com/ezzuldinSt/LSpoof/releases/latest). The binary targets **arm64 devices on iOS 16.0 or later**.
+
+Use your usual IPA injection and signing tool to add the dylib to the app. To update, replace the previous embedded copy, re-sign the modified IPA, and reinstall it using that tool. Adding the dylib to an app does not change other apps' locations.
 
 ---
 
 ## How It Works
 
-The library is injected into a third-party iOS app via `LC_LOAD_DYLIB` (load-time Mach-O patching). On launch, it swizzles `CLLocationManager` methods so every location callback — delegate-based or synchronous — returns a user-defined coordinate instead of the real GPS reading.
+The library is injected into a third-party iOS app via `LC_LOAD_DYLIB` (load-time Mach-O patching). A process-lifetime session controller owns Off, Holding location, Moving, and Paused state. Location wrappers consume a coherent session snapshot, and opening the picker preserves the active session.
 
 Supported hooking targets:
 
-- `CLLocationManager.setDelegate:` → delegates implementing `locationManager:didUpdateLocations:` or the legacy `locationManager:didUpdateToLocation:fromLocation:` are swizzled to inject spoofed `CLLocation` arrays.
-- `CLLocationManager.location` — the synchronous getter is swizzled directly.
+- `CLLocationManager.setDelegate:` → non-system delegates implementing `locationManager:didUpdateLocations:` or the legacy `locationManager:didUpdateToLocation:fromLocation:` receive simulated locations while the session is active. Both legacy arguments use simulated history.
+- `CLLocationManager.location` — the synchronous getter.
+- `MKUserLocation.location` — the covered MapKit getter.
 
-The gesture detection (`sendEvent:` on `UIApplication`/`UIWindow`) is reinstalled on `UIApplicationDidFinishLaunching` and `UIApplicationDidBecomeActive` to handle apps that subclass `UIApplication`.
+When Off, the wrappers forward original values. Authorization status and Location Services availability remain genuine. The picker's optional real-location annotation uses its own manager and starts updates only with existing permission; it does not request authorization.
 
-**What is NOT hooked:** Swift `CLLocationUpdate.liveUpdates()` (iOS 17+ async sequence), `CLBackgroundActivitySession`, telephony/WiFi/IP-based geolocation, or server-side IP checks.
+Touch detection wraps `UIApplication.sendEvent:` and captures the original implementation. Lifecycle installation handles custom UIApplication subclasses. Presentation belongs to the initiating foreground window/scene.
 
----
-
-## Trigger
-
-**Three fingers, 0.8 seconds.** Touch and hold three fingers anywhere on the screen. After 0.8 seconds the map picker appears. Lift any finger before the timer fires and nothing happens.
-
-The gesture is disabled while the picker is visible so the host app's MapKit still works normally.
+**Coverage limits:** Swift `CLLocationUpdate.liveUpdates()`, `CLBackgroundActivitySession`, heading callbacks, visits/geofences, system-framework delegates, telephony/WiFi/IP-based geolocation, and server-side IP checks are outside these hooks. The library does not provide a device-wide GPS override.
 
 ---
 
-## The Picker
+## Open the picker
 
-A full-sheet map UI with search, a draggable pin, and a control panel.
+Tap the floating **Location** button. It is enabled by default and can be hidden in Settings. The opener only receives touches on its own button and does not take the app’s key window.
 
-### Map tab
+The shortcut is **at least three fingers held for 0.8 seconds**. Releasing below three touches cancels the hold. Dismissing with fingers held does not immediately reopen the picker; the shortcut waits for release. Opener visibility and presentation are tracked per scene and survive a background/foreground cycle.
 
-Two modes switchable via a segment control:
+---
 
-**Static mode** — pick a coordinate and hold it:
-- Search bar with Apple MapKit autocomplete
-- Interactive map with draggable pin
-- Manual Lat/Lon/Altitude text fields
-- Heading slider (0–359 degrees with compass direction indicator)
-- **Apply Location** — persists the coordinate and enables spoofing
-- **Stop Spoofing** — disables spoofing and clears saved state
+## Choose a location
 
-**Route mode** — simulate movement along a real route:
-- Tap to place start and destination markers (green/red draggable pins)
-- **Get Route** fetches directions via Apple Maps
-- Transport mode: Walk (5 km/h), Cycle (15 km/h), Drive (50 km/h), or Custom
-- **Play** / **Pause** / **Stop** controls the simulation
-- Interpolates along the polyline at 0.1 s intervals with heading computed in real time
+The picker has three workspaces: **Location**, **Route**, and **Saved**. Its header shows the applied session separately from your preview. Main actions and Turn off stay in the footer.
 
-### Bookmarks tab
+1. Search for a place, tap/drag a pin, or choose **Edit coordinates**.
+2. Review the place and coordinates on the map. Coordinate input accepts negative values, native digits, and decimal points or commas; errors appear beside the field. Typing does not rewrite the live input.
+3. Tap **Apply location** (or **Replace location** when active). This stops any moving/paused route and applies the selected point. Close the picker to return to the app.
 
-Two sections:
-- **Recents** — last 5 applied coordinates with reverse-geocoded names
-- **Bookmarks** — saved locations; swipe to delete, long-press to rename, drag to reorder in edit mode
-- Each bookmark has an inline **Apply** button for one-tap spoofing
+**Turn off** always disables spoofing. Remember last selection only keeps the coordinate available to preview and apply again.
+
+Coordinates and saved places remain usable when online search or directions are unavailable. Map errors provide Retry; search errors retain instructions for trying again or entering coordinates.
+
+## Build and play a route
+
+1. Choose **From** and **To** using search or coordinates. The named From/To map selector determines which endpoint a tap edits. Pins are draggable; Swap endpoints reverses the draft.
+2. Choose a **Walking path** or **Driving path** before **Build route**. Changing this choice after a preview refetches directions.
+3. Set playback speed: Walking (5 km/h), Cycling (15 km/h), Driving (50 km/h), or a custom value from 1 to 500 km/h. Speed changes movement without changing the chosen path. Cycling is a speed preset, not a cycling-directions API.
+4. **Start route** applies the preview. A new route draft leaves the applied session running; **Replace route** confirms replacement and starts at From.
+
+The applied position has its own marker. Progress shows remaining distance and estimated time using playback speed. **Pause/Resume**, **Hold here**, and **Turn off** have distinct effects. Route controls remain available from Location and Saved through a labeled menu.
+
+Paused samples report zero speed. Backgrounding pauses playback; resume explicitly when returning. Completion holds and persists the destination even with the picker closed. **Replay route** restarts its retained path during the process lifetime. Relaunch restores the last checkpoint as a held location, without resuming a route. Host callback frequency still depends on the host’s location-manager activity.
+
+Search and directions requests are canceled and invalidated when inputs change, the workspace changes, the picker closes, or it backgrounds. An old response cannot overwrite a newer preview.
+
+## Saved places
+
+- Select a saved or recent place to return to Location with an explicit preview; Apply commits it.
+- **Save place** asks for a name. New saves stop at 50 with visible feedback; existing places are never evicted. Valid legacy entries above 50 remain intact, and additions stay blocked until below the limit.
+- Row menus expose Preview, Rename, Delete, Move to top, Move up, and Move down. Reorder mode provides drag handles and restricts moves to saved places. Mutations use persistent IDs.
+- Recent history keeps up to five unique applied coordinates, uses a searched/saved name when available, and provides **Clear recent locations**.
+
+## Settings and accessibility
+
+Settings contains altitude, course, held-position variation/radius, remembering, the optional real-location annotation, and the floating opener. Edits stay local until **Save settings**, which explicitly updates the current session and preferences. Cancel/swipe dismissal discards edits. Closing the picker leaves an applied session active and discards unapplied location/route drafts.
+
+The radius has a circle preview. Real location uses genuine existing permission and appears separately, with its own recenter button and unavailable message. Updates stop when the picker closes, backgrounds, or shows Saved.
+
+Controls use SF Symbols, Dynamic Type, wrapping labels, semantic light/dark colors, at least 44-point touch targets, VoiceOver names/state announcements, keyboard-aware scrolling, Escape/back dismissal, and Reduce Motion. Button/navigation text scales within bounds to keep actions reachable in compact presentations. Coordinate entry and row menus provide alternatives to map gestures and reordering drags.
+
+The maintainer has reported working functionality on a real device and supplied layout issues addressed in v1.1.0. The final layout fixes still need a follow-up device check; broader host/OS, VoiceOver, and multi-window compatibility requires testing.
 
 ---
 
 ## Build
 
-```
-export THEOS=/path/to/theos
+Install [Theos](https://theos.dev/docs/Installation-Linux.html) and export `THEOS` to its installation directory in your shell. Then run:
+
+```sh
 make clean
-make
+make FINALPACKAGE=1 DEBUG=0
 ```
 
-Output: `.theos/obj/debug/LocationSpoofer.dylib`
+Release output: `.theos/obj/LocationSpoofer.dylib` (optimized, stripped, and ad hoc signed). For a debug build, run `make DEBUG=1`; its output is `.theos/obj/debug/LocationSpoofer.dylib`.
 
-Requires [theos](https://github.com/theos/theos) (Linux Makefile toolchain). SDK target is iPhoneOS 16.0, source-compatible through iOS 26. Architecture: `arm64`. ARC enabled.
-
+The SDK is pinned to iPhoneOS **16.5**, with an iOS **16.0** deployment target and `arm64` architecture. ARC is enabled. The Linux build has been verified with Theos revision `dd5c14bb9d91311e221d51b5bfb8c9e5948156db` and the official Linux Clang 11.1.0 toolchain. Device, injection, and native UI compatibility remain subject to iOS host testing.

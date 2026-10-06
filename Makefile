@@ -1,5 +1,5 @@
 ARCHS = arm64
-TARGET = iphone:clang:latest:16.0
+TARGET = iphone:clang:16.5:16.0
 
 include $(THEOS)/makefiles/common.mk
 
@@ -9,7 +9,14 @@ LocationSpoofer_FILES = \
 	Source/dylib_init.m \
 	Source/LSHooking.m \
 	Source/LocationSpoofer.m \
+	Source/SessionController.m \
+	Source/LSUI.m \
+	Source/LSSettings.m \
+	Source/LSSettingsViewController.m \
+	Source/LSCoordinateEntryController.m \
+	Source/LSPlaceSearchController.m \
 	Source/RouteSimulator.m \
+	Source/RouteGeometry.c \
 	Source/BookmarksManager.m \
 	Source/OverlayWindow.m \
 	Source/MapPickerViewController.m \
