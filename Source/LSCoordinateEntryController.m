@@ -37,7 +37,8 @@
     self.longitudeError = LSLabel(@"Enter a longitude from −180 to 180.", UIFontTextStyleFootnote);
     self.map = [[MKMapView alloc] init];
     self.map.translatesAutoresizingMaskIntoConstraints = NO;
-    self.map.layer.cornerRadius = 16;
+    self.map.layer.cornerRadius = 20;
+    self.map.layer.cornerCurve = kCACornerCurveContinuous;
     self.map.clipsToBounds = YES;
     self.map.showsUserLocation = NO;
     self.map.userInteractionEnabled = NO;
@@ -54,14 +55,16 @@
         self.latitudeField.text = LSFormatDecimal(self.initialCoordinate.latitude, 6);
         self.longitudeField.text = LSFormatDecimal(self.initialCoordinate.longitude, 6);
     }
-    self.chooseButton = LSButton(@"Use these coordinates", @"mappin", YES);
+    self.chooseButton = LSButton(@"Use these coordinates", @"mappin.and.ellipse", YES);
     [self.chooseButton addTarget:self action:@selector(choose) forControlEvents:UIControlEventTouchUpInside];
-    UILabel *hint = LSLabel(@"Type or paste numbers using a decimal point or comma. Negative values are supported. Coordinates also work when place search is unavailable.", UIFontTextStyleFootnote);
+    UILabel *hint = LSLabel(@"Type numbers with a decimal point or comma; south and west are negative. You can also paste a pair like “48.8584, 2.2945” into Latitude and both fields fill in.", UIFontTextStyleFootnote);
     hint.textColor = UIColor.secondaryLabelColor;
-    UIStackView *stack = LSStack(@[hint,
+    UIView *fields = LSInsetPanel(LSStack(@[
         LSFieldRow(@"Latitude · −90 to 90", self.latitudeField, self.latitudeError),
-        LSFieldRow(@"Longitude · −180 to 180", self.longitudeField, self.longitudeError),
-        self.map, self.previewLabel, self.chooseButton], 16);
+        LSFieldRow(@"Longitude · −180 to 180", self.longitudeField, self.longitudeError)], 14));
+    UIStackView *stack = LSStack(@[fields, hint, self.map, self.previewLabel, self.chooseButton], 16);
+    [stack setCustomSpacing:8 afterView:self.map];
+    [stack setCustomSpacing:24 afterView:self.previewLabel];
     [self.scroll addSubview:stack];
     [NSLayoutConstraint activateConstraints:@[
         [self.scroll.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor],
@@ -91,6 +94,17 @@
     return value && fabs(value.doubleValue) <= limit ? value : nil;
 }
 - (void)editingChanged:(UITextField *)field {
+    CLLocationCoordinate2D pair;
+    if (LSParseCoordinatePair(field.text, &pair)) {
+        // Pasting "lat, lon" used to fail validation; split it across both fields.
+        self.latitudeField.text = LSFormatDecimal(pair.latitude, 6);
+        self.longitudeField.text = LSFormatDecimal(pair.longitude, 6);
+        self.latitudeError.hidden = YES;
+        self.longitudeError.hidden = YES;
+        [self updateDraftPreview];
+        LSAnnounce(@"Latitude and longitude filled in");
+        return;
+    }
     UILabel *error = field == self.latitudeField ? self.latitudeError : self.longitudeError;
     error.hidden = YES;
     field.accessibilityHint = nil;
@@ -102,14 +116,16 @@
     NSNumber *longitude = [self valueForField:self.longitudeField];
     self.chooseButton.enabled = latitude && longitude;
     if (!latitude || !longitude) {
+        self.map.alpha = 0.5;
         self.previewLabel.text = @"Finish entering both coordinates to preview the location.";
         return;
     }
     CLLocationCoordinate2D coordinate = CLLocationCoordinate2DMake(latitude.doubleValue, longitude.doubleValue);
     if (!self.pin) { self.pin = [[MKPointAnnotation alloc] init]; [self.map addAnnotation:self.pin]; }
+    self.map.alpha = 1;
     self.pin.coordinate = coordinate;
     [self.map setRegion:MKCoordinateRegionMakeWithDistance(coordinate, 1500, 1500) animated:NO];
-    self.previewLabel.text = [NSString stringWithFormat:@"Preview: %@", LSCoordinateText(coordinate)];
+    self.previewLabel.text = [NSString stringWithFormat:@"Preview · %@", LSCoordinateText(coordinate)];
 }
 - (BOOL)validate:(UITextField *)field {
     NSNumber *value = [self valueForField:field];

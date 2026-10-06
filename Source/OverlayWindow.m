@@ -17,6 +17,147 @@
 }
 @end
 
+// Floating opener: a round button that shows the session state, can be dragged
+// anywhere, snaps to the nearest side edge, and remembers where it was left.
+static NSString * const kLSOpenerSideKey = @"LSOpenerSide";
+static NSString * const kLSOpenerYKey = @"LSOpenerY";
+static const CGFloat kLSOpenerSize = 56;
+
+@interface LSOpenerViewController : UIViewController
+@property (nonatomic, strong) UIButton *button;
+@property (nonatomic, strong) UIView *ring;
+@property (nonatomic) BOOL dragging;
+@property (nonatomic) CGPoint dragOrigin;
+@property (nonatomic) LSSessionMode shownMode;
+@end
+@implementation LSOpenerViewController
++ (NSUserDefaults *)defaults { return [[NSUserDefaults alloc] initWithSuiteName:@"com.locationspoofer.dylib"]; }
+- (void)loadView {
+    UIView *view = [[UIView alloc] init];
+    view.backgroundColor = UIColor.clearColor;
+    view.accessibilityViewIsModal = NO;
+    self.view = view;
+}
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.shownMode = (LSSessionMode)-1;
+    UIButtonConfiguration *config = UIButtonConfiguration.filledButtonConfiguration;
+    config.cornerStyle = UIButtonConfigurationCornerStyleCapsule;
+    config.preferredSymbolConfigurationForImage = [UIImageSymbolConfiguration configurationWithPointSize:22 weight:UIImageSymbolWeightSemibold];
+    config.contentInsets = NSDirectionalEdgeInsetsZero;
+    UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
+    button.configuration = config;
+    button.frame = CGRectMake(0, 0, kLSOpenerSize, kLSOpenerSize);
+    button.layer.shadowColor = UIColor.blackColor.CGColor;
+    button.layer.shadowOpacity = 0.28;
+    button.layer.shadowRadius = 10;
+    button.layer.shadowOffset = CGSizeMake(0, 4);
+    button.accessibilityHint = @"Opens the LSpoof picker. Drag to move. You can hide this button in Settings.";
+    button.largeContentTitle = @"LSpoof";
+    button.showsLargeContentViewer = YES;
+    [button addInteraction:[[UILargeContentViewerInteraction alloc] init]];
+    UIView *ring = [[UIView alloc] initWithFrame:CGRectInset(button.bounds, -3, -3)];
+    ring.userInteractionEnabled = NO;
+    ring.layer.cornerRadius = ring.bounds.size.width / 2;
+    ring.layer.borderWidth = 2.5;
+    ring.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [button addSubview:ring];
+    self.ring = ring;
+    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(panned:)];
+    [button addGestureRecognizer:pan];
+    [self.view addSubview:button];
+    self.button = button;
+    [self updateForSession];
+    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(sessionChanged:) name:LSSessionDidChangeNotification object:nil];
+}
+- (void)dealloc { [NSNotificationCenter.defaultCenter removeObserver:self]; }
+- (void)sessionChanged:(NSNotification *)note {
+    (void)note;
+    // Route ticks arrive at 10 Hz; only a mode change alters the button.
+    if (LSSessionController.shared.snapshot.mode != self.shownMode) [self updateForSession];
+}
+- (void)updateForSession {
+    LSSessionMode mode = LSSessionController.shared.snapshot.mode;
+    self.shownMode = mode;
+    UIButtonConfiguration *config = self.button.configuration;
+    BOOL off = mode == LSSessionModeOff;
+    config.image = [UIImage systemImageNamed:off ? @"location.fill" : LSSessionSymbol(mode)];
+    config.baseBackgroundColor = off ? UIColor.systemBackgroundColor : LSAccentColor();
+    config.baseForegroundColor = off ? LSAccentColor() : UIColor.whiteColor;
+    if (mode == LSSessionModeMoving) config.baseBackgroundColor = LSSuccessColor();
+    if (mode == LSSessionModePaused) config.baseBackgroundColor = LSWarningColor();
+    self.button.configuration = config;
+    self.ring.layer.borderColor = (off ? [UIColor.separatorColor resolvedColorWithTraitCollection:self.traitCollection]
+                                       : [UIColor.whiteColor colorWithAlphaComponent:0.85]).CGColor;
+    self.button.accessibilityLabel = off ? @"Open LSpoof. Spoofing is off" : [NSString stringWithFormat:@"Open LSpoof. %@", LSSessionTitle(mode)];
+}
+- (void)traitCollectionDidChange:(UITraitCollection *)previous {
+    [super traitCollectionDidChange:previous];
+    [self updateForSession];
+}
+- (CGRect)allowedRect {
+    UIEdgeInsets insets = self.view.safeAreaInsets;
+    CGRect bounds = UIEdgeInsetsInsetRect(self.view.bounds, insets);
+    return CGRectInset(bounds, 10 + kLSOpenerSize / 2, 10 + kLSOpenerSize / 2);
+}
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    if (self.dragging) return;
+    CGRect allowed = [self allowedRect];
+    if (CGRectIsNull(allowed) || CGRectIsEmpty(allowed)) return;
+    NSUserDefaults *defaults = [self.class defaults];
+    id storedSide = [defaults objectForKey:kLSOpenerSideKey], storedY = [defaults objectForKey:kLSOpenerYKey];
+    BOOL right = [storedSide isKindOfClass:NSNumber.class] ? [storedSide boolValue] : YES;
+    double fraction = [storedY isKindOfClass:NSNumber.class] ? [storedY doubleValue] : 0.62;
+    if (!isfinite(fraction)) fraction = 0.62;
+    fraction = MAX(0.0, MIN(1.0, fraction));
+    self.button.center = CGPointMake(right ? CGRectGetMaxX(allowed) : CGRectGetMinX(allowed),
+                                     CGRectGetMinY(allowed) + allowed.size.height * fraction);
+}
+- (void)panned:(UIPanGestureRecognizer *)pan {
+    CGPoint translation = [pan translationInView:self.view];
+    CGRect allowed = [self allowedRect];
+    switch (pan.state) {
+        case UIGestureRecognizerStateBegan: {
+            self.dragging = YES;
+            self.dragOrigin = self.button.center;
+            [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
+            [UIView animateWithDuration:0.15 animations:^{ self.button.transform = CGAffineTransformMakeScale(1.1, 1.1); }];
+            break;
+        }
+        case UIGestureRecognizerStateChanged: {
+            CGPoint center = CGPointMake(self.dragOrigin.x + translation.x, self.dragOrigin.y + translation.y);
+            center.x = MAX(CGRectGetMinX(allowed), MIN(CGRectGetMaxX(allowed), center.x));
+            center.y = MAX(CGRectGetMinY(allowed), MIN(CGRectGetMaxY(allowed), center.y));
+            self.button.center = center;
+            break;
+        }
+        case UIGestureRecognizerStateEnded:
+        case UIGestureRecognizerStateCancelled:
+        case UIGestureRecognizerStateFailed: {
+            CGPoint velocity = [pan velocityInView:self.view];
+            CGPoint center = self.button.center;
+            CGFloat projectedX = center.x + velocity.x * 0.15;
+            BOOL right = projectedX > CGRectGetMidX(allowed);
+            CGFloat y = MAX(CGRectGetMinY(allowed), MIN(CGRectGetMaxY(allowed), center.y + velocity.y * 0.1));
+            CGPoint target = CGPointMake(right ? CGRectGetMaxX(allowed) : CGRectGetMinX(allowed), y);
+            double fraction = allowed.size.height > 0 ? (y - CGRectGetMinY(allowed)) / allowed.size.height : 0.62;
+            NSUserDefaults *defaults = [self.class defaults];
+            [defaults setBool:right forKey:kLSOpenerSideKey];
+            [defaults setDouble:fraction forKey:kLSOpenerYKey];
+            BOOL animate = !UIAccessibilityIsReduceMotionEnabled();
+            [UIView animateWithDuration:animate ? 0.45 : 0.1 delay:0 usingSpringWithDamping:0.72 initialSpringVelocity:0.5 options:UIViewAnimationOptionAllowUserInteraction animations:^{
+                self.button.center = target;
+                self.button.transform = CGAffineTransformIdentity;
+            } completion:^(__unused BOOL finished) { self.dragging = NO; }];
+            break;
+        }
+        default:
+            break;
+    }
+}
+@end
+
 @class LSOverlayManager;
 @interface LSOverlayState : NSObject <UIAdaptivePresentationControllerDelegate>
 @property (nonatomic, weak, nullable) UIWindowScene *scene;
@@ -148,23 +289,15 @@ static void LSInstallEventHook(void) {
     LSOpenerWindow *window = state.scene ? [[LSOpenerWindow alloc] initWithWindowScene:state.scene] : [[LSOpenerWindow alloc] initWithFrame:state.hostWindow.bounds];
     window.windowLevel = UIWindowLevelNormal + 1;
     window.backgroundColor = UIColor.clearColor;
-    UIViewController *controller = [[UIViewController alloc] init];
-    controller.view.backgroundColor = UIColor.clearColor;
-    controller.view.accessibilityViewIsModal = NO;
+    LSOpenerViewController *controller = [[LSOpenerViewController alloc] init];
     window.rootViewController = controller;
-    UIButton *button = LSButton(@"Location", @"mappin.and.ellipse", YES);
-    button.accessibilityLabel = @"Open LSpoof location picker";
-    button.accessibilityHint = @"Choose a location, route, or saved place. You can hide this button in Settings.";
+    (void)controller.view;
+    UIButton *button = controller.button;
     __weak LSOverlayState *weakState = state;
     [button addAction:[UIAction actionWithHandler:^(__unused UIAction *action) {
         LSOverlayState *state = weakState;
         if (state) [[LSOverlayManager shared] presentState:state];
     }] forControlEvents:UIControlEventTouchUpInside];
-    [controller.view addSubview:button];
-    [NSLayoutConstraint activateConstraints:@[
-        [button.trailingAnchor constraintEqualToAnchor:controller.view.safeAreaLayoutGuide.trailingAnchor constant:-12],
-        [button.centerYAnchor constraintEqualToAnchor:controller.view.safeAreaLayoutGuide.centerYAnchor]
-    ]];
     window.opener = button;
     state.openerWindow = window;
     // Setting hidden does not change the host's key window or keyboard focus.

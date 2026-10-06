@@ -21,5 +21,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (BOOL)removeBookmarkWithID:(NSString *)identifier;
 - (BOOL)renameBookmarkWithID:(NSString *)identifier name:(NSString *)name;
 - (BOOL)moveBookmarkWithID:(NSString *)identifier toIndex:(NSUInteger)index;
+// The saved place within a few meters of a coordinate, used to avoid duplicates.
+- (nullable LSBookmark *)bookmarkNearCoordinate:(CLLocationCoordinate2D)coordinate;
 @end
 NS_ASSUME_NONNULL_END

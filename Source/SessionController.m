@@ -20,6 +20,8 @@ NSNotificationName const LSSessionDidChangeNotification = @"LSSessionDidChange";
     os_unfair_lock _snapshotLock;
     LSSessionSnapshot *_snapshot;
     uint64_t _generation;
+    BOOL _pausedForBackground;
+    NSTimeInterval _lastCheckpoint;
 }
 @property (nonatomic, strong, nullable) MKRoute *retainedRoute;
 @end
@@ -47,6 +49,9 @@ NSNotificationName const LSSessionDidChangeNotification = @"LSSessionDidChange";
         [NSNotificationCenter.defaultCenter addObserver:self
                                                selector:@selector(applicationDidEnterBackground:)
                                                    name:UIApplicationDidEnterBackgroundNotification object:nil];
+        [NSNotificationCenter.defaultCenter addObserver:self
+                                               selector:@selector(applicationWillEnterForeground:)
+                                                   name:UIApplicationWillEnterForegroundNotification object:nil];
     }
     return self;
 }
@@ -96,6 +101,7 @@ NSNotificationName const LSSessionDidChangeNotification = @"LSSessionDidChange";
     __block BOOL applied = NO;
     [self onMain:^{
         BOOL wasOff = self.snapshot.mode == LSSessionModeOff;
+        self->_pausedForBackground = NO;
         [[LSRouteSimulator shared] stop];
         PersistenceManager *store = [PersistenceManager shared];
         applied = [store setSpoofCoordinate:coordinate enabled:YES];
@@ -131,6 +137,8 @@ NSNotificationName const LSSessionDidChangeNotification = @"LSSessionDidChange";
             return;
         }
         self.retainedRoute = route;
+        self->_pausedForBackground = NO;
+        self->_lastCheckpoint = NSProcessInfo.processInfo.systemUptime;
         PersistenceManager *store = [PersistenceManager shared];
         [store setSpoofCoordinate:simulator.startCoordinate enabled:YES];
         store.simulationWasActive = YES;
@@ -159,6 +167,7 @@ NSNotificationName const LSSessionDidChangeNotification = @"LSSessionDidChange";
     PersistenceManager *store = [PersistenceManager shared];
     store.heading = simulator.currentHeading;
     [store setSpoofCoordinate:simulator.currentCoordinate enabled:YES];
+    _lastCheckpoint = NSProcessInfo.processInfo.systemUptime;
 }
 
 - (BOOL)saveSettings:(LSSettings *)settings {
@@ -175,6 +184,7 @@ NSNotificationName const LSSessionDidChangeNotification = @"LSSessionDidChange";
 
 - (void)pause {
     [self onMain:^{
+        self->_pausedForBackground = NO;
         LSRouteSimulator *simulator = [LSRouteSimulator shared];
         if (!simulator.isSimulating || simulator.isPaused) return;
         [simulator pause];
@@ -185,6 +195,7 @@ NSNotificationName const LSSessionDidChangeNotification = @"LSSessionDidChange";
 
 - (void)resume {
     [self onMain:^{
+        self->_pausedForBackground = NO;
         LSRouteSimulator *simulator = [LSRouteSimulator shared];
         if (!simulator.isSimulating || !simulator.isPaused) return;
         [simulator resume];
@@ -205,6 +216,7 @@ NSNotificationName const LSSessionDidChangeNotification = @"LSSessionDidChange";
 
 - (void)disable {
     [self onMain:^{
+        self->_pausedForBackground = NO;
         [[LSRouteSimulator shared] stop];
         [[PersistenceManager shared] clearSpoof];
         self.retainedRoute = nil;
@@ -214,6 +226,9 @@ NSNotificationName const LSSessionDidChangeNotification = @"LSSessionDidChange";
 }
 
 - (void)routeSimulator:(LSRouteSimulator *)simulator didUpdateCoordinate:(CLLocationCoordinate2D)coordinate heading:(CLLocationDirection)heading {
+    // Previously the stored point only changed on pause or finish, so a crash or a
+    // force quit mid-route restored the route's start. Checkpoint every few seconds.
+    if (NSProcessInfo.processInfo.systemUptime - _lastCheckpoint >= 5.0) [self checkpointSimulator];
     [self publishMode:simulator.isPaused ? LSSessionModePaused : LSSessionModeMoving coordinate:coordinate heading:heading];
 }
 
@@ -225,7 +240,21 @@ NSNotificationName const LSSessionDidChangeNotification = @"LSSessionDidChange";
 
 - (void)applicationDidEnterBackground:(NSNotification *)notification {
     (void)notification;
-    [self pause];
+    [self onMain:^{
+        LSRouteSimulator *simulator = [LSRouteSimulator shared];
+        if (!simulator.isSimulating || simulator.isPaused) return;
+        [self pause];
+        // Remember that the pause was automatic so the route continues on return.
+        self->_pausedForBackground = YES;
+    }];
+}
+
+- (void)applicationWillEnterForeground:(NSNotification *)notification {
+    (void)notification;
+    [self onMain:^{
+        if (!self->_pausedForBackground) return;
+        [self resume];
+    }];
 }
 
 @end
