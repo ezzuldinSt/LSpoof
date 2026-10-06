@@ -1,0 +1,87 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Pinned to the setup releases are built with, so CI output matches local builds.
+  THEOS_REF: dd5c14bb9d91311e221d51b5bfb8c9e5948156db
+  TOOLCHAIN_TAG: test-210562a
+  SDK_TAG: master-146e41f
+  SDK_NAME: iPhoneOS16.5.sdk
+
+jobs:
+  build:
+    name: Build LocationSpoofer.dylib
+    runs-on: ubuntu-latest
+    env:
+      THEOS: ${{ github.workspace }}/theos
+    steps:
+      - name: Check out LSpoof
+        uses: actions/checkout@v7
+        with:
+          path: LSpoof
+
+      - name: Check out Theos
+        uses: actions/checkout@v7
+        with:
+          repository: theos/theos
+          ref: ${{ env.THEOS_REF }}
+          path: theos
+          submodules: recursive
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libtinfo6 libxml2 rsync xz-utils
+
+      - name: Restore iOS toolchain and SDK
+        id: cache
+        uses: actions/cache@v6
+        with:
+          path: |
+            theos/toolchain/linux
+            theos/sdks/${{ env.SDK_NAME }}
+          key: theos-${{ runner.os }}-${{ env.TOOLCHAIN_TAG }}-${{ env.SDK_TAG }}-${{ env.SDK_NAME }}
+
+      - name: Download iOS toolchain and SDK
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p theos/toolchain theos/sdks
+          curl -fsSL "https://github.com/L1ghtmann/llvm-project/releases/download/${TOOLCHAIN_TAG}/iOSToolchain-x86_64.tar.xz" | tar -xJf - -C theos/toolchain
+          curl -fsSL "https://github.com/theos/sdks/releases/download/${SDK_TAG}/${SDK_NAME}.tar.xz" | tar -xJf - -C theos/sdks
+          test -x theos/toolchain/linux/iphone/bin/clang
+          test -d "theos/sdks/${SDK_NAME}"
+
+      - name: Build
+        working-directory: LSpoof
+        run: |
+          make clean
+          make FINALPACKAGE=1 DEBUG=0
+
+      - name: Check and checksum the dylib
+        run: |
+          mkdir -p dist
+          cp LSpoof/.theos/obj/LocationSpoofer.dylib dist/
+          file dist/LocationSpoofer.dylib
+          file dist/LocationSpoofer.dylib | grep -q 'Mach-O 64-bit.*arm64'
+          (cd dist && sha256sum LocationSpoofer.dylib | tee SHA256SUMS)
+
+      # .theos is a hidden folder, which upload-artifact skips, so the files go via dist/.
+      - name: Upload the dylib
+        uses: actions/upload-artifact@v7
+        with:
+          name: LocationSpoofer-${{ github.ref_type == 'tag' && github.ref_name || github.sha }}
+          path: dist/
+          if-no-files-found: error
