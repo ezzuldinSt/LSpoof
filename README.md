@@ -93,4 +93,6 @@ make FINALPACKAGE=1 DEBUG=0
 
 Release output: `.theos/obj/LocationSpoofer.dylib` (optimized, stripped, and ad hoc signed). For a debug build, run `make DEBUG=1`; its output is `.theos/obj/debug/LocationSpoofer.dylib`.
 
+GitHub Actions runs the same release build on every push to `main`, every pull request and every `v*` tag, using the Theos revision, toolchain and SDK listed below. Each run's **LocationSpoofer.dylib** and **SHA256SUMS** are attached to the run as an artifact.
+
 The SDK is pinned to iPhoneOS **16.5**, with an iOS **16.0** deployment target and `arm64` architecture. ARC is enabled. The Linux build has been verified with Theos revision `dd5c14bb9d91311e221d51b5bfb8c9e5948156db` and the official Linux Clang 11.1.0 toolchain. Device, injection, and native UI compatibility remain subject to iOS host testing.
