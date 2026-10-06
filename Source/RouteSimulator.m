@@ -1,4 +1,5 @@
 #import "RouteSimulator.h"
+#import "RouteGeometry.h"
 #import <os/lock.h>
 
 @implementation LSRoutePoint
@@ -16,6 +17,7 @@
 @property (nonatomic, assign) NSUInteger currentSegmentIndex;
 @property (nonatomic, assign) BOOL isSimulating;
 @property (nonatomic, assign) BOOL isPaused;
+@property (nonatomic, assign) NSTimeInterval lastTickTime;
 @end
 
 @implementation LSRouteSimulator
@@ -106,21 +108,26 @@
     return 6.0;
 }
 
-- (void)startWithRoute:(MKRoute *)route {
-    [self stop];
-
+- (BOOL)startWithRoute:(MKRoute *)route {
     MKPolyline *polyline = route.polyline;
     NSUInteger pointCount = polyline.pointCount;
     if (!polyline || pointCount < 2) {
-        return;
+        return NO;
     }
 
     CLLocationCoordinate2D *rawCoordinates = malloc(sizeof(CLLocationCoordinate2D) * pointCount);
     if (!rawCoordinates) {
-        return;
+        return NO;
     }
 
     [polyline getCoordinates:rawCoordinates range:NSMakeRange(0, pointCount)];
+
+    for (NSUInteger index = 0; index < pointCount; index++) {
+        if (!CLLocationCoordinate2DIsValid(rawCoordinates[index])) {
+            free(rawCoordinates);
+            return NO;
+        }
+    }
 
     NSMutableArray<LSRoutePoint *> *points = [NSMutableArray arrayWithCapacity:pointCount];
     double cumulative = 0.0;
@@ -135,7 +142,13 @@
                                                           longitude:rawCoordinates[index - 1].longitude];
         CLLocation *current = [[CLLocation alloc] initWithLatitude:rawCoordinates[index].latitude
                                                        longitude:rawCoordinates[index].longitude];
-        cumulative += [current distanceFromLocation:previous];
+        double distance = [current distanceFromLocation:previous];
+        if (!isfinite(distance)) {
+            free(rawCoordinates);
+            return NO;
+        }
+        if (distance <= 0.0) continue;
+        cumulative += distance;
 
         LSRoutePoint *point = [[LSRoutePoint alloc] init];
         point.coordinate = rawCoordinates[index];
@@ -143,12 +156,13 @@
         [points addObject:point];
     }
 
-    if (points.count < 2 || cumulative <= 0.0) {
+    if (points.count < 2 || !isfinite(cumulative) || cumulative <= 0.0) {
         free(rawCoordinates);
-        return;
+        return NO;
     }
 
-    self.routePoints = points;
+    [self stop];
+    self.routePoints = [points copy];
     self.totalDistance = cumulative;
     self.distanceCovered = 0.0;
     self.currentCoordinate = firstPoint.coordinate;
@@ -163,7 +177,7 @@
     free(rawCoordinates);
 
     [self scheduleTickTimer];
-    [self notifyDelegateUpdate];
+    return YES;
 }
 
 - (void)pause {
@@ -189,13 +203,13 @@
     self.isSimulating = NO;
     self.isPaused = NO;
     self.distanceCovered = 0.0;
-    self.routePoints = nil;
     self.currentSegmentIndex = 0;
-    self.totalDistance = 0.0;
+    // Keep the validated definition for replay; session state controls activation.
 }
 
 - (void)scheduleTickTimer {
     [self.tickTimer invalidate];
+    self.lastTickTime = NSProcessInfo.processInfo.systemUptime;
     self.tickTimer = [NSTimer scheduledTimerWithTimeInterval:0.1
                                                       target:self
                                                     selector:@selector(handleTick)
@@ -211,7 +225,12 @@
 
     double speed = [LSRouteSimulator speedMetersPerSecondForMode:self.transportMode
                                                   customSpeedKmh:self.customSpeedKmh];
-    self.distanceCovered += speed * 0.1;
+    NSTimeInterval now = NSProcessInfo.processInfo.systemUptime;
+    NSTimeInterval elapsed = MAX(0.0, now - self.lastTickTime);
+    self.lastTickTime = now;
+    double advanced = LSRouteAdvanceDistance(self.distanceCovered, speed, elapsed, self.totalDistance);
+    if (!isfinite(advanced)) return;
+    self.distanceCovered = advanced;
 
     if (self.distanceCovered >= self.totalDistance) {
         LSRoutePoint *lastPoint = self.routePoints.lastObject;
@@ -222,9 +241,11 @@
             self.currentHeading = [self headingFromCoordinate:previousPoint.coordinate
                                                  toCoordinate:lastPoint.coordinate];
         }
-        [self notifyDelegateUpdate];
+        [self.tickTimer invalidate];
+        self.tickTimer = nil;
+        self.isSimulating = NO;
+        self.isPaused = NO;
         id<LSRouteSimulatorDelegate> delegate = self.delegate;
-        [self stop];
         if ([delegate respondsToSelector:@selector(routeSimulatorDidFinish:)]) {
             [delegate routeSimulatorDidFinish:self];
         }
@@ -247,28 +268,17 @@
         segmentProgress = (self.distanceCovered - segmentStart.cumulativeDistance) / segmentLength;
     }
 
-    CLLocationDegrees latitude = segmentStart.coordinate.latitude +
-        (segmentEnd.coordinate.latitude - segmentStart.coordinate.latitude) * segmentProgress;
-    CLLocationDegrees longitude = segmentStart.coordinate.longitude +
-        (segmentEnd.coordinate.longitude - segmentStart.coordinate.longitude) * segmentProgress;
-
-    self.currentCoordinate = CLLocationCoordinate2DMake(latitude, longitude);
+    LSRouteCoordinate interpolated = LSRouteInterpolate(
+        (LSRouteCoordinate){segmentStart.coordinate.latitude, segmentStart.coordinate.longitude},
+        (LSRouteCoordinate){segmentEnd.coordinate.latitude, segmentEnd.coordinate.longitude}, segmentProgress);
+    self.currentCoordinate = CLLocationCoordinate2DMake(interpolated.latitude, interpolated.longitude);
     self.currentHeading = [self headingFromCoordinate:segmentStart.coordinate toCoordinate:segmentEnd.coordinate];
     [self notifyDelegateUpdate];
 }
 
 - (CLLocationDirection)headingFromCoordinate:(CLLocationCoordinate2D)from toCoordinate:(CLLocationCoordinate2D)to {
-    double deltaX = to.longitude - from.longitude;
-    double deltaY = to.latitude - from.latitude;
-    double avgLat = (from.latitude + to.latitude) / 2.0 * M_PI / 180.0;
-    double cosLat = cos(avgLat);
-    if (cosLat < 1e-12) cosLat = 1e-12;
-    double radians = atan2(deltaX * cosLat, deltaY);
-    double degrees = radians * 180.0 / M_PI;
-    if (degrees < 0.0) {
-        degrees += 360.0;
-    }
-    return degrees;
+    return LSRouteBearing((LSRouteCoordinate){from.latitude, from.longitude},
+                          (LSRouteCoordinate){to.latitude, to.longitude});
 }
 
 - (void)notifyDelegateUpdate {

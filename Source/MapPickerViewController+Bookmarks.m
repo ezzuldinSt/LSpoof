@@ -1,369 +1,184 @@
 #import "MapPickerViewController+Private.h"
-#import "LocationSpoofer.h"
-#import "BookmarksManager.h"
 #import "PersistenceManager.h"
 
-static NSString * const kLSBookmarksCell = @"LSBookmarksCell";
-
-typedef NS_ENUM(NSInteger, LSBookmarksSection) {
-    LSBookmarksSectionRecents = 0,
-    LSBookmarksSectionSaved = 1
-};
-
 @implementation MapPickerViewController (LSBookmarksUI)
-
-- (void)buildBookmarksPanel {
-    self.bookmarksContainer = [[UIView alloc] init];
-    self.bookmarksContainer.translatesAutoresizingMaskIntoConstraints = NO;
-    self.bookmarksContainer.hidden = YES;
-    [self.controlPanel.contentView addSubview:self.bookmarksContainer];
-
-    self.bookmarksTableView = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStyleInsetGrouped];
-    self.bookmarksTableView.translatesAutoresizingMaskIntoConstraints = NO;
-    self.bookmarksTableView.dataSource = (id<UITableViewDataSource>)self;
-    self.bookmarksTableView.delegate = (id<UITableViewDelegate>)self;
-    self.bookmarksTableView.backgroundColor = UIColor.clearColor;
-    self.bookmarksTableView.keyboardDismissMode = UIScrollViewKeyboardDismissModeOnDrag;
-    [self.bookmarksTableView registerClass:[UITableViewCell class] forCellReuseIdentifier:kLSBookmarksCell];
-    [self.bookmarksContainer addSubview:self.bookmarksTableView];
-
-    UILongPressGestureRecognizer *longPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(ls_handleBookmarksLongPress:)];
-    [self.bookmarksTableView addGestureRecognizer:longPress];
-
-    [NSLayoutConstraint activateConstraints:@[
-        [self.bookmarksTableView.topAnchor constraintEqualToAnchor:self.bookmarksContainer.topAnchor],
-        [self.bookmarksTableView.leadingAnchor constraintEqualToAnchor:self.bookmarksContainer.leadingAnchor],
-        [self.bookmarksTableView.trailingAnchor constraintEqualToAnchor:self.bookmarksContainer.trailingAnchor],
-        [self.bookmarksTableView.bottomAnchor constraintEqualToAnchor:self.bookmarksContainer.bottomAnchor]
-    ]];
+- (void)buildSavedUI {
+    self.savedTable = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStyleInsetGrouped];
+    self.savedTable.dataSource = self;
+    self.savedTable.delegate = self;
+    self.savedTable.rowHeight = UITableViewAutomaticDimension;
+    self.savedTable.estimatedRowHeight = 80;
+    self.savedTable.backgroundColor = UIColor.systemGroupedBackgroundColor;
+    self.savedHint = LSLabel(@"Tap a place to preview it, then Apply location. Use the menu to rename, delete, or move a saved place.", UIFontTextStyleSubheadline);
+    self.savedHint.textColor = UIColor.secondaryLabelColor;
+    self.editSavedButton = LSButton(@"Reorder saved places", @"arrow.up.arrow.down", NO);
+    [self.editSavedButton addTarget:self action:@selector(toggleSavedEditing) forControlEvents:UIControlEventTouchUpInside];
+    UIButton *clear = LSButton(@"Clear recent locations", @"clock.arrow.circlepath", NO);
+    [clear addTarget:self action:@selector(clearRecents) forControlEvents:UIControlEventTouchUpInside];
+    self.savedToolbar = LSInsetPanel(LSStack(@[self.savedHint, self.editSavedButton, clear], 12));
+    self.savedTable.tableHeaderView = self.savedToolbar;
+    [self reloadSavedPlaces];
 }
-
-- (void)updatePanelTabVisibility {
-    BOOL mapTab = self.panelTab == LSMapPickerPanelTabMap;
-
-    CGFloat duration = 0.2;
-    self.mapControlsContainer.hidden = NO;
-    self.bookmarksContainer.hidden = NO;
-
-    [UIView animateWithDuration:duration animations:^{
-        self.mapControlsContainer.alpha = mapTab ? 1.0 : 0.0;
-        self.bookmarksContainer.alpha = mapTab ? 0.0 : 1.0;
-        self.coordinateModeSegment.alpha = mapTab ? 1.0 : 0.0;
-        self.searchBar.alpha = mapTab ? 1.0 : 0.0;
-    } completion:^(BOOL finished) {
-        (void)finished;
-        self.mapControlsContainer.hidden = !mapTab;
-        self.bookmarksContainer.hidden = mapTab;
-        self.coordinateModeSegment.hidden = !mapTab;
-        self.searchBar.hidden = !mapTab;
-    }];
-
-    if (!mapTab) {
-        [self.bookmarksTableView reloadData];
-    } else {
-        [self updateCoordinateModeVisibility];
-    }
+- (void)layoutSavedHeader {
+    LSSizeTableHeader(self.savedTable, self.savedToolbar);
 }
-
-- (void)handlePanelTabChanged:(UISegmentedControl *)sender {
-    self.panelTab = (LSMapPickerPanelTab)sender.selectedSegmentIndex;
-    [self updatePanelTabVisibility];
+- (void)reloadSavedPlaces {
+    self.savedPlaces = BookmarksManager.shared.allBookmarks;
+    self.recents = PersistenceManager.shared.recentLocations;
+    self.editSavedButton.enabled = self.savedPlaces.count > 1;
+    if (self.savedPlaces.count < 2) self.savedTable.editing = NO;
+    UIButtonConfiguration *configuration = self.editSavedButton.configuration;
+    configuration.title = self.savedTable.editing ? @"Done reordering" : @"Reorder saved places";
+    self.editSavedButton.configuration = configuration;
+    self.editSavedButton.accessibilityLabel = configuration.title;
+    [self.savedTable reloadData];
+    [self layoutSavedHeader];
 }
-
-- (void)handleCoordinateModeChanged:(UISegmentedControl *)sender {
-    self.coordinateMode = (LSMapPickerCoordinateMode)sender.selectedSegmentIndex;
-    [self updateCoordinateModeVisibility];
+- (void)toggleSavedEditing {
+    [self.savedTable setEditing:!self.savedTable.editing animated:LSMapAnimationsEnabled()];
+    UIButtonConfiguration *configuration = self.editSavedButton.configuration;
+    configuration.title = self.savedTable.editing ? @"Done reordering" : @"Reorder saved places";
+    self.editSavedButton.configuration = configuration;
+    self.editSavedButton.accessibilityLabel = configuration.title;
 }
-
-- (void)handleBookmarkSaveTapped {
-    [self presentSaveBookmarkAlertWithSuggestedName:nil coordinate:self.selectedCoordinate];
-}
-
-- (void)presentSaveBookmarkAlertWithSuggestedName:(NSString *)name coordinate:(CLLocationCoordinate2D)coordinate {
-    NSString *suggested = name.length > 0 ? name : @"Location";
-
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Save Bookmark"
-                                                                    message:nil
-                                                             preferredStyle:UIAlertControllerStyleAlert];
-    [alert addTextFieldWithConfigurationHandler:^(UITextField *textField) {
-        textField.text = suggested;
-        textField.placeholder = @"Name";
-    }];
-
-    __weak typeof(self) weakSelf = self;
-    [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
-        typeof(self) strongSelf = weakSelf;
-        if (!strongSelf) {
-            return;
-        }
-        NSString *bookmarkName = alert.textFields.firstObject.text;
-        if (bookmarkName.length == 0) {
-            bookmarkName = @"Location";
-        }
-        [[BookmarksManager shared] addBookmarkWithName:bookmarkName coordinate:coordinate];
-        [strongSelf playBookmarkSavedHaptic];
-        [strongSelf.bookmarksTableView reloadData];
-    }]];
-    [self presentViewController:alert animated:YES completion:nil];
-
-    if (name.length == 0) {
-        CLLocation *location = [[CLLocation alloc] initWithLatitude:coordinate.latitude
-                                                           longitude:coordinate.longitude];
-        CLGeocoder *geocoder = [[CLGeocoder alloc] init];
-        [geocoder reverseGeocodeLocation:location completionHandler:^(NSArray<CLPlacemark *> *placemarks, NSError *error) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (!error && placemarks.firstObject.name.length > 0) {
-                    UITextField *field = alert.textFields.firstObject;
-                    if ([field.text isEqualToString:@"Location"]) {
-                        field.text = placemarks.firstObject.name;
-                    }
-                }
-            });
-        }];
-    }
-}
-
-- (BOOL)ls_isBookmarksTableView:(UITableView *)tableView {
-    return tableView == self.bookmarksTableView;
-}
-
-- (NSInteger)ls_bookmarksNumberOfSections {
-    return 2;
-}
-
-- (NSInteger)ls_bookmarksNumberOfRowsInSection:(NSInteger)section {
-    if (section == LSBookmarksSectionRecents) {
-        return (NSInteger)[PersistenceManager shared].recentLocations.count;
-    }
-    return (NSInteger)[BookmarksManager shared].allBookmarks.count;
-}
-
-- (NSString *)ls_bookmarksTitleForHeaderInSection:(NSInteger)section {
-    if (section == LSBookmarksSectionRecents) {
-        return @"Recents";
-    }
-    return @"Bookmarks";
-}
-
-- (UITableViewCell *)ls_bookmarksCellForRowAtIndexPath:(NSIndexPath *)indexPath {
-    UITableViewCell *cell = [self.bookmarksTableView dequeueReusableCellWithIdentifier:kLSBookmarksCell forIndexPath:indexPath];
-
-    CLLocationCoordinate2D coordinate = kCLLocationCoordinate2DInvalid;
-    NSString *title = @"Location";
-
-    if (indexPath.section == LSBookmarksSectionRecents) {
-        NSArray<NSDictionary *> *recents = [PersistenceManager shared].recentLocations;
-        if (indexPath.row < (NSInteger)recents.count) {
-            NSDictionary *entry = recents[indexPath.row];
-            coordinate = CLLocationCoordinate2DMake([entry[@"LSRecentLat"] doubleValue], [entry[@"LSRecentLon"] doubleValue]);
-            title = entry[@"LSRecentName"] ?: @"Location";
-        }
+- (NSInteger)savedRowsInSection:(NSInteger)section { return MAX(1, (NSInteger)(section == 0 ? self.savedPlaces.count : self.recents.count)); }
+- (UITableViewCell *)savedCell:(NSIndexPath *)path {
+    UITableViewCell *cell = [self.savedTable dequeueReusableCellWithIdentifier:@"SavedPlace"];
+    if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:@"SavedPlace"];
+    BOOL empty = path.section == 0 ? self.savedPlaces.count == 0 : self.recents.count == 0;
+    UIListContentConfiguration *content = cell.defaultContentConfiguration;
+    content.textProperties.numberOfLines = 0;
+    content.secondaryTextProperties.numberOfLines = 0;
+    if (empty) {
+        content.text = path.section == 0 ? @"Your places, ready to use again" : @"No recent locations";
+        content.secondaryText = path.section == 0 ? @"Choose a location on the map and tap Save place." : @"Applied locations will appear here.";
+        content.image = [UIImage systemImageNamed:path.section == 0 ? @"bookmark" : @"clock"];
         cell.accessoryView = nil;
-        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        cell.selectionStyle = UITableViewCellSelectionStyleNone;
+        cell.accessibilityTraits = UIAccessibilityTraitStaticText;
     } else {
-        NSArray<LSBookmark *> *bookmarks = [BookmarksManager shared].allBookmarks;
-        if (indexPath.row < (NSInteger)bookmarks.count) {
-            LSBookmark *bookmark = bookmarks[indexPath.row];
-            coordinate = bookmark.coordinate;
-            title = bookmark.name;
-        }
-
-        UIButton *applyButton = [UIButton buttonWithType:UIButtonTypeSystem];
-        applyButton.frame = CGRectMake(0, 0, 64, 32);
-        [applyButton setTitle:@"Apply" forState:UIControlStateNormal];
-        applyButton.titleLabel.font = [UIFont systemFontOfSize:14.0 weight:UIFontWeightSemibold];
-        applyButton.tag = indexPath.row;
-        [applyButton addTarget:self action:@selector(ls_applyBookmarkFromButton:) forControlEvents:UIControlEventTouchUpInside];
-        cell.accessoryView = applyButton;
-        cell.accessoryType = UITableViewCellAccessoryNone;
+        NSString *name;
+        CLLocationCoordinate2D coordinate;
+        if (path.section == 0) { LSBookmark *place = self.savedPlaces[path.row]; name = place.name; coordinate = place.coordinate; }
+        else { NSDictionary *entry = self.recents[path.row]; name = entry[@"LSRecentName"]; coordinate = CLLocationCoordinate2DMake([entry[@"LSRecentLat"] doubleValue], [entry[@"LSRecentLon"] doubleValue]); }
+        content.text = name;
+        content.secondaryText = [NSString stringWithFormat:@"%@\nTap to preview", LSCoordinateText(coordinate)];
+        content.image = [UIImage systemImageNamed:path.section == 0 ? @"bookmark.fill" : @"clock"];
+        UIButton *more = LSButton(@"", @"ellipsis", NO);
+        more.accessibilityLabel = [NSString stringWithFormat:@"Actions for %@", name];
+        more.showsMenuAsPrimaryAction = YES;
+        more.menu = [self menuForPath:path];
+        // A minimum 44 pt accessory supports touch, VoiceOver and Switch Control.
+        more.frame = CGRectMake(0, 0, 48, 48);
+        cell.accessoryView = more;
+        cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+        cell.accessibilityTraits = UIAccessibilityTraitButton;
+        cell.accessibilityHint = @"Preview on the map. Apply location to change the app’s location.";
     }
-
-    UIListContentConfiguration *content = [UIListContentConfiguration subtitleCellConfiguration];
-    content.text = title;
-    content.textProperties.font = [UIFont systemFontOfSize:16.0 weight:UIFontWeightSemibold];
-    if (CLLocationCoordinate2DIsValid(coordinate)) {
-        content.secondaryText = [NSString stringWithFormat:@"%.5f, %.5f", coordinate.latitude, coordinate.longitude];
-    }
-    content.secondaryTextProperties.font = [UIFont monospacedDigitSystemFontOfSize:12.0 weight:UIFontWeightRegular];
-    content.secondaryTextProperties.color = UIColor.secondaryLabelColor;
     cell.contentConfiguration = content;
     return cell;
 }
-
-- (void)ls_bookmarksDidSelectRowAtIndexPath:(NSIndexPath *)indexPath {
-    CLLocationCoordinate2D coordinate = kCLLocationCoordinate2DInvalid;
-
-    if (indexPath.section == LSBookmarksSectionRecents) {
-        NSArray<NSDictionary *> *recents = [PersistenceManager shared].recentLocations;
-        if (indexPath.row < (NSInteger)recents.count) {
-            NSDictionary *entry = recents[indexPath.row];
-            coordinate = CLLocationCoordinate2DMake([entry[@"LSRecentLat"] doubleValue], [entry[@"LSRecentLon"] doubleValue]);
-        }
-    } else {
-        NSArray<LSBookmark *> *bookmarks = [BookmarksManager shared].allBookmarks;
-        if (indexPath.row < (NSInteger)bookmarks.count) {
-            coordinate = bookmarks[indexPath.row].coordinate;
-        }
-    }
-
-    if (!CLLocationCoordinate2DIsValid(coordinate)) {
-        return;
-    }
-
-    [self movePinToCoordinate:coordinate animated:YES];
+- (void)previewCoordinate:(CLLocationCoordinate2D)coordinate name:(NSString *)name {
+    self.tab = LSPickerTabLocation;
+    [self setSelection:coordinate name:name];
+    [self updateWorkspace];
+    [self.mapView setRegion:MKCoordinateRegionMakeWithDistance(coordinate, 2000, 2000) animated:LSMapAnimationsEnabled()];
+    [self.scroll setContentOffset:CGPointZero animated:NO];
+    LSAnnounce(@"Place previewed. Apply location when you’re ready.");
 }
-
-- (BOOL)ls_bookmarksCanEditRowAtIndexPath:(NSIndexPath *)indexPath {
-    return indexPath.section == LSBookmarksSectionSaved;
+- (void)previewSavedPlace:(NSIndexPath *)path {
+    if (path.section == 0 && path.row < (NSInteger)self.savedPlaces.count) {
+        LSBookmark *place = self.savedPlaces[path.row];
+        [self previewCoordinate:place.coordinate name:place.name];
+    } else if (path.section == 1 && path.row < (NSInteger)self.recents.count) {
+        NSDictionary *entry = self.recents[path.row];
+        [self previewCoordinate:CLLocationCoordinate2DMake([entry[@"LSRecentLat"] doubleValue], [entry[@"LSRecentLon"] doubleValue]) name:entry[@"LSRecentName"]];
+    }
 }
-
-- (void)ls_bookmarksCommitDeleteAtIndexPath:(NSIndexPath *)indexPath {
-    NSArray<LSBookmark *> *bookmarks = [BookmarksManager shared].allBookmarks;
-    NSString *name = (indexPath.row < (NSInteger)bookmarks.count) ? bookmarks[indexPath.row].name : @"this bookmark";
-
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Delete Bookmark"
-                                                                   message:[NSString stringWithFormat:@"Delete \"%@\"?", name]
-                                                            preferredStyle:UIAlertControllerStyleAlert];
+- (UIMenu *)menuForPath:(NSIndexPath *)path {
+    if (path.section == 1 && path.row < (NSInteger)self.recents.count) {
+        NSDictionary *entry = self.recents[path.row];
+        NSString *name = entry[@"LSRecentName"];
+        CLLocationCoordinate2D coordinate = CLLocationCoordinate2DMake([entry[@"LSRecentLat"] doubleValue], [entry[@"LSRecentLon"] doubleValue]);
+        __weak typeof(self) weakSelf = self;
+        UIAction *preview = [UIAction actionWithTitle:@"Preview location" image:[UIImage systemImageNamed:@"map"] identifier:nil handler:^(__unused UIAction *action) { [weakSelf previewCoordinate:coordinate name:name]; }];
+        UIAction *save = [UIAction actionWithTitle:@"Save place" image:[UIImage systemImageNamed:@"bookmark"] identifier:nil handler:^(__unused UIAction *action) { [weakSelf namePlace:name coordinate:coordinate identifier:nil]; }];
+        return [UIMenu menuWithTitle:name children:@[preview, save]];
+    }
+    if (path.section != 0 || path.row >= (NSInteger)self.savedPlaces.count) return [UIMenu menuWithTitle:@"" children:@[]];
+    LSBookmark *place = self.savedPlaces[path.row];
+    NSString *identifier = place.identifier;
     __weak typeof(self) weakSelf = self;
-    [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:^(__unused UIAlertAction *action) {
-        typeof(self) strongSelf = weakSelf;
-        if (!strongSelf) return;
-        [strongSelf.bookmarksTableView reloadRowsAtIndexPaths:@[indexPath] withRowAnimation:UITableViewRowAnimationNone];
-    }]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"Delete" style:UIAlertActionStyleDestructive handler:^(__unused UIAlertAction *action) {
-        typeof(self) strongSelf = weakSelf;
-        if (!strongSelf) return;
-        [[BookmarksManager shared] removeBookmarkAtIndex:(NSUInteger)indexPath.row];
-        [strongSelf.bookmarksTableView deleteRowsAtIndexPaths:@[indexPath] withRowAnimation:UITableViewRowAnimationLeft];
-    }]];
-    [self presentViewController:alert animated:YES completion:nil];
-}
-
-- (BOOL)ls_bookmarksCanMoveRowAtIndexPath:(NSIndexPath *)indexPath {
-    return indexPath.section == LSBookmarksSectionSaved && self.bookmarksEditMode;
-}
-
-- (void)ls_bookmarksMoveFromIndexPath:(NSIndexPath *)source toIndexPath:(NSIndexPath *)destination {
-    [[BookmarksManager shared] moveBookmarkFromIndex:(NSUInteger)source.row toIndex:(NSUInteger)destination.row];
-}
-
-- (UIView *)ls_bookmarksHeaderForSection:(NSInteger)section {
-    if (section != LSBookmarksSectionSaved) {
-        return nil;
-    }
-
-    UIView *header = [[UIView alloc] init];
-    UILabel *title = [[UILabel alloc] init];
-    title.translatesAutoresizingMaskIntoConstraints = NO;
-    title.text = @"Bookmarks";
-    title.font = [UIFont systemFontOfSize:13.0 weight:UIFontWeightSemibold];
-    title.textColor = UIColor.secondaryLabelColor;
-    [header addSubview:title];
-
-    UIButton *editButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    editButton.translatesAutoresizingMaskIntoConstraints = NO;
-    [editButton setTitle:self.bookmarksEditMode ? @"Done" : @"Edit" forState:UIControlStateNormal];
-    editButton.titleLabel.font = [UIFont systemFontOfSize:13.0 weight:UIFontWeightSemibold];
-    [editButton addTarget:self action:@selector(ls_toggleBookmarksEditMode) forControlEvents:UIControlEventTouchUpInside];
-    [header addSubview:editButton];
-
-    [NSLayoutConstraint activateConstraints:@[
-        [title.leadingAnchor constraintEqualToAnchor:header.leadingAnchor constant:20.0],
-        [title.centerYAnchor constraintEqualToAnchor:header.centerYAnchor],
-        [editButton.trailingAnchor constraintEqualToAnchor:header.trailingAnchor constant:-16.0],
-        [editButton.centerYAnchor constraintEqualToAnchor:header.centerYAnchor],
-        [header.heightAnchor constraintEqualToConstant:28.0]
-    ]];
-    return header;
-}
-
-- (void)ls_handleBookmarksLongPress:(UILongPressGestureRecognizer *)gesture {
-    if (gesture.state != UIGestureRecognizerStateBegan) {
-        return;
-    }
-
-    CGPoint point = [gesture locationInView:self.bookmarksTableView];
-    NSIndexPath *indexPath = [self.bookmarksTableView indexPathForRowAtPoint:point];
-    if (!indexPath || indexPath.section != LSBookmarksSectionSaved) {
-        return;
-    }
-
-    NSArray<LSBookmark *> *bookmarks = [BookmarksManager shared].allBookmarks;
-    if (indexPath.row >= (NSInteger)bookmarks.count) {
-        return;
-    }
-
-    LSBookmark *bookmark = bookmarks[indexPath.row];
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Rename Bookmark"
-                                                                   message:nil
-                                                            preferredStyle:UIAlertControllerStyleAlert];
-    [alert addTextFieldWithConfigurationHandler:^(UITextField *textField) {
-        textField.text = bookmark.name;
+    UIAction *preview = [UIAction actionWithTitle:@"Preview location" image:[UIImage systemImageNamed:@"map"] identifier:nil handler:^(__unused UIAction *action) { [weakSelf previewCoordinate:place.coordinate name:place.name]; }];
+    UIAction *rename = [UIAction actionWithTitle:@"Rename" image:[UIImage systemImageNamed:@"pencil"] identifier:nil handler:^(__unused UIAction *action) {
+        [weakSelf namePlace:place.name coordinate:place.coordinate identifier:identifier];
     }];
+    UIAction *first = [UIAction actionWithTitle:@"Move to top" image:[UIImage systemImageNamed:@"arrow.up.to.line"] identifier:nil handler:^(__unused UIAction *action) {
+        [BookmarksManager.shared moveBookmarkWithID:identifier toIndex:0]; [weakSelf reloadSavedPlaces];
+    }];
+    UIAction *up = [UIAction actionWithTitle:@"Move up" image:[UIImage systemImageNamed:@"arrow.up"] identifier:nil handler:^(__unused UIAction *action) { [weakSelf moveID:identifier offset:-1]; }];
+    UIAction *down = [UIAction actionWithTitle:@"Move down" image:[UIImage systemImageNamed:@"arrow.down"] identifier:nil handler:^(__unused UIAction *action) { [weakSelf moveID:identifier offset:1]; }];
+    UIAction *remove = [UIAction actionWithTitle:@"Delete saved place" image:[UIImage systemImageNamed:@"trash"] identifier:nil handler:^(__unused UIAction *action) {
+        [weakSelf confirmAction:@"Delete saved place?" message:place.name button:@"Delete" action:^{ [BookmarksManager.shared removeBookmarkWithID:identifier]; [weakSelf reloadSavedPlaces]; }];
+    }];
+    remove.attributes = UIMenuElementAttributesDestructive;
+    return [UIMenu menuWithTitle:place.name children:@[preview, rename, first, up, down, remove]];
+}
+- (UIContextMenuConfiguration *)savedMenu:(NSIndexPath *)path {
+    if (path.section != 0 || path.row >= (NSInteger)self.savedPlaces.count) return nil;
+    UIMenu *menu = [self menuForPath:path];
+    return [UIContextMenuConfiguration configurationWithIdentifier:nil previewProvider:nil actionProvider:^UIMenu *(__unused NSArray<UIMenuElement *> *suggested) { return menu; }];
+}
+- (void)moveID:(NSString *)identifier offset:(NSInteger)offset {
+    NSArray<LSBookmark *> *current = BookmarksManager.shared.allBookmarks;
+    NSUInteger index = [current indexOfObjectPassingTest:^BOOL(LSBookmark *place, __unused NSUInteger i, __unused BOOL *stop) { return [place.identifier isEqualToString:identifier]; }];
+    NSInteger target = (NSInteger)index + offset;
+    if (index != NSNotFound && target >= 0 && target < (NSInteger)current.count) [BookmarksManager.shared moveBookmarkWithID:identifier toIndex:(NSUInteger)target];
+    [self reloadSavedPlaces];
+}
+- (void)moveSavedPlace:(NSIndexPath *)source to:(NSIndexPath *)destination {
+    if (source.section != 0 || destination.section != 0 || source.row >= (NSInteger)self.savedPlaces.count || destination.row >= (NSInteger)self.savedPlaces.count) { [self reloadSavedPlaces]; return; }
+    NSString *sourceID = self.savedPlaces[source.row].identifier;
+    NSString *targetID = self.savedPlaces[destination.row].identifier;
+    NSArray<LSBookmark *> *current = BookmarksManager.shared.allBookmarks;
+    NSUInteger targetIndex = [current indexOfObjectPassingTest:^BOOL(LSBookmark *place, __unused NSUInteger i, __unused BOOL *stop) { return [place.identifier isEqualToString:targetID]; }];
+    if (targetIndex != NSNotFound) [BookmarksManager.shared moveBookmarkWithID:sourceID toIndex:targetIndex];
+    [self reloadSavedPlaces];
+}
+- (void)saveSelectedPlace { if (self.hasSelection) [self namePlace:self.selectedName coordinate:self.selectedCoordinate identifier:nil]; }
+- (void)namePlace:(NSString *)name coordinate:(CLLocationCoordinate2D)coordinate identifier:(NSString *)identifier {
+    if (!identifier && BookmarksManager.shared.allBookmarks.count >= BookmarksManager.capacity) {
+        UIAlertController *limit = [UIAlertController alertControllerWithTitle:@"50 saved places maximum" message:@"Delete a saved place before adding another." preferredStyle:UIAlertControllerStyleAlert];
+        [limit addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleCancel handler:nil]];
+        [self presentViewController:limit animated:LSMapAnimationsEnabled() completion:nil];
+        return;
+    }
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:identifier ? @"Rename place" : @"Save place" message:@"Choose a name from 1 to 120 characters." preferredStyle:UIAlertControllerStyleAlert];
+    [alert addTextFieldWithConfigurationHandler:^(UITextField *field) { field.text = name; field.placeholder = @"Place name"; field.accessibilityLabel = @"Place name"; field.autocapitalizationType = UITextAutocapitalizationTypeWords; }];
+    __weak UIAlertController *weakAlert = alert;
+    __weak typeof(self) weakSelf = self;
+    UIAlertAction *save = [UIAlertAction actionWithTitle:@"Save" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
+        NSString *entered = [weakAlert.textFields.firstObject.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        BOOL saved = identifier ? [BookmarksManager.shared renameBookmarkWithID:identifier name:entered] : [BookmarksManager.shared addBookmarkWithName:entered coordinate:coordinate];
+        NSString *message = saved ? @"Place saved." : @"Could not save. Check the name and the 50-place limit.";
+        [weakSelf showMessage:message];
+        weakSelf.savedHint.text = message;
+        [weakSelf reloadSavedPlaces];
+    }];
+    NSString *trimmed = [name stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    save.enabled = trimmed.length > 0 && trimmed.length <= 120;
+    __weak UIAlertAction *weakSave = save;
+    [alert.textFields.firstObject addAction:[UIAction actionWithHandler:^(__unused UIAction *action) {
+        NSString *entered = [weakAlert.textFields.firstObject.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        weakSave.enabled = entered.length > 0 && entered.length <= 120;
+        weakAlert.message = weakSave.enabled ? @"This name identifies your saved place." : @"Enter a name from 1 to 120 characters.";
+    }] forControlEvents:UIControlEventEditingChanged];
     [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:save];
+    [self presentViewController:alert animated:LSMapAnimationsEnabled() completion:nil];
+}
+- (void)clearRecents {
     __weak typeof(self) weakSelf = self;
-    __weak typeof(alert) weakAlert = alert;
-    [alert addAction:[UIAlertAction actionWithTitle:@"Save" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
-        typeof(self) strongSelf = weakSelf;
-        if (!strongSelf) return;
-        UIAlertController *strongAlert = weakAlert;
-        if (!strongAlert) return;
-        NSString *name = strongAlert.textFields.firstObject.text;
-        if (name.length == 0) {
-            return;
-        }
-        [[BookmarksManager shared] renameBookmark:name atIndex:(NSUInteger)indexPath.row];
-        [strongSelf.bookmarksTableView reloadData];
-    }]];
-    [self presentViewController:alert animated:YES completion:nil];
+    [self confirmAction:@"Clear recent locations?" message:@"Remove the recently applied locations from this list." button:@"Clear recents" action:^{ [PersistenceManager.shared clearRecentLocations]; [weakSelf reloadSavedPlaces]; }];
 }
-
-- (void)ls_toggleBookmarksEditMode {
-    self.bookmarksEditMode = !self.bookmarksEditMode;
-    [self.bookmarksTableView setEditing:self.bookmarksEditMode animated:YES];
-    [self.bookmarksTableView reloadData];
-}
-
-- (void)ls_applyBookmarkFromButton:(UIButton *)sender {
-    NSArray<LSBookmark *> *bookmarks = [BookmarksManager shared].allBookmarks;
-    NSUInteger index = sender.tag;
-    if (index >= bookmarks.count) {
-        return;
-    }
-
-    LSBookmark *bookmark = bookmarks[index];
-    PersistenceManager *store = [PersistenceManager shared];
-    if (![store setSpoofCoordinate:bookmark.coordinate enabled:YES]) {
-        [self playRouteFailureHaptic];
-        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Error"
-                                                                       message:@"This bookmark has an invalid coordinate."
-                                                                preferredStyle:UIAlertControllerStyleAlert];
-        [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-        [self presentViewController:alert animated:YES completion:nil];
-        return;
-    }
-    [store recordRecentCoordinate:bookmark.coordinate name:bookmark.name];
-    [self playApplyHaptic];
-    LSSetHooksBypassed(NO);
-    [self dismissViewControllerAnimated:YES completion:nil];
-}
-
-- (void)ls_presentStaticMapActionSheetAtCoordinate:(CLLocationCoordinate2D)coordinate {
-    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:nil message:nil preferredStyle:UIAlertControllerStyleActionSheet];
-    __weak typeof(self) weakSelf = self;
-    [sheet addAction:[UIAlertAction actionWithTitle:@"Place Pin Here" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
-        typeof(self) strongSelf = weakSelf;
-        if (!strongSelf) return;
-        [strongSelf movePinToCoordinate:coordinate animated:YES];
-    }]];
-    [sheet addAction:[UIAlertAction actionWithTitle:@"Save as Bookmark" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
-        typeof(self) strongSelf = weakSelf;
-        if (!strongSelf) return;
-        [strongSelf presentSaveBookmarkAlertWithSuggestedName:nil coordinate:coordinate];
-    }]];
-    [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
-    [self presentViewController:sheet animated:YES completion:nil];
-}
-
 @end

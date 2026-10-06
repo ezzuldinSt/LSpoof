@@ -57,46 +57,26 @@ static Method LSGetInstanceMethodDefinedOnClass(Class cls, SEL selector) {
     return found;
 }
 
-BOOL LSInstallInstanceHookWithIMP(Class cls, SEL originalSelector, SEL hookSelector, IMP hookIMP) {
-    if (!cls || !originalSelector || !hookSelector || !hookIMP) {
-        return NO;
+BOOL LSInstallInstanceHook(Class cls, SEL originalSelector, LSHookFactory factory) {
+    if (!cls || !originalSelector || !factory) return NO;
+    static NSObject *registrationLock;
+    static NSMutableSet<NSString *> *installed;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        registrationLock = [[NSObject alloc] init];
+        installed = [NSMutableSet set];
+    });
+    @synchronized(registrationLock) {
+        NSString *key = [NSString stringWithFormat:@"%p:%@", cls, NSStringFromSelector(originalSelector)];
+        if ([installed containsObject:key]) return YES;
+        Method method = LSGetInstanceMethodDefinedOnClass(cls, originalSelector);
+        if (!method) return NO;
+        IMP replacement = factory(method_getImplementation(method));
+        if (!replacement) return NO;
+        // Each wrapper captures this method's original IMP and original selector.
+        // A super call enters the superclass wrapper without redispatching an alias.
+        method_setImplementation(method, replacement);
+        [installed addObject:key];
+        return YES;
     }
-
-    Method originalMethod = LSGetInstanceMethodDefinedOnClass(cls, originalSelector);
-    if (!originalMethod) {
-        return NO;
-    }
-
-    if (!LSClassDefinesInstanceMethodLocally(cls, hookSelector)) {
-        if (!class_addMethod(cls,
-                             hookSelector,
-                             hookIMP,
-                             method_getTypeEncoding(originalMethod))) {
-            return NO;
-        }
-    }
-
-    Method hookMethod = LSGetInstanceMethodDefinedOnClass(cls, hookSelector);
-    if (!hookMethod) {
-        return NO;
-    }
-
-    method_exchangeImplementations(originalMethod, hookMethod);
-    return YES;
-}
-
-BOOL LSInstallInstanceHook(Class cls, SEL originalSelector, SEL hookSelector, Class templateClass) {
-    if (!templateClass) {
-        return NO;
-    }
-
-    Method templateMethod = class_getInstanceMethod(templateClass, hookSelector);
-    if (!templateMethod) {
-        return NO;
-    }
-
-    return LSInstallInstanceHookWithIMP(cls,
-                                      originalSelector,
-                                      hookSelector,
-                                      method_getImplementation(templateMethod));
 }

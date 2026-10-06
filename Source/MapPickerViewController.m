@@ -1,1591 +1,711 @@
-#import "MapPickerViewController.h"
 #import "MapPickerViewController+Private.h"
 #import "LocationSpoofer.h"
-#import "OverlayWindow.h"
 #import "PersistenceManager.h"
-#import "RouteSimulator.h"
+#import "LSPlaceSearchController.h"
+#import "LSSettingsViewController.h"
+#import "LSCoordinateEntryController.h"
 
-#import <CoreLocation/CoreLocation.h>
-#import <MapKit/MapKit.h>
+@implementation LSStartAnnotation @end
+@implementation LSDestinationAnnotation @end
+@implementation LSMovingAnnotation @end
+@implementation LSRealAnnotation @end
 
-static const CGFloat kLSCornerRadius = 16.0;
-static const CGFloat kLSHorizontalInset = 20.0;
-static const CGFloat kLSControlPanelCornerRadius = 16.0;
-static const CGFloat kLSSuggestionRowHeight = 48.0;
-static const CGFloat kLSSuggestionMaxHeight = 240.0;
-static const NSInteger kLSSuggestionMaxVisibleRows = 5;
-static const CGFloat kLSMapHeightMultiplier = 0.30;
-
-@interface MapPickerViewController () <MKMapViewDelegate, UISearchBarDelegate, UITextFieldDelegate, MKLocalSearchCompleterDelegate, UITableViewDataSource, UITableViewDelegate>
+@interface MapPickerViewController () <MKMapViewDelegate, CLLocationManagerDelegate, UITableViewDataSource, UITableViewDelegate, UIGestureRecognizerDelegate>
 @end
 
 @implementation MapPickerViewController
-
-#pragma mark - Lifecycle
-
 - (void)viewDidLoad {
     [super viewDidLoad];
-
     self.view.backgroundColor = UIColor.systemGroupedBackgroundColor;
-    self.selectedCoordinate = CLLocationCoordinate2DMake(37.7749, -122.4194);
-    self.hasSelectedCoordinate = NO;
-
-    PersistenceManager *store = [PersistenceManager shared];
-    if ([store isSpoofingEnabled] || [store hasStoredCoordinate]) {
-        self.selectedCoordinate = [store spoofCoordinate];
-        self.hasSelectedCoordinate = YES;
+    self.view.tintColor = LSAccentColor();
+    self.selectedCoordinate = kCLLocationCoordinate2DInvalid;
+    self.selectedName = @"Selected location";
+    self.tab = LSPickerTabLocation;
+    self.previousMode = LSSessionController.shared.snapshot.mode;
+    PersistenceManager *store = PersistenceManager.shared;
+    if (store.hasStoredCoordinate) {
+        self.selectedCoordinate = store.spoofCoordinate;
+        self.hasSelection = YES;
+        self.selectedName = @"Last selection";
     }
-    self.panelTab = LSMapPickerPanelTabMap;
-    self.coordinateMode = LSMapPickerCoordinateModeStatic;
-
     [self buildInterface];
-    [self buildRouteControls];
-    [self buildBookmarksPanel];
-    [self installConstraints];
-    [self configureKeyboardToolbar];
-    [self configureSearchCompleter];
-    [self restoreSimulationUIIfNeeded];
-    [self refreshStatusPill];
-    [self syncFieldsFromCoordinate];
-    self.altitudeField.text = [NSString stringWithFormat:@"%.0f", store.altitude];
-    self.headingSlider.value = (float)store.heading;
-    [self updateHeadingLabel];
-    [self updatePanelTabVisibility];
-
-    [self syncFluctuationUI];
-
-    self.keepLastSpoofSwitch.on = [PersistenceManager shared].keepLastSpoof;
-
-    self.showRealLocationSwitch.on = [PersistenceManager shared].showRealLocation;
-
-    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(ls_keyboardWillShow:) name:UIKeyboardWillShowNotification object:nil];
-    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(ls_keyboardWillHide:) name:UIKeyboardWillHideNotification object:nil];
+    [self restoreRoute];
+    [self updateWorkspace];
+    [self refreshSession];
+    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(sessionChanged:) name:LSSessionDidChangeNotification object:LSSessionController.shared];
+    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(backgrounded:) name:UIApplicationDidEnterBackgroundNotification object:nil];
+    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(activated:) name:UIApplicationDidBecomeActiveNotification object:nil];
+    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(contentSizeChanged:) name:UIContentSizeCategoryDidChangeNotification object:nil];
+    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(sceneDeactivated:) name:UISceneWillDeactivateNotification object:nil];
+    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(sceneActivated:) name:UISceneDidActivateNotification object:nil];
 }
-
-- (void)viewWillAppear:(BOOL)animated {
-    [super viewWillAppear:animated];
-    LSSetHooksBypassed(YES);
-    [LSOverlayManager setMapPickerVisible:YES];
-    [self refreshStatusPill];
-}
-
 - (void)viewDidAppear:(BOOL)animated {
     [super viewDidAppear:animated];
-    LSSetHooksBypassed(YES);
-    [self configureMapIfNeeded];
+    [self refreshSession];
+    [self updateRealLocation];
 }
-
-- (void)viewWillDisappear:(BOOL)animated {
-    [super viewWillDisappear:animated];
-    [LSOverlayManager restoreMapPickerSessionState];
-}
-
 - (void)viewDidDisappear:(BOOL)animated {
     [super viewDidDisappear:animated];
-    [LSOverlayManager restoreMapPickerSessionState];
+    if (self.isBeingDismissed || self.navigationController.isBeingDismissed || !self.presentingViewController) {
+        [self endPickerLifetime];
+        if (self.didDismiss) { self.didDismiss(); self.didDismiss = nil; }
+    }
 }
-
-#pragma mark - Interface
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    [self layoutSavedHeader];
+    BOOL vertical = self.view.bounds.size.height >= 600 && UIContentSizeCategoryIsAccessibilityCategory(self.traitCollection.preferredContentSizeCategory);
+    self.playbackRow.axis = vertical ? UILayoutConstraintAxisVertical : UILayoutConstraintAxisHorizontal;
+}
+- (void)dealloc {
+    [NSNotificationCenter.defaultCenter removeObserver:self];
+    [_directions cancel];
+    [_realManager stopUpdatingLocation];
+    _mapView.delegate = nil;
+}
+- (void)endPickerLifetime {
+    if (self.closed) return;
+    self.closed = YES;
+    self.selectionRevision++;
+    [self cancelDirections];
+    self.realRevision++;
+    [self.realManager stopUpdatingLocation];
+}
+- (void)backgrounded:(NSNotification *)note {
+    (void)note;
+    self.selectionRevision++;
+    BOOL fetching = self.directions != nil;
+    [self cancelDirections];
+    if (fetching) { self.routeFeedback.text = @"Route lookup paused. Tap Build route to try again."; [self updateRouteUI]; }
+    self.realRevision++;
+    [self.realManager stopUpdatingLocation];
+}
+- (void)activated:(NSNotification *)note { (void)note; if (!self.closed && self.view.window) { [self refreshSession]; [self updateRealLocation]; } }
+- (void)sceneDeactivated:(NSNotification *)note { if (note.object == self.view.window.windowScene) [self backgrounded:note]; }
+- (void)sceneActivated:(NSNotification *)note { if (note.object == self.view.window.windowScene) [self activated:note]; }
+- (void)contentSizeChanged:(NSNotification *)note {
+    (void)note;
+    BOOL large = UIContentSizeCategoryIsAccessibilityCategory(self.traitCollection.preferredContentSizeCategory);
+    self.playbackRow.axis = large && self.view.bounds.size.height >= 600 ? UILayoutConstraintAxisVertical : UILayoutConstraintAxisHorizontal;
+    UIFont *font = [[UIFontMetrics metricsForTextStyle:UIFontTextStyleSubheadline] scaledFontForFont:[UIFont systemFontOfSize:15 weight:UIFontWeightMedium] maximumPointSize:20];
+    self.brandLabel.font = [[UIFontMetrics metricsForTextStyle:UIFontTextStyleTitle2] scaledFontForFont:[UIFont systemFontOfSize:22 weight:UIFontWeightBold] maximumPointSize:32];
+    self.statusLabel.font = [[UIFontMetrics metricsForTextStyle:UIFontTextStyleFootnote] scaledFontForFont:[UIFont systemFontOfSize:13] maximumPointSize:20];
+    for (UISegmentedControl *segment in @[self.tabs, self.profileSegment, self.endpointSegment]) [segment setTitleTextAttributes:@{NSFontAttributeName:font} forState:UIControlStateNormal];
+    [self.savedTable reloadData];
+    [self refreshButtonFonts:self.view];
+}
+- (void)refreshButtonFonts:(UIView *)view {
+    if ([view isKindOfClass:UIButton.class]) [(UIButton *)view setNeedsUpdateConfiguration];
+    for (UIView *child in view.subviews) [self refreshButtonFonts:child];
+}
 
 - (void)buildInterface {
-    self.contentScrollView = [[UIScrollView alloc] init];
-    self.contentScrollView.translatesAutoresizingMaskIntoConstraints = NO;
-    self.contentScrollView.alwaysBounceVertical = YES;
-    self.contentScrollView.showsVerticalScrollIndicator = YES;
-    self.contentScrollView.keyboardDismissMode = UIScrollViewKeyboardDismissModeOnDrag;
-    self.contentScrollView.clipsToBounds = NO;
-    [self.view addSubview:self.contentScrollView];
-
-    self.scrollContentView = [[UIView alloc] init];
-    self.scrollContentView.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.contentScrollView addSubview:self.scrollContentView];
-
-    [self buildHeader];
-    [self buildSearchBar];
-    [self buildMapSection];
-    [self buildControlPanel];
-}
-
-- (void)buildHeader {
-    self.headerView = [[UIView alloc] init];
-    self.headerView.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.scrollContentView addSubview:self.headerView];
-
-    self.titleLabel = [[UILabel alloc] init];
-    self.titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    self.titleLabel.text = @"Location Spoofer";
-    self.titleLabel.font = [UIFont systemFontOfSize:28.0 weight:UIFontWeightBold];
-    self.titleLabel.textColor = UIColor.labelColor;
-    self.titleLabel.accessibilityTraits = UIAccessibilityTraitHeader;
-    [self.headerView addSubview:self.titleLabel];
-
-    self.subtitleLabel = [[UILabel alloc] init];
-    self.subtitleLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    self.subtitleLabel.text = @"Choose where apps think you are";
-    self.subtitleLabel.font = [UIFont systemFontOfSize:15.0 weight:UIFontWeightRegular];
-    self.subtitleLabel.textColor = UIColor.secondaryLabelColor;
-    self.subtitleLabel.numberOfLines = 2;
-    [self.headerView addSubview:self.subtitleLabel];
-
-    self.statusPill = [[UIView alloc] init];
-    self.statusPill.translatesAutoresizingMaskIntoConstraints = NO;
-    self.statusPill.backgroundColor = [UIColor.tertiarySystemFillColor colorWithAlphaComponent:0.9];
-    self.statusPill.layer.cornerRadius = 14.0;
-    self.statusPill.layer.cornerCurve = kCACornerCurveContinuous;
-    self.statusPill.userInteractionEnabled = YES;
-    [self.headerView addSubview:self.statusPill];
-
-    self.statusDot = [[UIView alloc] init];
-    self.statusDot.translatesAutoresizingMaskIntoConstraints = NO;
-    self.statusDot.layer.cornerRadius = 5.0;
-    [self.statusPill addSubview:self.statusDot];
-
-    self.statusLabel = [[UILabel alloc] init];
-    self.statusLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    self.statusLabel.font = [UIFont systemFontOfSize:13.0 weight:UIFontWeightSemibold];
+    UILabel *title = LSLabel(@"LSpoof", UIFontTextStyleTitle2);
+    self.brandLabel = title;
+    title.font = [[UIFontMetrics metricsForTextStyle:UIFontTextStyleTitle2] scaledFontForFont:[UIFont systemFontOfSize:22 weight:UIFontWeightBold] maximumPointSize:32];
+    title.adjustsFontForContentSizeCategory = NO;
+    title.accessibilityTraits = UIAccessibilityTraitHeader;
+    self.statusLabel = LSLabel(@"Off", UIFontTextStyleFootnote);
+    self.statusLabel.font = [[UIFontMetrics metricsForTextStyle:UIFontTextStyleFootnote] scaledFontForFont:[UIFont systemFontOfSize:13] maximumPointSize:20];
+    self.statusLabel.adjustsFontForContentSizeCategory = NO;
     self.statusLabel.textColor = UIColor.secondaryLabelColor;
-    [self.statusPill addSubview:self.statusLabel];
-
-    self.pillStopLabel = [[UILabel alloc] init];
-    self.pillStopLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    self.pillStopLabel.text = @"Stop";
-    self.pillStopLabel.font = [UIFont systemFontOfSize:12.0 weight:UIFontWeightSemibold];
-    self.pillStopLabel.textColor = UIColor.systemRedColor;
-    self.pillStopLabel.hidden = YES;
-    [self.statusPill addSubview:self.pillStopLabel];
-
-    UITapGestureRecognizer *pillTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleStatusPillTapped)];
-    [self.statusPill addGestureRecognizer:pillTap];
-
-    self.closeButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    self.closeButton.translatesAutoresizingMaskIntoConstraints = NO;
-    UIImage *closeImage = [UIImage systemImageNamed:@"xmark.circle.fill"];
-    [self.closeButton setImage:closeImage forState:UIControlStateNormal];
-    self.closeButton.tintColor = UIColor.tertiaryLabelColor;
-    self.closeButton.accessibilityLabel = @"Close";
-    [self.closeButton addTarget:self action:@selector(handleCancel) forControlEvents:UIControlEventTouchUpInside];
-    [self.headerView addSubview:self.closeButton];
+    UIStackView *identity = LSStack(@[title, self.statusLabel], 2);
+    UIButton *settings = LSButton(@"", @"slider.horizontal.3", NO);
+    settings.accessibilityLabel = @"Settings";
+    [settings addTarget:self action:@selector(openSettings) forControlEvents:UIControlEventTouchUpInside];
+    UIButton *close = LSButton(@"", @"xmark", NO);
+    close.accessibilityLabel = @"Close picker";
+    close.accessibilityHint = @"Discards unapplied location or route edits. An applied session continues.";
+    [close addTarget:self action:@selector(dismissPicker) forControlEvents:UIControlEventTouchUpInside];
+    UIStackView *header = [[UIStackView alloc] initWithArrangedSubviews:@[identity, settings, close]];
+    header.alignment = UIStackViewAlignmentCenter;
+    header.spacing = 8;
+    header.translatesAutoresizingMaskIntoConstraints = NO;
+    [identity setContentHuggingPriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
+    [settings setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+    [close setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+    self.tabs = [[UISegmentedControl alloc] initWithItems:@[@"Location", @"Route", @"Saved"]];
+    self.tabs.translatesAutoresizingMaskIntoConstraints = NO;
+    self.tabs.selectedSegmentIndex = 0;
+    self.tabs.accessibilityLabel = @"Workspace";
+    [self.tabs.heightAnchor constraintGreaterThanOrEqualToConstant:44].active = YES;
+    [self.tabs addTarget:self action:@selector(tabChanged) forControlEvents:UIControlEventValueChanged];
+    [self.view addSubview:header];
+    [self.view addSubview:self.tabs];
+    self.scroll = [[UIScrollView alloc] init];
+    self.scroll.translatesAutoresizingMaskIntoConstraints = NO;
+    self.scroll.alwaysBounceVertical = YES;
+    self.scroll.keyboardDismissMode = UIScrollViewKeyboardDismissModeOnDrag;
+    [self.view addSubview:self.scroll];
+    self.contentStack = LSStack(@[], 16);
+    [self.scroll addSubview:self.contentStack];
+    UIButton *search = LSButton(@"Search places", @"magnifyingglass", NO);
+    search.accessibilityHint = @"Search for a place or enter coordinates.";
+    [search addTarget:self action:@selector(searchLocation) forControlEvents:UIControlEventTouchUpInside];
+    self.locationIntro = search;
+    [self.contentStack addArrangedSubview:search];
+    [self buildRouteUI];
+    [self.contentStack addArrangedSubview:self.routeEndpointsPanel];
+    [self buildMap];
+    [self.contentStack addArrangedSubview:self.mapContainer];
+    self.mapErrorLabel = LSLabel(@"", UIFontTextStyleSubheadline);
+    self.mapErrorLabel.textColor = LSErrorColor();
+    self.mapErrorLabel.hidden = YES;
+    self.realNoticeLabel = LSLabel(@"", UIFontTextStyleFootnote);
+    self.realNoticeLabel.textColor = UIColor.secondaryLabelColor;
+    self.realNoticeLabel.hidden = YES;
+    [self.contentStack addArrangedSubview:self.mapErrorLabel];
+    [self.contentStack addArrangedSubview:self.realNoticeLabel];
+    self.mapHintLabel = LSLabel(@"Tap the map or search to choose a location.", UIFontTextStyleSubheadline);
+    self.mapHintLabel.textColor = UIColor.secondaryLabelColor;
+    [self.contentStack addArrangedSubview:self.mapHintLabel];
+    [self buildLocationDetails];
+    [self.contentStack addArrangedSubview:self.locationDetails];
+    [self.contentStack addArrangedSubview:self.routeDetailsPanel];
+    self.appliedLabel = LSLabel(@"", UIFontTextStyleFootnote);
+    self.appliedLabel.textColor = UIColor.secondaryLabelColor;
+    [self.contentStack addArrangedSubview:self.appliedLabel];
+    [self buildSavedUI];
+    self.savedTable.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:self.savedTable];
+    UIView *footer = [self buildFooter];
+    [self.view addSubview:footer];
+    UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
+    [NSLayoutConstraint activateConstraints:@[
+        [header.topAnchor constraintEqualToAnchor:safe.topAnchor constant:12],
+        [header.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor constant:20],
+        [header.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor constant:-20],
+        [self.tabs.topAnchor constraintEqualToAnchor:header.bottomAnchor constant:12],
+        [self.tabs.leadingAnchor constraintEqualToAnchor:header.leadingAnchor],
+        [self.tabs.trailingAnchor constraintEqualToAnchor:header.trailingAnchor],
+        [self.scroll.topAnchor constraintEqualToAnchor:self.tabs.bottomAnchor constant:12],
+        [self.scroll.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor],
+        [self.scroll.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor],
+        [self.scroll.bottomAnchor constraintEqualToAnchor:footer.topAnchor],
+        [self.contentStack.topAnchor constraintEqualToAnchor:self.scroll.contentLayoutGuide.topAnchor constant:4],
+        [self.contentStack.leadingAnchor constraintEqualToAnchor:self.scroll.contentLayoutGuide.leadingAnchor constant:20],
+        [self.contentStack.trailingAnchor constraintEqualToAnchor:self.scroll.contentLayoutGuide.trailingAnchor constant:-20],
+        [self.contentStack.bottomAnchor constraintEqualToAnchor:self.scroll.contentLayoutGuide.bottomAnchor constant:-20],
+        [self.contentStack.widthAnchor constraintEqualToAnchor:self.scroll.frameLayoutGuide.widthAnchor constant:-40],
+        [self.savedTable.topAnchor constraintEqualToAnchor:self.tabs.bottomAnchor constant:12],
+        [self.savedTable.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor],
+        [self.savedTable.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor],
+        [self.savedTable.bottomAnchor constraintEqualToAnchor:footer.topAnchor],
+        [footer.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor],
+        [footer.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor],
+        [footer.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor]
+    ]];
+    [self contentSizeChanged:nil];
 }
-
-- (void)buildSearchBar {
-    self.searchBar = [[UISearchBar alloc] init];
-    self.searchBar.translatesAutoresizingMaskIntoConstraints = NO;
-    self.searchBar.placeholder = @"Search city, address, or landmark";
-    self.searchBar.delegate = self;
-    self.searchBar.searchBarStyle = UISearchBarStyleMinimal;
-    self.searchBar.backgroundImage = [[UIImage alloc] init];
-    self.searchBar.backgroundColor = UIColor.clearColor;
-    self.searchBar.tintColor = UIColor.systemBlueColor;
-    if (@available(iOS 13.0, *)) {
-        UITextField *tf = self.searchBar.searchTextField;
-        tf.font = [UIFont systemFontOfSize:16.0 weight:UIFontWeightMedium];
-        tf.backgroundColor = [UIColor.systemGray6Color colorWithAlphaComponent:0.6];
-        tf.layer.cornerRadius = 12.0;
-        tf.clipsToBounds = YES;
-    }
-    [self.scrollContentView addSubview:self.searchBar];
-
-    self.searchSpinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
-    self.searchSpinner.translatesAutoresizingMaskIntoConstraints = NO;
-    self.searchSpinner.hidesWhenStopped = YES;
-    [self.scrollContentView addSubview:self.searchSpinner];
-
-    [self buildSearchSuggestions];
+- (UIView *)buildFooter {
+    self.primaryButton = LSButton(@"Apply location", @"checkmark", YES);
+    [self.primaryButton addTarget:self action:@selector(primaryAction) forControlEvents:UIControlEventTouchUpInside];
+    self.holdButton = LSButton(@"Hold here", @"stop.fill", NO);
+    self.holdButton.accessibilityHint = @"Stops route movement and holds its current point.";
+    [self.holdButton addTarget:self action:@selector(routeControlTapped) forControlEvents:UIControlEventTouchUpInside];
+    self.offButton = LSButton(@"Turn off", @"power", NO);
+    self.offButton.accessibilityLabel = @"Turn off spoofing";
+    UIButtonConfiguration *off = self.offButton.configuration;
+    off.baseForegroundColor = LSErrorColor();
+    off.baseBackgroundColor = LSErrorColor();
+    self.offButton.configuration = off;
+    [self.offButton addTarget:self action:@selector(turnOff) forControlEvents:UIControlEventTouchUpInside];
+    self.playbackRow = [[UIStackView alloc] initWithArrangedSubviews:@[self.holdButton, self.offButton]];
+    self.playbackRow.distribution = UIStackViewDistributionFillEqually;
+    self.playbackRow.spacing = 8;
+    UIStackView *stack = LSStack(@[self.primaryButton, self.playbackRow], 8);
+    UIView *footer = [[UIView alloc] init];
+    footer.translatesAutoresizingMaskIntoConstraints = NO;
+    footer.backgroundColor = UIColor.systemGroupedBackgroundColor;
+    [footer addSubview:stack];
+    [NSLayoutConstraint activateConstraints:@[
+        [stack.topAnchor constraintEqualToAnchor:footer.topAnchor constant:8],
+        [stack.leadingAnchor constraintEqualToAnchor:footer.leadingAnchor constant:20],
+        [stack.trailingAnchor constraintEqualToAnchor:footer.trailingAnchor constant:-20],
+        [stack.bottomAnchor constraintEqualToAnchor:footer.bottomAnchor constant:-8]
+    ]];
+    return footer;
 }
-
-- (void)buildSearchSuggestions {
-    self.suggestionsPanel = [[UIView alloc] init];
-    self.suggestionsPanel.translatesAutoresizingMaskIntoConstraints = NO;
-    self.suggestionsPanel.backgroundColor = UIColor.secondarySystemGroupedBackgroundColor;
-    self.suggestionsPanel.layer.cornerRadius = kLSCornerRadius;
-    self.suggestionsPanel.layer.cornerCurve = kCACornerCurveContinuous;
-    self.suggestionsPanel.clipsToBounds = YES;
-    self.suggestionsPanel.layer.borderWidth = 1.0 / UIScreen.mainScreen.scale;
-    self.suggestionsPanel.layer.borderColor = UIColor.separatorColor.CGColor;
-    self.suggestionsPanel.layer.shadowColor = UIColor.blackColor.CGColor;
-    self.suggestionsPanel.layer.shadowOpacity = 0.12;
-    self.suggestionsPanel.layer.shadowRadius = 12.0;
-    self.suggestionsPanel.layer.shadowOffset = CGSizeMake(0.0, 6.0);
-    self.suggestionsPanel.layer.masksToBounds = NO;
-    self.suggestionsPanel.hidden = YES;
-    self.suggestionsPanel.alpha = 0.0;
-    [self.scrollContentView addSubview:self.suggestionsPanel];
-
-    self.suggestionsTableView = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];
-    self.suggestionsTableView.translatesAutoresizingMaskIntoConstraints = NO;
-    self.suggestionsTableView.dataSource = self;
-    self.suggestionsTableView.delegate = self;
-    self.suggestionsTableView.separatorInset = UIEdgeInsetsMake(0.0, 16.0, 0.0, 16.0);
-    self.suggestionsTableView.rowHeight = kLSSuggestionRowHeight;
-    self.suggestionsTableView.backgroundColor = UIColor.clearColor;
-    self.suggestionsTableView.sectionHeaderHeight = 0.0;
-    self.suggestionsTableView.sectionFooterHeight = 0.0;
-    [self.suggestionsTableView registerClass:[UITableViewCell class] forCellReuseIdentifier:@"LSSearchSuggestionCell"];
-    [self.suggestionsPanel addSubview:self.suggestionsTableView];
+- (void)buildLocationDetails {
+    self.placeLabel = LSLabel(@"Choose a location", UIFontTextStyleTitle3);
+    self.placeLabel.accessibilityTraits = UIAccessibilityTraitHeader;
+    self.coordinateLabel = LSLabel(@"Search, tap the map, or enter coordinates.", UIFontTextStyleBody);
+    self.coordinateLabel.textColor = UIColor.secondaryLabelColor;
+    UIButton *coordinates = LSButton(@"Edit coordinates", @"number", NO);
+    [coordinates addTarget:self action:@selector(editCoordinates) forControlEvents:UIControlEventTouchUpInside];
+    self.savePlaceButton = LSButton(@"Save place", @"bookmark", NO);
+    [self.savePlaceButton addTarget:self action:@selector(saveSelectedPlace) forControlEvents:UIControlEventTouchUpInside];
+    self.locationDetails = LSInsetPanel(LSStack(@[self.placeLabel, self.coordinateLabel, coordinates, self.savePlaceButton], 12));
 }
-
-- (void)configureSearchCompleter {
-    self.searchCompletions = @[];
-    self.searchCompleter = [[MKLocalSearchCompleter alloc] init];
-    self.searchCompleter.delegate = self;
-    if (@available(iOS 13.0, *)) {
-        self.searchCompleter.resultTypes = MKLocalSearchCompleterResultTypeAddress | MKLocalSearchCompleterResultTypeQuery;
-    }
-}
-
-- (void)buildMapSection {
+- (void)buildMap {
     self.mapContainer = [[UIView alloc] init];
     self.mapContainer.translatesAutoresizingMaskIntoConstraints = NO;
-    self.mapContainer.backgroundColor = UIColor.secondarySystemGroupedBackgroundColor;
-    self.mapContainer.layer.cornerRadius = kLSCornerRadius;
-    self.mapContainer.layer.cornerCurve = kCACornerCurveContinuous;
+    self.mapContainer.layer.cornerRadius = 20;
     self.mapContainer.clipsToBounds = YES;
-    self.mapContainer.layer.borderWidth = 1.0 / UIScreen.mainScreen.scale;
-    self.mapContainer.layer.borderColor = UIColor.separatorColor.CGColor;
-    [self.scrollContentView addSubview:self.mapContainer];
-
-    self.mapView = [[MKMapView alloc] initWithFrame:CGRectZero];
+    NSLayoutConstraint *mapHeight = [self.mapContainer.heightAnchor constraintEqualToConstant:280];
+    mapHeight.priority = 999; mapHeight.active = YES;
+    [self replaceMap:nil];
+    UIButton *center = LSButton(@"", @"scope", NO);
+    center.accessibilityLabel = @"Center on applied location or selection";
+    [center addTarget:self action:@selector(centerMap) forControlEvents:UIControlEventTouchUpInside];
+    self.realCenterButton = LSButton(@"", @"location", NO);
+    self.realCenterButton.accessibilityLabel = @"Center on real location";
+    self.realCenterButton.hidden = YES;
+    [self.realCenterButton addTarget:self action:@selector(centerReal) forControlEvents:UIControlEventTouchUpInside];
+    self.mapRetryButton = LSButton(@"Retry map", @"arrow.clockwise", NO);
+    self.mapRetryButton.hidden = YES;
+    [self.mapRetryButton addTarget:self action:@selector(retryMap) forControlEvents:UIControlEventTouchUpInside];
+    UIStackView *buttons = LSStack(@[center, self.realCenterButton, self.mapRetryButton], 8);
+    [self.mapContainer addSubview:buttons];
+    [NSLayoutConstraint activateConstraints:@[
+        [buttons.topAnchor constraintEqualToAnchor:self.mapContainer.topAnchor constant:12],
+        [buttons.trailingAnchor constraintEqualToAnchor:self.mapContainer.trailingAnchor constant:-12],
+        [buttons.widthAnchor constraintGreaterThanOrEqualToConstant:44]
+    ]];
+}
+- (void)replaceMap:(MKCoordinateRegion *)savedRegion {
+    self.mapView.delegate = nil;
+    [self.mapView removeFromSuperview];
+    self.mapView = [[MKMapView alloc] init];
     self.mapView.translatesAutoresizingMaskIntoConstraints = NO;
     self.mapView.delegate = self;
-    self.mapView.showsUserLocation = ![[PersistenceManager shared] isSpoofingEnabled];
-    self.mapView.showsCompass = YES;
+    self.mapView.showsUserLocation = NO;
+    self.mapView.showsCompass = NO;
     self.mapView.showsScale = YES;
-    self.mapView.layoutMargins = UIEdgeInsetsMake(12.0, 12.0, 12.0, 12.0);
-    [self.mapContainer addSubview:self.mapView];
-
-    UITapGestureRecognizer *tapGesture = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleMapTap:)];
-    UILongPressGestureRecognizer *longPressGesture = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleMapLongPress:)];
-    longPressGesture.minimumPressDuration = 0.25;
-    [tapGesture requireGestureRecognizerToFail:longPressGesture];
-    [self.mapView addGestureRecognizer:tapGesture];
-    [self.mapView addGestureRecognizer:longPressGesture];
-
-    self.mapHintLabel = [[UILabel alloc] init];
-    self.mapHintLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    self.mapHintLabel.text = @"  Tap map or drag pin  ";
-    self.mapHintLabel.font = [UIFont systemFontOfSize:12.0 weight:UIFontWeightMedium];
-    self.mapHintLabel.textColor = UIColor.labelColor;
-    self.mapHintLabel.backgroundColor = [UIColor.secondarySystemBackgroundColor colorWithAlphaComponent:0.92];
-    self.mapHintLabel.layer.cornerRadius = 12.0;
-    self.mapHintLabel.layer.cornerCurve = kCACornerCurveContinuous;
-    self.mapHintLabel.clipsToBounds = YES;
-    self.mapHintLabel.textAlignment = NSTextAlignmentCenter;
-    [self.mapContainer addSubview:self.mapHintLabel];
-
-    self.mapSpinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleLarge];
-    self.mapSpinner.translatesAutoresizingMaskIntoConstraints = NO;
-    self.mapSpinner.hidesWhenStopped = YES;
-    self.mapSpinner.color = UIColor.systemGrayColor;
-    [self.mapContainer addSubview:self.mapSpinner];
-}
-
-- (void)buildControlPanel {
-    UIBlurEffect *blur = [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemChromeMaterial];
-    self.controlPanel = [[UIVisualEffectView alloc] initWithEffect:blur];
-    self.controlPanel.translatesAutoresizingMaskIntoConstraints = NO;
-    self.controlPanel.layer.cornerRadius = kLSControlPanelCornerRadius;
-    self.controlPanel.layer.cornerCurve = kCACornerCurveContinuous;
-    self.controlPanel.clipsToBounds = YES;
-    self.controlPanel.layer.shadowColor = UIColor.blackColor.CGColor;
-    self.controlPanel.layer.shadowOpacity = 0.12;
-    self.controlPanel.layer.shadowRadius = 16.0;
-    self.controlPanel.layer.shadowOffset = CGSizeMake(0.0, -2.0);
-    self.controlPanel.layer.masksToBounds = NO;
-    [self.scrollContentView addSubview:self.controlPanel];
-
-    UIView *content = self.controlPanel.contentView;
-
-    self.panelTabSegment = [[UISegmentedControl alloc] initWithItems:@[@"Map", @"Bookmarks"]];
-    self.panelTabSegment.translatesAutoresizingMaskIntoConstraints = NO;
-    self.panelTabSegment.selectedSegmentIndex = LSMapPickerPanelTabMap;
-    [self.panelTabSegment addTarget:self action:@selector(handlePanelTabChanged:) forControlEvents:UIControlEventValueChanged];
-    [content addSubview:self.panelTabSegment];
-
-    self.mapControlsContainer = [[UIView alloc] init];
-    self.mapControlsContainer.translatesAutoresizingMaskIntoConstraints = NO;
-    [content addSubview:self.mapControlsContainer];
-
-    self.staticControlsContainer = [[UIView alloc] init];
-    self.staticControlsContainer.translatesAutoresizingMaskIntoConstraints = NO;
-
-    self.routeControlsContainer = [[UIView alloc] init];
-    self.routeControlsContainer.translatesAutoresizingMaskIntoConstraints = NO;
-
-    self.mapControlsStack = [[UIStackView alloc] initWithArrangedSubviews:@[self.staticControlsContainer, self.routeControlsContainer]];
-    self.mapControlsStack.translatesAutoresizingMaskIntoConstraints = NO;
-    self.mapControlsStack.axis = UILayoutConstraintAxisVertical;
-    self.mapControlsStack.spacing = 12.0;
-
-    self.coordinateModeSegment = [[UISegmentedControl alloc] initWithItems:@[@"Static", @"Route"]];
-    self.coordinateModeSegment.translatesAutoresizingMaskIntoConstraints = NO;
-    self.coordinateModeSegment.selectedSegmentIndex = LSMapPickerCoordinateModeStatic;
-    [self.coordinateModeSegment addTarget:self action:@selector(handleCoordinateModeChanged:) forControlEvents:UIControlEventValueChanged];
-    [self.mapControlsContainer addSubview:self.coordinateModeSegment];
-    [self.mapControlsContainer addSubview:self.mapControlsStack];
-
-    UIView *staticPanel = self.staticControlsContainer;
-
-    self.coordinateTitleLabel = [[UILabel alloc] init];
-    self.coordinateTitleLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    self.coordinateTitleLabel.text = @"Selected coordinates";
-    self.coordinateTitleLabel.font = [UIFont systemFontOfSize:13.0 weight:UIFontWeightSemibold];
-    self.coordinateTitleLabel.textColor = UIColor.secondaryLabelColor;
-    [staticPanel addSubview:self.coordinateTitleLabel];
-
-    self.coordinateValueLabel = [[UILabel alloc] init];
-    self.coordinateValueLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    self.coordinateValueLabel.font = [UIFont monospacedDigitSystemFontOfSize:15.0 weight:UIFontWeightMedium];
-    self.coordinateValueLabel.textColor = UIColor.labelColor;
-    self.coordinateValueLabel.numberOfLines = 2;
-    self.coordinateValueLabel.adjustsFontSizeToFitWidth = YES;
-    self.coordinateValueLabel.minimumScaleFactor = 0.85;
-    [staticPanel addSubview:self.coordinateValueLabel];
-
-    self.bookmarkSaveButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    self.bookmarkSaveButton.translatesAutoresizingMaskIntoConstraints = NO;
-    UIImage *bookmarkImage = [UIImage systemImageNamed:@"bookmark"];
-    if (!bookmarkImage) {
-        [self.bookmarkSaveButton setTitle:@"★" forState:UIControlStateNormal];
-    } else {
-        [self.bookmarkSaveButton setImage:bookmarkImage forState:UIControlStateNormal];
-    }
-    self.bookmarkSaveButton.accessibilityLabel = @"Save bookmark";
-    [self.bookmarkSaveButton addTarget:self action:@selector(handleBookmarkSaveTapped) forControlEvents:UIControlEventTouchUpInside];
-    [staticPanel addSubview:self.bookmarkSaveButton];
-
-    self.separatorCoordFields = [self ls_separatorView];
-    [staticPanel addSubview:self.separatorCoordFields];
-
-    UITextField *latitudeInput = nil;
-    UITextField *longitudeInput = nil;
-    UIView *latitudeContainer = [self coordinateFieldWithTitle:@"Latitude"
-                                                   placeholder:@"37.774900"
-                                                     textField:&latitudeInput];
-    UIView *longitudeContainer = [self coordinateFieldWithTitle:@"Longitude"
-                                                    placeholder:@"-122.419400"
-                                                      textField:&longitudeInput];
-    self.latitudeField = latitudeInput;
-    self.longitudeField = longitudeInput;
-
-    UITextField *altitudeInput = nil;
-    UIView *altitudeContainer = [self coordinateFieldWithTitle:@"Alt (m)" placeholder:@"0" textField:&altitudeInput];
-    self.altitudeField = altitudeInput;
-
-    self.fieldStack = [[UIStackView alloc] initWithArrangedSubviews:@[latitudeContainer, longitudeContainer, altitudeContainer]];
-    self.fieldStack.translatesAutoresizingMaskIntoConstraints = NO;
-    self.fieldStack.axis = UILayoutConstraintAxisHorizontal;
-    self.fieldStack.spacing = 8.0;
-    self.fieldStack.distribution = UIStackViewDistributionFillEqually;
-    [staticPanel addSubview:self.fieldStack];
-
-    self.separatorFieldsHeading = [self ls_separatorView];
-    [staticPanel addSubview:self.separatorFieldsHeading];
-
-    self.headingValueLabel = [[UILabel alloc] init];
-    self.headingValueLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    self.headingValueLabel.font = [UIFont monospacedDigitSystemFontOfSize:14.0 weight:UIFontWeightMedium];
-    self.headingValueLabel.textColor = UIColor.secondaryLabelColor;
-    [staticPanel addSubview:self.headingValueLabel];
-
-    self.headingSlider = [[UISlider alloc] init];
-    self.headingSlider.translatesAutoresizingMaskIntoConstraints = NO;
-    self.headingSlider.minimumValue = 0.0f;
-    self.headingSlider.maximumValue = 359.0f;
-    self.headingSlider.tintColor = UIColor.systemBlueColor;
-    [self.headingSlider addTarget:self action:@selector(handleHeadingSliderChanged:) forControlEvents:UIControlEventValueChanged];
-    [staticPanel addSubview:self.headingSlider];
-
-    self.headingDirectionLabel = [[UILabel alloc] init];
-    self.headingDirectionLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    self.headingDirectionLabel.font = [UIFont systemFontOfSize:11.0 weight:UIFontWeightRegular];
-    self.headingDirectionLabel.textColor = UIColor.tertiaryLabelColor;
-    self.headingDirectionLabel.textAlignment = NSTextAlignmentCenter;
-    [staticPanel addSubview:self.headingDirectionLabel];
-
-    self.separatorHeadingActions = [self ls_separatorView];
-    [staticPanel addSubview:self.separatorHeadingActions];
-
-    self.separatorFluctuation = [self ls_separatorView];
-    [staticPanel addSubview:self.separatorFluctuation];
-
-    self.fluctuationRow = [[UIView alloc] init];
-    self.fluctuationRow.translatesAutoresizingMaskIntoConstraints = NO;
-    [staticPanel addSubview:self.fluctuationRow];
-
-    self.fluctuationLabel = [[UILabel alloc] init];
-    self.fluctuationLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    self.fluctuationLabel.text = @"Fluctuation";
-    self.fluctuationLabel.font = [UIFont systemFontOfSize:15.0 weight:UIFontWeightSemibold];
-    self.fluctuationLabel.textColor = UIColor.labelColor;
-    [self.fluctuationRow addSubview:self.fluctuationLabel];
-
-    self.fluctuationSwitch = [[UISwitch alloc] init];
-    self.fluctuationSwitch.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.fluctuationSwitch addTarget:self action:@selector(handleFluctuationToggle) forControlEvents:UIControlEventValueChanged];
-    [self.fluctuationRow addSubview:self.fluctuationSwitch];
-
-    self.fluctuationRadiusField = [[UITextField alloc] init];
-    self.fluctuationRadiusField.translatesAutoresizingMaskIntoConstraints = NO;
-    self.fluctuationRadiusField.placeholder = @"Radius (m)";
-    self.fluctuationRadiusField.keyboardType = UIKeyboardTypeNumberPad;
-    self.fluctuationRadiusField.font = [UIFont monospacedDigitSystemFontOfSize:14.0 weight:UIFontWeightMedium];
-    self.fluctuationRadiusField.textColor = UIColor.labelColor;
-    self.fluctuationRadiusField.textAlignment = NSTextAlignmentCenter;
-    self.fluctuationRadiusField.backgroundColor = UIColor.secondarySystemGroupedBackgroundColor;
-    self.fluctuationRadiusField.layer.cornerRadius = 10.0;
-    self.fluctuationRadiusField.layer.cornerCurve = kCACornerCurveContinuous;
-    self.fluctuationRadiusField.layer.borderWidth = 1.0 / UIScreen.mainScreen.scale;
-    self.fluctuationRadiusField.layer.borderColor = UIColor.separatorColor.CGColor;
-    self.fluctuationRadiusField.delegate = self;
-    [self.fluctuationRadiusField addTarget:self action:@selector(handleFluctuationRadiusChanged) forControlEvents:UIControlEventEditingDidEnd];
-    [staticPanel addSubview:self.fluctuationRadiusField];
-
-    UIToolbar *fluctuationToolbar = [[UIToolbar alloc] initWithFrame:CGRectMake(0, 0, 0, 44)];
-    UIBarButtonItem *flexItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemFlexibleSpace target:nil action:nil];
-    UIBarButtonItem *doneItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone target:self action:@selector(dismissKeyboard)];
-    fluctuationToolbar.items = @[flexItem, doneItem];
-    self.fluctuationRadiusField.inputAccessoryView = fluctuationToolbar;
-
-    self.keepLastSpoofRow = [[UIView alloc] init];
-    self.keepLastSpoofRow.translatesAutoresizingMaskIntoConstraints = NO;
-    [staticPanel addSubview:self.keepLastSpoofRow];
-
-    self.keepLastSpoofLabel = [[UILabel alloc] init];
-    self.keepLastSpoofLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    self.keepLastSpoofLabel.text = @"Keep last location";
-    self.keepLastSpoofLabel.font = [UIFont systemFontOfSize:15.0 weight:UIFontWeightSemibold];
-    self.keepLastSpoofLabel.textColor = UIColor.labelColor;
-    [self.keepLastSpoofRow addSubview:self.keepLastSpoofLabel];
-
-    self.keepLastSpoofSwitch = [[UISwitch alloc] init];
-    self.keepLastSpoofSwitch.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.keepLastSpoofSwitch addTarget:self action:@selector(handleKeepLastSpoofToggle) forControlEvents:UIControlEventValueChanged];
-    [self.keepLastSpoofRow addSubview:self.keepLastSpoofSwitch];
-
-    self.showRealLocationRow = [[UIView alloc] init];
-    self.showRealLocationRow.translatesAutoresizingMaskIntoConstraints = NO;
-    [staticPanel addSubview:self.showRealLocationRow];
-
-    self.showRealLocationLabel = [[UILabel alloc] init];
-    self.showRealLocationLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    self.showRealLocationLabel.text = @"Show real location";
-    self.showRealLocationLabel.font = [UIFont systemFontOfSize:15.0 weight:UIFontWeightSemibold];
-    self.showRealLocationLabel.textColor = UIColor.labelColor;
-    [self.showRealLocationRow addSubview:self.showRealLocationLabel];
-
-    self.showRealLocationSwitch = [[UISwitch alloc] init];
-    self.showRealLocationSwitch.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.showRealLocationSwitch addTarget:self action:@selector(handleShowRealLocationToggle) forControlEvents:UIControlEventValueChanged];
-    [self.showRealLocationRow addSubview:self.showRealLocationSwitch];
-
-    self.applyButton = [self primaryButtonWithTitle:@"Apply Location" action:@selector(handleApply)];
-    self.cancelButton = [self secondaryButtonWithTitle:@"Cancel" action:@selector(handleCancel)];
-    self.stopButton = [self destructiveOutlineButtonWithTitle:@"Stop Spoofing" action:@selector(handleStopSpoofing)];
-
-    UIStackView *actionRow = [[UIStackView alloc] initWithArrangedSubviews:@[self.cancelButton, self.applyButton]];
-    actionRow.translatesAutoresizingMaskIntoConstraints = NO;
-    actionRow.axis = UILayoutConstraintAxisHorizontal;
-    actionRow.spacing = 12.0;
-    actionRow.distribution = UIStackViewDistributionFillEqually;
-    [staticPanel addSubview:actionRow];
-
-    self.actionRow = actionRow;
-    [staticPanel addSubview:self.stopButton];
-}
-
-- (void)installConstraints {
-    UILayoutGuide *safeArea = self.view.safeAreaLayoutGuide;
-    UIView *panelContent = self.controlPanel.contentView;
-
+    self.mapView.accessibilityLabel = @"Location preview map";
+    [self.mapContainer insertSubview:self.mapView atIndex:0];
     [NSLayoutConstraint activateConstraints:@[
-        [self.contentScrollView.topAnchor constraintEqualToAnchor:safeArea.topAnchor],
-        [self.contentScrollView.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
-        [self.contentScrollView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
-        [self.contentScrollView.bottomAnchor constraintEqualToAnchor:safeArea.bottomAnchor],
-
-        [self.scrollContentView.topAnchor constraintEqualToAnchor:self.contentScrollView.contentLayoutGuide.topAnchor],
-        [self.scrollContentView.leadingAnchor constraintEqualToAnchor:self.contentScrollView.contentLayoutGuide.leadingAnchor],
-        [self.scrollContentView.trailingAnchor constraintEqualToAnchor:self.contentScrollView.contentLayoutGuide.trailingAnchor],
-        [self.scrollContentView.bottomAnchor constraintEqualToAnchor:self.contentScrollView.contentLayoutGuide.bottomAnchor],
-        [self.scrollContentView.widthAnchor constraintEqualToAnchor:self.contentScrollView.frameLayoutGuide.widthAnchor],
-
-        [self.headerView.topAnchor constraintEqualToAnchor:self.scrollContentView.topAnchor constant:8.0],
-        [self.headerView.leadingAnchor constraintEqualToAnchor:self.scrollContentView.leadingAnchor constant:kLSHorizontalInset],
-        [self.headerView.trailingAnchor constraintEqualToAnchor:self.scrollContentView.trailingAnchor constant:-kLSHorizontalInset],
-
-        [self.titleLabel.topAnchor constraintEqualToAnchor:self.headerView.topAnchor],
-        [self.titleLabel.leadingAnchor constraintEqualToAnchor:self.headerView.leadingAnchor],
-        [self.titleLabel.trailingAnchor constraintLessThanOrEqualToAnchor:self.closeButton.leadingAnchor constant:-12.0],
-
-        [self.closeButton.centerYAnchor constraintEqualToAnchor:self.titleLabel.centerYAnchor],
-        [self.closeButton.trailingAnchor constraintEqualToAnchor:self.headerView.trailingAnchor],
-        [self.closeButton.widthAnchor constraintEqualToConstant:32.0],
-        [self.closeButton.heightAnchor constraintEqualToConstant:32.0],
-
-        [self.subtitleLabel.topAnchor constraintEqualToAnchor:self.titleLabel.bottomAnchor constant:4.0],
-        [self.subtitleLabel.leadingAnchor constraintEqualToAnchor:self.headerView.leadingAnchor],
-        [self.subtitleLabel.trailingAnchor constraintEqualToAnchor:self.headerView.trailingAnchor],
-
-        [self.statusPill.topAnchor constraintEqualToAnchor:self.subtitleLabel.bottomAnchor constant:12.0],
-        [self.statusPill.leadingAnchor constraintEqualToAnchor:self.headerView.leadingAnchor],
-        [self.statusPill.bottomAnchor constraintEqualToAnchor:self.headerView.bottomAnchor],
-
-        [self.statusDot.leadingAnchor constraintEqualToAnchor:self.statusPill.leadingAnchor constant:10.0],
-        [self.statusDot.centerYAnchor constraintEqualToAnchor:self.statusPill.centerYAnchor],
-        [self.statusDot.widthAnchor constraintEqualToConstant:10.0],
-        [self.statusDot.heightAnchor constraintEqualToConstant:10.0],
-
-        [self.statusLabel.leadingAnchor constraintEqualToAnchor:self.statusDot.trailingAnchor constant:8.0],
-        [self.statusLabel.topAnchor constraintEqualToAnchor:self.statusPill.topAnchor constant:6.0],
-        [self.statusLabel.bottomAnchor constraintEqualToAnchor:self.statusPill.bottomAnchor constant:-6.0],
-
-        [self.pillStopLabel.leadingAnchor constraintEqualToAnchor:self.statusLabel.trailingAnchor constant:6.0],
-        [self.pillStopLabel.centerYAnchor constraintEqualToAnchor:self.statusPill.centerYAnchor],
-        [self.pillStopLabel.trailingAnchor constraintEqualToAnchor:self.statusPill.trailingAnchor constant:-12.0],
-
-        [self.searchBar.topAnchor constraintEqualToAnchor:self.headerView.bottomAnchor constant:16.0],
-        [self.searchBar.leadingAnchor constraintEqualToAnchor:self.scrollContentView.leadingAnchor constant:kLSHorizontalInset],
-        [self.searchBar.trailingAnchor constraintEqualToAnchor:self.searchSpinner.leadingAnchor constant:-4.0],
-        [self.searchBar.heightAnchor constraintEqualToConstant:52.0],
-
-        [self.searchSpinner.centerYAnchor constraintEqualToAnchor:self.searchBar.centerYAnchor],
-        [self.searchSpinner.trailingAnchor constraintEqualToAnchor:self.scrollContentView.trailingAnchor constant:-kLSHorizontalInset],
-
-        [self.suggestionsPanel.topAnchor constraintEqualToAnchor:self.searchBar.bottomAnchor constant:2.0],
-        [self.suggestionsPanel.leadingAnchor constraintEqualToAnchor:self.searchBar.leadingAnchor],
-        [self.suggestionsPanel.trailingAnchor constraintEqualToAnchor:self.searchBar.trailingAnchor],
-
-        [self.suggestionsTableView.topAnchor constraintEqualToAnchor:self.suggestionsPanel.topAnchor],
-        [self.suggestionsTableView.leadingAnchor constraintEqualToAnchor:self.suggestionsPanel.leadingAnchor],
-        [self.suggestionsTableView.trailingAnchor constraintEqualToAnchor:self.suggestionsPanel.trailingAnchor],
-        [self.suggestionsTableView.bottomAnchor constraintEqualToAnchor:self.suggestionsPanel.bottomAnchor],
-
-        [self.mapContainer.topAnchor constraintEqualToAnchor:self.suggestionsPanel.bottomAnchor constant:10.0],
-        [self.mapContainer.leadingAnchor constraintEqualToAnchor:self.scrollContentView.leadingAnchor constant:kLSHorizontalInset],
-        [self.mapContainer.trailingAnchor constraintEqualToAnchor:self.scrollContentView.trailingAnchor constant:-kLSHorizontalInset],
-
         [self.mapView.topAnchor constraintEqualToAnchor:self.mapContainer.topAnchor],
         [self.mapView.leadingAnchor constraintEqualToAnchor:self.mapContainer.leadingAnchor],
         [self.mapView.trailingAnchor constraintEqualToAnchor:self.mapContainer.trailingAnchor],
-        [self.mapView.bottomAnchor constraintEqualToAnchor:self.mapContainer.bottomAnchor],
-
-        [self.mapHintLabel.bottomAnchor constraintEqualToAnchor:self.mapContainer.bottomAnchor constant:-12.0],
-        [self.mapHintLabel.centerXAnchor constraintEqualToAnchor:self.mapContainer.centerXAnchor],
-
-        [self.mapSpinner.centerXAnchor constraintEqualToAnchor:self.mapContainer.centerXAnchor],
-        [self.mapSpinner.centerYAnchor constraintEqualToAnchor:self.mapContainer.centerYAnchor],
-
-        [self.controlPanel.topAnchor constraintEqualToAnchor:self.mapContainer.bottomAnchor constant:16.0],
-        [self.controlPanel.leadingAnchor constraintEqualToAnchor:self.scrollContentView.leadingAnchor constant:kLSHorizontalInset],
-        [self.controlPanel.trailingAnchor constraintEqualToAnchor:self.scrollContentView.trailingAnchor constant:-kLSHorizontalInset],
-        [self.controlPanel.bottomAnchor constraintEqualToAnchor:self.scrollContentView.bottomAnchor constant:-8.0],
-
-        [self.panelTabSegment.topAnchor constraintEqualToAnchor:panelContent.topAnchor constant:14.0],
-        [self.panelTabSegment.leadingAnchor constraintEqualToAnchor:panelContent.leadingAnchor constant:12.0],
-        [self.panelTabSegment.trailingAnchor constraintEqualToAnchor:panelContent.trailingAnchor constant:-12.0],
-
-        [self.mapControlsContainer.topAnchor constraintEqualToAnchor:self.panelTabSegment.bottomAnchor constant:10.0],
-        [self.mapControlsContainer.leadingAnchor constraintEqualToAnchor:panelContent.leadingAnchor constant:12.0],
-        [self.mapControlsContainer.trailingAnchor constraintEqualToAnchor:panelContent.trailingAnchor constant:-12.0],
-        [self.mapControlsContainer.bottomAnchor constraintEqualToAnchor:panelContent.bottomAnchor constant:-12.0],
-
-        [self.bookmarksContainer.topAnchor constraintEqualToAnchor:self.panelTabSegment.bottomAnchor constant:6.0],
-        [self.bookmarksContainer.leadingAnchor constraintEqualToAnchor:panelContent.leadingAnchor],
-        [self.bookmarksContainer.trailingAnchor constraintEqualToAnchor:panelContent.trailingAnchor],
-        [self.bookmarksContainer.bottomAnchor constraintEqualToAnchor:panelContent.bottomAnchor constant:-8.0],
-
-        [self.coordinateModeSegment.topAnchor constraintEqualToAnchor:self.mapControlsContainer.topAnchor],
-        [self.coordinateModeSegment.leadingAnchor constraintEqualToAnchor:self.mapControlsContainer.leadingAnchor constant:12.0],
-        [self.coordinateModeSegment.trailingAnchor constraintEqualToAnchor:self.mapControlsContainer.trailingAnchor constant:-12.0],
-
-        [self.mapControlsStack.topAnchor constraintEqualToAnchor:self.coordinateModeSegment.bottomAnchor constant:12.0],
-        [self.mapControlsStack.leadingAnchor constraintEqualToAnchor:self.mapControlsContainer.leadingAnchor constant:12.0],
-        [self.mapControlsStack.trailingAnchor constraintEqualToAnchor:self.mapControlsContainer.trailingAnchor constant:-12.0],
-        [self.mapControlsStack.bottomAnchor constraintEqualToAnchor:self.mapControlsContainer.bottomAnchor constant:-12.0],
-
-        [self.coordinateTitleLabel.topAnchor constraintEqualToAnchor:self.staticControlsContainer.topAnchor],
-        [self.coordinateTitleLabel.leadingAnchor constraintEqualToAnchor:self.staticControlsContainer.leadingAnchor],
-
-        [self.bookmarkSaveButton.centerYAnchor constraintEqualToAnchor:self.coordinateTitleLabel.centerYAnchor],
-        [self.bookmarkSaveButton.trailingAnchor constraintEqualToAnchor:self.staticControlsContainer.trailingAnchor],
-        [self.bookmarkSaveButton.leadingAnchor constraintGreaterThanOrEqualToAnchor:self.coordinateTitleLabel.trailingAnchor constant:8.0],
-
-        [self.coordinateValueLabel.topAnchor constraintEqualToAnchor:self.coordinateTitleLabel.bottomAnchor constant:4.0],
-        [self.coordinateValueLabel.leadingAnchor constraintEqualToAnchor:self.staticControlsContainer.leadingAnchor],
-        [self.coordinateValueLabel.trailingAnchor constraintEqualToAnchor:self.staticControlsContainer.trailingAnchor],
-
-        [self.separatorCoordFields.topAnchor constraintEqualToAnchor:self.coordinateValueLabel.bottomAnchor constant:8.0],
-        [self.separatorCoordFields.leadingAnchor constraintEqualToAnchor:self.staticControlsContainer.leadingAnchor],
-        [self.separatorCoordFields.trailingAnchor constraintEqualToAnchor:self.staticControlsContainer.trailingAnchor],
-
-        [self.fieldStack.topAnchor constraintEqualToAnchor:self.separatorCoordFields.bottomAnchor constant:6.0],
-        [self.fieldStack.leadingAnchor constraintEqualToAnchor:self.staticControlsContainer.leadingAnchor],
-        [self.fieldStack.trailingAnchor constraintEqualToAnchor:self.staticControlsContainer.trailingAnchor],
-
-        [self.separatorFieldsHeading.topAnchor constraintEqualToAnchor:self.fieldStack.bottomAnchor constant:8.0],
-        [self.separatorFieldsHeading.leadingAnchor constraintEqualToAnchor:self.staticControlsContainer.leadingAnchor],
-        [self.separatorFieldsHeading.trailingAnchor constraintEqualToAnchor:self.staticControlsContainer.trailingAnchor],
-
-        [self.headingValueLabel.topAnchor constraintEqualToAnchor:self.separatorFieldsHeading.bottomAnchor constant:6.0],
-        [self.headingValueLabel.leadingAnchor constraintEqualToAnchor:self.staticControlsContainer.leadingAnchor],
-
-        [self.headingSlider.centerYAnchor constraintEqualToAnchor:self.headingValueLabel.centerYAnchor],
-        [self.headingSlider.leadingAnchor constraintEqualToAnchor:self.headingValueLabel.trailingAnchor constant:12.0],
-        [self.headingSlider.trailingAnchor constraintEqualToAnchor:self.staticControlsContainer.trailingAnchor],
-
-        [self.headingDirectionLabel.topAnchor constraintEqualToAnchor:self.headingSlider.bottomAnchor constant:2.0],
-        [self.headingDirectionLabel.centerXAnchor constraintEqualToAnchor:self.headingSlider.centerXAnchor],
-
-        [self.separatorHeadingActions.topAnchor constraintEqualToAnchor:self.headingDirectionLabel.bottomAnchor constant:8.0],
-        [self.separatorHeadingActions.leadingAnchor constraintEqualToAnchor:self.staticControlsContainer.leadingAnchor],
-        [self.separatorHeadingActions.trailingAnchor constraintEqualToAnchor:self.staticControlsContainer.trailingAnchor],
-
-        [self.separatorFluctuation.topAnchor constraintEqualToAnchor:self.separatorHeadingActions.bottomAnchor constant:8.0],
-        [self.separatorFluctuation.leadingAnchor constraintEqualToAnchor:self.staticControlsContainer.leadingAnchor],
-        [self.separatorFluctuation.trailingAnchor constraintEqualToAnchor:self.staticControlsContainer.trailingAnchor],
-
-        [self.fluctuationRow.topAnchor constraintEqualToAnchor:self.separatorFluctuation.bottomAnchor constant:8.0],
-        [self.fluctuationRow.leadingAnchor constraintEqualToAnchor:self.staticControlsContainer.leadingAnchor],
-        [self.fluctuationRow.trailingAnchor constraintEqualToAnchor:self.staticControlsContainer.trailingAnchor],
-
-        [self.fluctuationLabel.leadingAnchor constraintEqualToAnchor:self.fluctuationRow.leadingAnchor],
-        [self.fluctuationLabel.centerYAnchor constraintEqualToAnchor:self.fluctuationRow.centerYAnchor],
-
-        [self.fluctuationSwitch.trailingAnchor constraintEqualToAnchor:self.fluctuationRow.trailingAnchor],
-        [self.fluctuationSwitch.centerYAnchor constraintEqualToAnchor:self.fluctuationRow.centerYAnchor],
-
-        [self.fluctuationSwitch.leadingAnchor constraintGreaterThanOrEqualToAnchor:self.fluctuationLabel.trailingAnchor constant:12.0],
-
-        [self.fluctuationRow.heightAnchor constraintEqualToConstant:40.0],
-
-        (self.fluctuationRadiusTopConstraint = [self.fluctuationRadiusField.topAnchor constraintEqualToAnchor:self.fluctuationRow.bottomAnchor constant:6.0]),
-        [self.fluctuationRadiusField.leadingAnchor constraintEqualToAnchor:self.staticControlsContainer.leadingAnchor],
-        [self.fluctuationRadiusField.trailingAnchor constraintEqualToAnchor:self.staticControlsContainer.trailingAnchor],
-        (self.fluctuationRadiusHeightConstraint = [self.fluctuationRadiusField.heightAnchor constraintEqualToConstant:40.0]),
-
-        [self.keepLastSpoofRow.topAnchor constraintEqualToAnchor:self.fluctuationRadiusField.bottomAnchor constant:10.0],
-        [self.keepLastSpoofRow.leadingAnchor constraintEqualToAnchor:self.staticControlsContainer.leadingAnchor],
-        [self.keepLastSpoofRow.trailingAnchor constraintEqualToAnchor:self.staticControlsContainer.trailingAnchor],
-
-        [self.keepLastSpoofLabel.leadingAnchor constraintEqualToAnchor:self.keepLastSpoofRow.leadingAnchor],
-        [self.keepLastSpoofLabel.centerYAnchor constraintEqualToAnchor:self.keepLastSpoofRow.centerYAnchor],
-
-        [self.keepLastSpoofSwitch.trailingAnchor constraintEqualToAnchor:self.keepLastSpoofRow.trailingAnchor],
-        [self.keepLastSpoofSwitch.centerYAnchor constraintEqualToAnchor:self.keepLastSpoofRow.centerYAnchor],
-
-        [self.keepLastSpoofSwitch.leadingAnchor constraintGreaterThanOrEqualToAnchor:self.keepLastSpoofLabel.trailingAnchor constant:12.0],
-
-        [self.keepLastSpoofRow.heightAnchor constraintEqualToConstant:40.0],
-
-        [self.showRealLocationRow.topAnchor constraintEqualToAnchor:self.keepLastSpoofRow.bottomAnchor constant:10.0],
-        [self.showRealLocationRow.leadingAnchor constraintEqualToAnchor:self.staticControlsContainer.leadingAnchor],
-        [self.showRealLocationRow.trailingAnchor constraintEqualToAnchor:self.staticControlsContainer.trailingAnchor],
-
-        [self.showRealLocationLabel.leadingAnchor constraintEqualToAnchor:self.showRealLocationRow.leadingAnchor],
-        [self.showRealLocationLabel.centerYAnchor constraintEqualToAnchor:self.showRealLocationRow.centerYAnchor],
-
-        [self.showRealLocationSwitch.trailingAnchor constraintEqualToAnchor:self.showRealLocationRow.trailingAnchor],
-        [self.showRealLocationSwitch.centerYAnchor constraintEqualToAnchor:self.showRealLocationRow.centerYAnchor],
-
-        [self.showRealLocationSwitch.leadingAnchor constraintGreaterThanOrEqualToAnchor:self.showRealLocationLabel.trailingAnchor constant:12.0],
-
-        [self.showRealLocationRow.heightAnchor constraintEqualToConstant:40.0],
-
-        [self.cancelButton.heightAnchor constraintEqualToConstant:50.0],
-        [self.applyButton.heightAnchor constraintEqualToConstant:50.0],
-
-        [self.actionRow.topAnchor constraintEqualToAnchor:self.showRealLocationRow.bottomAnchor constant:12.0],
-        [self.actionRow.leadingAnchor constraintEqualToAnchor:self.staticControlsContainer.leadingAnchor],
-        [self.actionRow.trailingAnchor constraintEqualToAnchor:self.staticControlsContainer.trailingAnchor],
-
-        [self.stopButton.topAnchor constraintEqualToAnchor:self.actionRow.bottomAnchor constant:10.0],
-        [self.stopButton.leadingAnchor constraintEqualToAnchor:self.staticControlsContainer.leadingAnchor],
-        [self.stopButton.trailingAnchor constraintEqualToAnchor:self.staticControlsContainer.trailingAnchor]
+        [self.mapView.bottomAnchor constraintEqualToAnchor:self.mapContainer.bottomAnchor]
     ]];
-
-    [self ls_installRouteConstraintsInRoutePanel];
-
-    self.mapControlsBottomStaticConstraint = [self.stopButton.bottomAnchor constraintEqualToAnchor:self.staticControlsContainer.bottomAnchor constant:-12.0];
-    self.mapControlsBottomStaticNoStopConstraint = [self.actionRow.bottomAnchor constraintEqualToAnchor:self.staticControlsContainer.bottomAnchor constant:-12.0];
-    self.mapControlsBottomRouteConstraint = [self.routeActionRow.bottomAnchor constraintEqualToAnchor:self.routeControlsContainer.bottomAnchor constant:-12.0];
-    self.mapControlsBottomRouteEarlyConstraint = [self.getRouteButton.bottomAnchor constraintEqualToAnchor:self.routeControlsContainer.bottomAnchor constant:-12.0];
-    self.mapControlsBottomStaticConstraint.active = YES;
-
-    self.stopButtonHeightConstraint = [self.stopButton.heightAnchor constraintEqualToConstant:50.0];
-    self.stopButtonHeightConstraint.active = YES;
-
-    self.suggestionsHeightConstraint = [self.suggestionsPanel.heightAnchor constraintEqualToConstant:0.0];
-    self.suggestionsHeightConstraint.active = YES;
-
-    self.mapHeightConstraint = [self.mapContainer.heightAnchor constraintEqualToAnchor:self.view.heightAnchor multiplier:kLSMapHeightMultiplier];
-    self.mapHeightConstraint.active = YES;
-
-    [self.controlPanel.heightAnchor constraintGreaterThanOrEqualToConstant:180.0].active = YES;
-}
-
-#pragma mark - Controls
-
-- (UIView *)ls_separatorView {
-    UIView *line = [[UIView alloc] init];
-    line.translatesAutoresizingMaskIntoConstraints = NO;
-    line.backgroundColor = UIColor.separatorColor;
-    [NSLayoutConstraint activateConstraints:@[
-        [line.heightAnchor constraintEqualToConstant:1.0 / UIScreen.mainScreen.scale]
-    ]];
-    return line;
-}
-
-- (UIView *)coordinateFieldWithTitle:(NSString *)title placeholder:(NSString *)placeholder textField:(UITextField * __strong *)textFieldOut {
-    UIView *container = [[UIView alloc] init];
-    container.translatesAutoresizingMaskIntoConstraints = NO;
-    container.backgroundColor = UIColor.secondarySystemGroupedBackgroundColor;
-    container.layer.cornerRadius = 10.0;
-    container.layer.cornerCurve = kCACornerCurveContinuous;
-    container.layer.borderWidth = 1.0 / UIScreen.mainScreen.scale;
-    container.layer.borderColor = UIColor.separatorColor.CGColor;
-
-    UILabel *caption = [[UILabel alloc] init];
-    caption.translatesAutoresizingMaskIntoConstraints = NO;
-    caption.text = title;
-    caption.font = [UIFont systemFontOfSize:11.0 weight:UIFontWeightSemibold];
-    caption.textColor = UIColor.secondaryLabelColor;
-    [container addSubview:caption];
-
-    UITextField *field = [[UITextField alloc] init];
-    field.translatesAutoresizingMaskIntoConstraints = NO;
-    field.placeholder = placeholder;
-    field.keyboardType = UIKeyboardTypeNumbersAndPunctuation;
-    field.autocapitalizationType = UITextAutocapitalizationTypeNone;
-    field.autocorrectionType = UITextAutocorrectionTypeNo;
-    field.font = [UIFont monospacedDigitSystemFontOfSize:14.0 weight:UIFontWeightMedium];
-    field.textColor = UIColor.labelColor;
-    field.delegate = self;
-    [field addTarget:self action:@selector(textFieldDidChange:) forControlEvents:UIControlEventEditingChanged];
-    [container addSubview:field];
-
-    if (textFieldOut) {
-        *textFieldOut = field;
+    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(mapTapped:)];
+    tap.delegate = self;
+    tap.cancelsTouchesInView = NO;
+    [self.mapView addGestureRecognizer:tap];
+    UILongPressGestureRecognizer *hold = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(mapHeld:)];
+    hold.delegate = self;
+    [tap requireGestureRecognizerToFail:hold];
+    [self.mapView addGestureRecognizer:hold];
+    for (MKPointAnnotation *pin in @[self.pin ?: NSNull.null, self.startPin ?: NSNull.null, self.endPin ?: NSNull.null, self.appliedPin ?: NSNull.null, self.realPin ?: NSNull.null]) {
+        if ([pin isKindOfClass:MKPointAnnotation.class]) [self.mapView addAnnotation:pin];
     }
-
-    [NSLayoutConstraint activateConstraints:@[
-        [caption.topAnchor constraintEqualToAnchor:container.topAnchor constant:4.0],
-        [caption.leadingAnchor constraintEqualToAnchor:container.leadingAnchor constant:10.0],
-        [caption.trailingAnchor constraintEqualToAnchor:container.trailingAnchor constant:-10.0],
-
-        [field.topAnchor constraintEqualToAnchor:caption.bottomAnchor constant:1.0],
-        [field.leadingAnchor constraintEqualToAnchor:container.leadingAnchor constant:10.0],
-        [field.trailingAnchor constraintEqualToAnchor:container.trailingAnchor constant:-10.0],
-        [field.bottomAnchor constraintEqualToAnchor:container.bottomAnchor constant:-6.0],
-        [container.heightAnchor constraintEqualToConstant:46.0]
-    ]];
-
-    return container;
+    if (self.routePolyline) [self.mapView addOverlay:self.routePolyline];
+    if (self.radiusCircle) [self.mapView addOverlay:self.radiusCircle];
+    if (savedRegion) [self.mapView setRegion:*savedRegion animated:NO];
+    else if (self.hasSelection) [self.mapView setRegion:MKCoordinateRegionMakeWithDistance(self.selectedCoordinate, 2000, 2000) animated:NO];
 }
-
-- (UIButton *)primaryButtonWithTitle:(NSString *)title action:(SEL)action {
-    UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
-    button.translatesAutoresizingMaskIntoConstraints = NO;
-    [button setTitle:title forState:UIControlStateNormal];
-    [button setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
-    button.titleLabel.font = [UIFont systemFontOfSize:16.0 weight:UIFontWeightSemibold];
-    button.backgroundColor = UIColor.systemBlueColor;
-    button.layer.cornerRadius = 12.0;
-    button.layer.cornerCurve = kCACornerCurveContinuous;
-    [button addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
-    return button;
-}
-
-- (UIButton *)secondaryButtonWithTitle:(NSString *)title action:(SEL)action {
-    UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
-    button.translatesAutoresizingMaskIntoConstraints = NO;
-    [button setTitle:title forState:UIControlStateNormal];
-    [button setTitleColor:UIColor.labelColor forState:UIControlStateNormal];
-    button.titleLabel.font = [UIFont systemFontOfSize:16.0 weight:UIFontWeightSemibold];
-    button.backgroundColor = UIColor.secondarySystemGroupedBackgroundColor;
-    button.layer.cornerRadius = 12.0;
-    button.layer.cornerCurve = kCACornerCurveContinuous;
-    button.layer.borderWidth = 1.0 / UIScreen.mainScreen.scale;
-    button.layer.borderColor = UIColor.separatorColor.CGColor;
-    [button addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
-    return button;
-}
-
-- (UIButton *)destructiveOutlineButtonWithTitle:(NSString *)title action:(SEL)action {
-    UIButton *button = [UIButton buttonWithType:UIButtonTypeCustom];
-    button.translatesAutoresizingMaskIntoConstraints = NO;
-
-    [button setTitle:title forState:UIControlStateNormal];
-    button.titleLabel.font = [UIFont systemFontOfSize:16.0 weight:UIFontWeightSemibold];
-
-    [button setTitleColor:UIColor.systemRedColor forState:UIControlStateNormal];
-
-    button.backgroundColor = [UIColor.systemRedColor colorWithAlphaComponent:0.12];
-    button.layer.cornerRadius = 12.0;
-    button.layer.cornerCurve = kCACornerCurveContinuous;
-    button.layer.borderWidth = 1.0 / UIScreen.mainScreen.scale;
-    button.layer.borderColor = UIColor.systemRedColor.CGColor;
-    button.clipsToBounds = YES;
-
-    [button addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
-    return button;
-}
-
-- (void)configureKeyboardToolbar {
-    UIToolbar *toolbar = [[UIToolbar alloc] initWithFrame:CGRectMake(0, 0, 0, 44)];
-    UIBarButtonItem *flex = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemFlexibleSpace target:nil action:nil];
-    UIBarButtonItem *done = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone target:self action:@selector(dismissKeyboard)];
-    toolbar.items = @[flex, done];
-    self.latitudeField.inputAccessoryView = toolbar;
-    self.longitudeField.inputAccessoryView = toolbar;
-    self.altitudeField.inputAccessoryView = toolbar;
-    self.customSpeedField.inputAccessoryView = toolbar;
-}
-
-- (void)refreshStatusPill {
-    LSRouteSimulator *simulator = [LSRouteSimulator shared];
-    if (simulator.isSimulating) {
-        double kmh = [LSRouteSimulator speedMetersPerSecondForMode:simulator.transportMode customSpeedKmh:simulator.customSpeedKmh] * 3.6;
-        self.statusLabel.text = [NSString stringWithFormat:@"Simulating · %.1f km/h", kmh];
-        self.statusDot.backgroundColor = UIColor.systemGreenColor;
-    } else {
-        BOOL active = [[PersistenceManager shared] isSpoofingEnabled];
-        self.statusLabel.text = active ? @"Spoofing active" : @"Spoofing inactive";
-        self.statusDot.backgroundColor = active ? UIColor.systemGreenColor : UIColor.systemOrangeColor;
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gesture shouldReceiveTouch:(UITouch *)touch {
+    (void)gesture;
+    UIView *view = touch.view;
+    while (view && view != self.mapView) {
+        if ([view isKindOfClass:UIControl.class] || [view isKindOfClass:MKAnnotationView.class]) return NO;
+        view = view.superview;
     }
-
-    BOOL active = [[PersistenceManager shared] isSpoofingEnabled] || simulator.isSimulating;
-    self.pillStopLabel.hidden = !active;
-    self.statusPill.backgroundColor = active ? [UIColor.systemRedColor colorWithAlphaComponent:0.12] : [UIColor.tertiarySystemFillColor colorWithAlphaComponent:0.9];
-    BOOL showStop = active && self.coordinateMode == LSMapPickerCoordinateModeStatic && self.panelTab == LSMapPickerPanelTabMap;
-    self.stopButton.hidden = !showStop;
-    self.stopButtonHeightConstraint.constant = showStop ? 50.0 : 0.0;
-    [self ls_updateMapControlsBottomConstraint];
-
-    BOOL showReal = [[PersistenceManager shared] isSpoofingEnabled] && [PersistenceManager shared].showRealLocation;
-    self.mapView.showsUserLocation = ![[PersistenceManager shared] isSpoofingEnabled] || showReal;
+    return YES;
 }
-
-#pragma mark - Keyboard
-
-- (void)ls_keyboardWillShow:(NSNotification *)note {
-    CGRect kbFrame = [note.userInfo[UIKeyboardFrameEndUserInfoKey] CGRectValue];
-    CGFloat kbHeight = kbFrame.size.height;
-    UIEdgeInsets insets = self.contentScrollView.contentInset;
-    insets.bottom = kbHeight;
-    self.contentScrollView.contentInset = insets;
-    self.contentScrollView.scrollIndicatorInsets = insets;
+- (void)mapTapped:(UITapGestureRecognizer *)gesture {
+    if (gesture.state != UIGestureRecognizerStateEnded) return;
+    CLLocationCoordinate2D coordinate = [self.mapView convertPoint:[gesture locationInView:self.mapView] toCoordinateFromView:self.mapView];
+    if (self.tab == LSPickerTabRoute) [self assignEndpoint:self.endpoint coordinate:coordinate name:@"Map point"];
+    else [self setSelection:coordinate name:@"Map point"];
 }
-
-- (void)ls_keyboardWillHide:(NSNotification *)note {
-    (void)note;
-    UIEdgeInsets insets = self.contentScrollView.contentInset;
-    insets.bottom = 0.0;
-    self.contentScrollView.contentInset = insets;
-    self.contentScrollView.scrollIndicatorInsets = insets;
+- (void)mapHeld:(UILongPressGestureRecognizer *)gesture {
+    if (gesture.state != UIGestureRecognizerStateBegan) return;
+    CLLocationCoordinate2D coordinate = [self.mapView convertPoint:[gesture locationInView:self.mapView] toCoordinateFromView:self.mapView];
+    if (self.tab == LSPickerTabRoute) { [self assignEndpoint:self.endpoint coordinate:coordinate name:@"Map point"]; return; }
+    [self setSelection:coordinate name:@"Map point"];
+    [self saveSelectedPlace];
 }
-
-#pragma mark - Map
-
-- (void)configureMapIfNeeded {
-    if (self.mapConfigured) {
-        return;
-    }
-
-    self.mapConfigured = YES;
-    [self.mapSpinner startAnimating];
-
-    self.pinAnnotation = [[MKPointAnnotation alloc] init];
-    self.pinAnnotation.title = @"Spoofed location";
-    self.pinAnnotation.subtitle = @"Drag to adjust";
-    self.pinAnnotation.coordinate = self.selectedCoordinate;
-    [self.mapView addAnnotation:self.pinAnnotation];
-
-    MKCoordinateRegion region = MKCoordinateRegionMakeWithDistance(self.selectedCoordinate, 1500.0, 1500.0);
-    [self.mapView setRegion:region animated:NO];
-    [self updateSearchCompleterRegion];
-}
-
-- (void)syncFieldsFromCoordinate {
-    self.suppressFieldSync = YES;
-    self.latitudeField.text = [NSString stringWithFormat:@"%.6f", self.selectedCoordinate.latitude];
-    self.longitudeField.text = [NSString stringWithFormat:@"%.6f", self.selectedCoordinate.longitude];
-    self.suppressFieldSync = NO;
-    [self updateCoordinateLabel];
-    [self updatePinOnMapAnimated:NO];
-}
-
-- (void)updateCoordinateLabel {
-    self.coordinateValueLabel.text = [NSString stringWithFormat:@"%@%.6f\n%@%.6f",
-                                      self.selectedCoordinate.latitude >= 0.0 ? @"N " : @"S ",
-                                      fabs(self.selectedCoordinate.latitude),
-                                      self.selectedCoordinate.longitude >= 0.0 ? @"E " : @"W ",
-                                      fabs(self.selectedCoordinate.longitude)];
-}
-
-- (void)movePinToCoordinate:(CLLocationCoordinate2D)coordinate animated:(BOOL)animated {
+- (void)setSelection:(CLLocationCoordinate2D)coordinate name:(NSString *)name {
+    if (!CLLocationCoordinate2DIsValid(coordinate)) return;
+    self.selectionRevision++;
     self.selectedCoordinate = coordinate;
-    self.hasSelectedCoordinate = YES;
-    self.suppressFieldSync = YES;
-    self.latitudeField.text = [NSString stringWithFormat:@"%.6f", coordinate.latitude];
-    self.longitudeField.text = [NSString stringWithFormat:@"%.6f", coordinate.longitude];
-    self.suppressFieldSync = NO;
-    [self updateCoordinateLabel];
-    [self updatePinOnMapAnimated:animated];
+    self.hasSelection = YES;
+    self.selectedName = name.length ? name : @"Selected location";
+    [self renderSelectedLocation];
 }
-
-- (void)updatePinOnMapAnimated:(BOOL)animated {
-    if (!self.pinAnnotation) {
-        return;
+- (void)renderSelectedLocation {
+    CLLocationCoordinate2D coordinate = self.selectedCoordinate;
+    if (!self.pin) { self.pin = [[MKPointAnnotation alloc] init]; [self.mapView addAnnotation:self.pin]; }
+    self.pin.coordinate = coordinate;
+    self.pin.title = @"Selected location";
+    [self syncMapWorkspace];
+    self.pin.subtitle = self.selectedName;
+    self.placeLabel.text = self.selectedName;
+    self.coordinateLabel.text = LSCoordinateText(coordinate);
+    self.mapHintLabel.text = @"Preview only. Apply location when you’re ready.";
+    [self updateRadiusPreview];
+    [self updateFooter];
+}
+- (void)syncMapWorkspace {
+    BOOL location = self.tab == LSPickerTabLocation, route = self.tab == LSPickerTabRoute;
+    for (MKPointAnnotation *pin in @[self.pin ?: NSNull.null, self.startPin ?: NSNull.null, self.endPin ?: NSNull.null]) {
+        if (![pin isKindOfClass:MKPointAnnotation.class]) continue;
+        BOOL visible = pin == self.pin ? location : route;
+        if (visible && ![self.mapView.annotations containsObject:pin]) [self.mapView addAnnotation:pin];
+        else if (!visible) [self.mapView removeAnnotation:pin];
     }
-
-    self.pinAnnotation.coordinate = self.selectedCoordinate;
-
-    if (!MKMapRectContainsPoint(self.mapView.visibleMapRect, MKMapPointForCoordinate(self.selectedCoordinate))) {
-        MKCoordinateRegion region = MKCoordinateRegionMakeWithDistance(self.selectedCoordinate, 1500.0, 1500.0);
-        [self.mapView setRegion:region animated:animated];
+    if (self.routePolyline) {
+        if (route && ![self.mapView.overlays containsObject:self.routePolyline]) [self.mapView addOverlay:self.routePolyline];
+        else if (!route) [self.mapView removeOverlay:self.routePolyline];
     }
 }
-
-#pragma mark - Validation & Feedback
-
-- (nullable NSNumber *)ls_parsedCoordinateComponentFromText:(NSString *)text {
-    NSString *trimmed = [text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-    if (trimmed.length == 0) {
-        return nil;
-    }
-
-    static NSNumberFormatter *formatter = nil;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        formatter = [[NSNumberFormatter alloc] init];
-        formatter.numberStyle = NSNumberFormatterDecimalStyle;
-        formatter.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
-    });
-
-    NSString *normalized = [trimmed stringByReplacingOccurrencesOfString:@"," withString:@"."];
-    return [formatter numberFromString:normalized];
+- (void)updateWorkspace {
+    BOOL location = self.tab == LSPickerTabLocation, route = self.tab == LSPickerTabRoute, saved = self.tab == LSPickerTabSaved;
+    self.tabs.selectedSegmentIndex = self.tab;
+    self.locationIntro.hidden = !location;
+    self.locationDetails.hidden = !location;
+    self.routeEndpointsPanel.hidden = !route;
+    self.routeDetailsPanel.hidden = !route;
+    self.mapContainer.hidden = saved;
+    self.mapHintLabel.hidden = saved;
+    self.savedTable.hidden = !saved;
+    self.scroll.hidden = saved;
+    [self syncMapWorkspace];
+    self.pin.title = @"Selected location";
+    self.mapHintLabel.text = route ? (self.endpoint == LSEndpointFrom ? @"Tap the map to set From, or tap From to search." : @"Tap the map to set To, or tap To to search.") : @"Tap the map or search to choose a location.";
+    if (location && self.hasSelection) [self renderSelectedLocation];
+    [self updateRouteUI];
+    [self reloadSavedPlaces];
+    [self updateRadiusPreview];
+    [self updateFooter];
 }
-
-- (BOOL)applyFieldsToCoordinate {
-    if (self.suppressFieldSync) {
-        return YES;
-    }
-
-    NSNumber *latitudeNumber = [self ls_parsedCoordinateComponentFromText:self.latitudeField.text];
-    NSNumber *longitudeNumber = [self ls_parsedCoordinateComponentFromText:self.longitudeField.text];
-    if (!latitudeNumber || !longitudeNumber) {
-        [self showInvalidCoordinateFeedback];
-        return NO;
-    }
-
-    double latitude = latitudeNumber.doubleValue;
-    double longitude = longitudeNumber.doubleValue;
-    if (latitude < -90.0 || latitude > 90.0 || longitude < -180.0 || longitude > 180.0) {
-        [self showInvalidCoordinateFeedback];
-        return NO;
-    }
-
-    [self movePinToCoordinate:CLLocationCoordinate2DMake(latitude, longitude) animated:YES];
-    return YES;
+- (void)tabChanged {
+    self.selectionRevision++;
+    [self cancelDirections];
+    self.tab = self.tabs.selectedSegmentIndex;
+    [self updateWorkspace];
+    [self updateRealLocation];
+    [self.scroll setContentOffset:CGPointZero animated:NO];
 }
-
-- (void)showInvalidCoordinateFeedback {
-    UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
-    [feedback impactOccurred];
-
-    CAKeyframeAnimation *shake = [CAKeyframeAnimation animationWithKeyPath:@"transform.translation.x"];
-    shake.values = @[@0, @-8, @8, @-6, @6, @0];
-    shake.duration = 0.35;
-    [self.fieldStack.layer addAnimation:shake forKey:@"shake"];
-
-    self.coordinateValueLabel.textColor = UIColor.systemRedColor;
-    self.coordinateValueLabel.text = @"Enter valid latitude (-90 to 90) and longitude (-180 to 180)";
-
+- (void)showMessage:(NSString *)message { self.mapHintLabel.text = message; LSAnnounce(message); }
+- (void)refreshSession {
+    LSSessionSnapshot *snapshot = LSSessionController.shared.snapshot;
+    NSArray *names = @[@"Off", @"Holding location", @"Moving", @"Paused"];
+    self.statusLabel.text = names[snapshot.mode];
+    self.statusLabel.accessibilityLabel = [NSString stringWithFormat:@"Applied session: %@", self.statusLabel.text];
+    self.appliedLabel.hidden = snapshot.mode == LSSessionModeOff;
+    self.appliedLabel.text = snapshot.location ? [NSString stringWithFormat:@"Applied location: %@", LSCoordinateText(snapshot.location.coordinate)] : @"";
+    if (snapshot.location) {
+        if (!self.appliedPin) { self.appliedPin = [[LSMovingAnnotation alloc] init]; [self.mapView addAnnotation:self.appliedPin]; }
+        self.appliedPin.title = snapshot.mode == LSSessionModeMoving ? @"Moving location" : @"Applied location";
+        self.appliedPin.coordinate = snapshot.location.coordinate;
+        [self.mapView viewForAnnotation:self.appliedPin].accessibilityLabel = [NSString stringWithFormat:@"%@. %@", self.appliedPin.title, LSCoordinateText(snapshot.location.coordinate)];
+    } else if (self.appliedPin) {
+        [self.mapView removeAnnotation:self.appliedPin]; self.appliedPin = nil;
+    }
+    if (self.previousMode != snapshot.mode) {
+        LSAnnounce([NSString stringWithFormat:@"Location %@", self.statusLabel.text.lowercaseString]);
+        self.previousMode = snapshot.mode;
+    }
+    [self updatePlayback];
+    [self updateFooter];
+}
+- (void)sessionChanged:(NSNotification *)note {
+    (void)note;
+    if (self.closed) return;
+    // Host samples continue at 10 Hz; human-readable map/progress refreshes at at most 4 Hz.
+    NSTimeInterval now = NSProcessInfo.processInfo.systemUptime;
+    LSSessionMode mode = LSSessionController.shared.snapshot.mode;
+    if (mode == self.previousMode && now - self.lastUIUpdate < 0.25) return;
+    self.lastUIUpdate = now;
+    [self refreshSession];
+}
+- (void)updateFooter {
+    LSSessionMode mode = LSSessionController.shared.snapshot.mode;
+    BOOL moving = mode == LSSessionModeMoving || mode == LSSessionModePaused;
+    BOOL controlsCurrentRoute = self.tab == LSPickerTabRoute && moving && self.fetchedRoute == LSSessionController.shared.retainedRoute && !self.routeDraftChanged;
+    NSString *title;
+    if (controlsCurrentRoute) title = mode == LSSessionModePaused ? @"Resume route" : @"Pause route";
+    else if (self.tab == LSPickerTabRoute) title = mode == LSSessionModeStatic && self.fetchedRoute && self.fetchedRoute == LSSessionController.shared.retainedRoute && !self.routeDraftChanged
+        ? @"Replay route" : (mode == LSSessionModeOff ? @"Start route" : @"Replace route");
+    else title = mode == LSSessionModeOff ? @"Apply location" : @"Replace location";
+    UIButtonConfiguration *primary = self.primaryButton.configuration;
+    primary.title = title;
+    primary.image = [UIImage systemImageNamed:controlsCurrentRoute ? (mode == LSSessionModePaused ? @"play.fill" : @"pause.fill") : @"checkmark"];
+    self.primaryButton.configuration = primary;
+    self.primaryButton.accessibilityLabel = title;
+    self.primaryButton.hidden = self.tab == LSPickerTabSaved;
+    self.primaryButton.enabled = self.tab == LSPickerTabRoute ? (controlsCurrentRoute || (self.fetchedRoute && !self.directions)) : self.hasSelection;
+    UIButtonConfiguration *hold = self.holdButton.configuration;
+    hold.title = controlsCurrentRoute ? @"Hold here" : @"Route controls";
+    hold.image = [UIImage systemImageNamed:controlsCurrentRoute ? @"stop.fill" : @"playpause"];
+    self.holdButton.configuration = hold;
+    self.holdButton.accessibilityLabel = hold.title;
+    self.holdButton.accessibilityHint = controlsCurrentRoute ? @"Stops movement and holds the current point." : @"Pause, resume, or stop movement and hold here.";
+    self.holdButton.hidden = !moving;
+    self.holdButton.showsMenuAsPrimaryAction = !controlsCurrentRoute;
     __weak typeof(self) weakSelf = self;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.8 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        typeof(self) strongSelf = weakSelf;
-        if (!strongSelf) {
-            return;
-        }
-        strongSelf.coordinateValueLabel.textColor = UIColor.labelColor;
-        [strongSelf updateCoordinateLabel];
-    });
+    UIAction *pause = [UIAction actionWithTitle:mode == LSSessionModePaused ? @"Resume route" : @"Pause route" image:[UIImage systemImageNamed:mode == LSSessionModePaused ? @"play.fill" : @"pause.fill"] identifier:nil handler:^(__unused UIAction *action) { [weakSelf togglePause]; }];
+    UIAction *stop = [UIAction actionWithTitle:@"Stop route and hold here" image:[UIImage systemImageNamed:@"stop.fill"] identifier:nil handler:^(__unused UIAction *action) { [weakSelf holdHere]; }];
+    self.holdButton.menu = controlsCurrentRoute ? nil : [UIMenu menuWithTitle:@"Applied route" children:@[pause, stop]];
+    self.playbackRow.hidden = mode == LSSessionModeOff;
+    self.offButton.hidden = mode == LSSessionModeOff;
+    self.savePlaceButton.enabled = self.hasSelection;
 }
-
-- (void)playApplyHaptic {
-    UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
-    [feedback impactOccurred];
-}
-
-- (void)playSimulationStopHaptic {
-    UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
-    [feedback impactOccurred];
-}
-
-- (void)playRouteSuccessHaptic {
-    UINotificationFeedbackGenerator *feedback = [[UINotificationFeedbackGenerator alloc] init];
-    [feedback notificationOccurred:UINotificationFeedbackTypeSuccess];
-}
-
-- (void)playRouteFailureHaptic {
-    UINotificationFeedbackGenerator *feedback = [[UINotificationFeedbackGenerator alloc] init];
-    [feedback notificationOccurred:UINotificationFeedbackTypeError];
-}
-
-- (void)playBookmarkSavedHaptic {
-    UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
-    [feedback impactOccurred];
-}
-
-- (BOOL)applyAltitudeField {
-    NSNumber *altitudeNumber = [self ls_parsedCoordinateComponentFromText:self.altitudeField.text];
-    if (!altitudeNumber) {
-        return NO;
-    }
-    double altitude = altitudeNumber.doubleValue;
-    if (altitude < -500.0 || altitude > 10000.0) {
-        return NO;
-    }
-    [PersistenceManager shared].altitude = altitude;
-    return YES;
-}
-
-- (void)handleHeadingSliderChanged:(UISlider *)sender {
-    (void)sender;
-    NSInteger heading = (NSInteger)lroundf(self.headingSlider.value);
-    [PersistenceManager shared].heading = (CLLocationDirection)heading;
-    [self updateHeadingLabel];
-}
-
-- (void)syncFluctuationUI {
-    PersistenceManager *store = [PersistenceManager shared];
-    self.fluctuationSwitch.on = store.fluctuationEnabled;
-    self.fluctuationRadiusField.text = [NSString stringWithFormat:@"%.0f", store.fluctuationRadius];
-    self.fluctuationRadiusField.hidden = !store.fluctuationEnabled;
-    self.fluctuationRadiusHeightConstraint.constant = store.fluctuationEnabled ? 40.0 : 0.0;
-    self.fluctuationRadiusTopConstraint.constant = store.fluctuationEnabled ? 6.0 : 0.0;
-}
-
-- (void)handleFluctuationToggle {
-    PersistenceManager *store = [PersistenceManager shared];
-    store.fluctuationEnabled = self.fluctuationSwitch.isOn;
-    self.fluctuationRadiusField.hidden = !self.fluctuationSwitch.isOn;
-    self.fluctuationRadiusHeightConstraint.constant = self.fluctuationSwitch.isOn ? 40.0 : 0.0;
-    self.fluctuationRadiusTopConstraint.constant = self.fluctuationSwitch.isOn ? 6.0 : 0.0;
-    [UIView animateWithDuration:0.25 animations:^{
-        [self.view layoutIfNeeded];
-    }];
-    if (self.fluctuationSwitch.isOn) {
-        [self.fluctuationRadiusField becomeFirstResponder];
-    }
-}
-
-- (void)handleFluctuationRadiusChanged {
-    NSString *text = [self.fluctuationRadiusField.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-    double radius = 50.0;
-    if (text.length > 0) {
-        NSNumber *value = [self ls_parsedCoordinateComponentFromText:text];
-        radius = value ? value.doubleValue : 50.0;
-    } else {
-        radius = [PersistenceManager shared].fluctuationRadius;
-    }
-    if (radius < 1.0) {
-        radius = 1.0;
-    } else if (radius > 1000.0) {
-        radius = 1000.0;
-    }
-    [PersistenceManager shared].fluctuationRadius = radius;
-    self.fluctuationRadiusField.text = [NSString stringWithFormat:@"%.0f", radius];
-}
-
-- (void)handleKeepLastSpoofToggle {
-    [PersistenceManager shared].keepLastSpoof = self.keepLastSpoofSwitch.isOn;
-}
-
-- (void)handleShowRealLocationToggle {
-    [PersistenceManager shared].showRealLocation = self.showRealLocationSwitch.isOn;
-    [self refreshStatusPill];
-}
-
-- (void)updateHeadingLabel {
-    NSInteger heading = (NSInteger)lroundf(self.headingSlider.value);
-    self.headingValueLabel.text = [NSString stringWithFormat:@"Heading: %03ld°", (long)heading];
-
-    NSArray<NSString *> *directions = @[@"N", @"NE", @"E", @"SE", @"S", @"SW", @"W", @"NW"];
-    NSInteger index = (NSInteger)(((double)heading + 22.5) / 45.0) % 8;
-    self.headingDirectionLabel.text = directions[index];
-
-    CGFloat hue = (CGFloat)heading / 360.0;
-    UIColor *tint = [UIColor colorWithHue:hue saturation:0.6 brightness:0.8 alpha:1.0];
-    self.headingSlider.tintColor = tint;
-}
-
-#pragma mark - Search Suggestions
-
-- (void)updateSearchCompleterRegion {
-    if (self.mapConfigured) {
-        self.searchCompleter.region = self.mapView.region;
-    }
-}
-
-- (void)updateSearchSuggestionsVisibility {
-    NSInteger count = self.searchCompletions.count;
-    BOOL shouldShow = count > 0 && self.searchBar.isFirstResponder;
-
-    if (shouldShow) {
-        NSInteger visibleRows = MIN(count, kLSSuggestionMaxVisibleRows);
-        CGFloat targetHeight = MIN(visibleRows * kLSSuggestionRowHeight, kLSSuggestionMaxHeight);
-        self.suggestionsHeightConstraint.constant = targetHeight;
-        self.suggestionsPanel.hidden = NO;
-
-        if (!self.searchSuggestionsVisible) {
-            self.searchSuggestionsVisible = YES;
-            self.suggestionsPanel.alpha = 0.0;
-            [UIView animateWithDuration:0.18 animations:^{
-                self.suggestionsPanel.alpha = 1.0;
-                [self.view layoutIfNeeded];
-            }];
-        } else {
-            [self.view layoutIfNeeded];
-        }
-    } else {
-        [self hideSearchSuggestions];
-    }
-}
-
-- (void)hideSearchSuggestions {
-    self.searchSuggestionsVisible = NO;
-    self.suggestionsHeightConstraint.constant = 0.0;
-
-    if (!self.suggestionsPanel.hidden) {
-        [UIView animateWithDuration:0.15 animations:^{
-            self.suggestionsPanel.alpha = 0.0;
-            [self.view layoutIfNeeded];
-        } completion:^(__unused BOOL finished) {
-            self.suggestionsPanel.hidden = YES;
-        }];
-    }
-}
-
-- (void)updateSearchQueryFragment:(NSString *)query {
-    NSString *trimmed = [query stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-    if (trimmed.length > 256) {
+- (void)primaryAction {
+    if (self.tab == LSPickerTabRoute) {
+        LSSessionMode mode = LSSessionController.shared.snapshot.mode;
+        if ((mode == LSSessionModeMoving || mode == LSSessionModePaused) && self.fetchedRoute == LSSessionController.shared.retainedRoute && !self.routeDraftChanged) [self togglePause];
+        else [self startDraftRoute];
         return;
     }
-    if (trimmed.length == 0) {
-        self.searchCompletions = @[];
-        self.searchCompleter.queryFragment = @"";
-        [self.suggestionsTableView reloadData];
-        [self hideSearchSuggestions];
-        [self.searchSpinner stopAnimating];
-        return;
-    }
-
-    [self updateSearchCompleterRegion];
-    self.searchCompleter.queryFragment = trimmed;
-    [self.searchSpinner startAnimating];
-}
-
-- (void)resolveSearchCompletion:(MKLocalSearchCompletion *)completion {
-    if (!completion) {
-        return;
-    }
-
-    [self hideSearchSuggestions];
-    [self.searchBar resignFirstResponder];
-    self.searchBar.text = completion.title;
-    [self.searchSpinner startAnimating];
-
-    MKLocalSearchRequest *request = [[MKLocalSearchRequest alloc] initWithCompletion:completion];
-    MKLocalSearch *search = [[MKLocalSearch alloc] initWithRequest:request];
+    if (!self.hasSelection) return;
+    CLLocationCoordinate2D coordinate = self.selectedCoordinate;
+    NSString *name = self.selectedName;
     __weak typeof(self) weakSelf = self;
-    [search startWithCompletionHandler:^(MKLocalSearchResponse * _Nullable response, NSError * _Nullable error) {
-        typeof(self) strongSelf = weakSelf;
-        if (!strongSelf) return;
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [strongSelf.searchSpinner stopAnimating];
-            [strongSelf ls_updateApplyButtonEnabled];
-
-            if (error || response.mapItems.count == 0) {
-                [strongSelf showSearchFailureMessage];
-                return;
-            }
-
-            MKMapItem *item = response.mapItems.firstObject;
-            [strongSelf movePinToCoordinate:item.placemark.coordinate animated:YES];
-        });
+    dispatch_block_t apply = ^{
+        if ([LSSessionController.shared applyStaticCoordinate:coordinate]) {
+            [PersistenceManager.shared recordRecentCoordinate:coordinate name:name];
+            [weakSelf showMessage:@"Location applied. Close the picker to return to your app."];
+            [[[UINotificationFeedbackGenerator alloc] init] notificationOccurred:UINotificationFeedbackTypeSuccess];
+            [weakSelf refreshSession];
+        }
+    };
+    // The visible Replace location action explicitly commits this reversible change.
+    apply();
+}
+- (void)togglePause {
+    if (LSSessionController.shared.snapshot.mode == LSSessionModePaused) [LSSessionController.shared resume];
+    else [LSSessionController.shared pause];
+    [self refreshSession];
+}
+- (void)routeControlTapped { if (!self.holdButton.showsMenuAsPrimaryAction) [self holdHere]; }
+- (void)holdHere { [LSSessionController.shared stopAndHold]; [self refreshSession]; [self showMessage:@"Route stopped. Holding its current location."]; }
+- (void)turnOff {
+    [self cancelDirections];
+    self.selectionRevision++;
+    [LSSessionController.shared disable];
+    [self refreshSession];
+    [self showMessage:@"Spoofing is off. You can choose a location to apply again."];
+}
+- (void)confirmAction:(NSString *)title message:(NSString *)message button:(NSString *)button action:(dispatch_block_t)action {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:title message:message preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:button style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *item) { action(); }]];
+    [self presentViewController:alert animated:LSMapAnimationsEnabled() completion:nil];
+}
+- (void)searchLocation {
+    __weak typeof(self) weakSelf = self;
+    [self openPlaceChooser:@"Choose a location" coordinate:self.selectedCoordinate completion:^(CLLocationCoordinate2D coordinate, NSString *name) {
+        [weakSelf setSelection:coordinate name:name];
+        [weakSelf.mapView setRegion:MKCoordinateRegionMakeWithDistance(coordinate, 2000, 2000) animated:LSMapAnimationsEnabled()];
     }];
 }
-
-- (void)resolveSearchQuery:(NSString *)query {
-    NSString *trimmed = [query stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-    if (trimmed.length == 0) {
-        return;
-    }
-
-    [self hideSearchSuggestions];
-    [self.searchBar resignFirstResponder];
-    [self.searchSpinner startAnimating];
-
-    MKLocalSearchRequest *request = [[MKLocalSearchRequest alloc] init];
-    request.naturalLanguageQuery = trimmed;
-    [self updateSearchCompleterRegion];
-    request.region = self.searchCompleter.region;
-
-    MKLocalSearch *search = [[MKLocalSearch alloc] initWithRequest:request];
+- (void)openPlaceChooser:(NSString *)title coordinate:(CLLocationCoordinate2D)coordinate completion:(void (^)(CLLocationCoordinate2D, NSString *))completion {
+    LSPlaceSearchController *search = [[LSPlaceSearchController alloc] init];
+    search.title = title;
+    search.initialCoordinate = coordinate;
+    search.searchRegion = self.mapView.region;
+    NSUInteger revision = ++self.selectionRevision;
     __weak typeof(self) weakSelf = self;
-    [search startWithCompletionHandler:^(MKLocalSearchResponse * _Nullable response, NSError * _Nullable error) {
-        typeof(self) strongSelf = weakSelf;
-        if (!strongSelf) return;
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [strongSelf.searchSpinner stopAnimating];
-            [strongSelf ls_updateApplyButtonEnabled];
-
-            if (error || response.mapItems.count == 0) {
-                [strongSelf showSearchFailureMessage];
-                return;
-            }
-
-            MKMapItem *item = response.mapItems.firstObject;
-            [strongSelf movePinToCoordinate:item.placemark.coordinate animated:YES];
-        });
+    search.didChoose = ^(CLLocationCoordinate2D result, NSString *name) {
+        typeof(self) self = weakSelf;
+        if (!self || self.closed || self.selectionRevision != revision) return;
+        completion(result, name);
+    };
+    [self presentEditor:search];
+}
+- (void)editCoordinates {
+    LSCoordinateEntryController *entry = [[LSCoordinateEntryController alloc] init];
+    entry.initialCoordinate = self.selectedCoordinate;
+    entry.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemCancel target:self action:@selector(closeEditor)];
+    NSUInteger revision = ++self.selectionRevision;
+    __weak typeof(self) weakSelf = self;
+    entry.didChoose = ^(CLLocationCoordinate2D coordinate) {
+        typeof(self) self = weakSelf;
+        if (!self || self.closed || revision != self.selectionRevision) return;
+        [self setSelection:coordinate name:@"Selected coordinates"];
+        [self.mapView setRegion:MKCoordinateRegionMakeWithDistance(coordinate, 2000, 2000) animated:LSMapAnimationsEnabled()];
+        [self closeEditor];
+    };
+    [self presentEditor:entry];
+}
+- (void)closeEditor { self.selectionRevision++; [self.presentedViewController dismissViewControllerAnimated:LSMapAnimationsEnabled() completion:nil]; }
+- (void)presentEditor:(UIViewController *)editor {
+    UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:editor];
+    nav.modalPresentationStyle = UIModalPresentationPageSheet;
+    nav.view.tintColor = LSAccentColor();
+    nav.sheetPresentationController.detents = @[[UISheetPresentationControllerDetent largeDetent]];
+    nav.sheetPresentationController.prefersGrabberVisible = YES;
+    [self presentViewController:nav animated:LSMapAnimationsEnabled() completion:nil];
+}
+- (void)openSettings {
+    LSSettingsViewController *settings = [[LSSettingsViewController alloc] init];
+    __weak typeof(self) weakSelf = self;
+    settings.didSave = ^{ [weakSelf updateRadiusPreview]; [weakSelf updateRealLocation]; [weakSelf refreshSession]; };
+    [self presentEditor:settings];
+}
+- (void)dismissPicker {
+    [self endPickerLifetime];
+    [self dismissViewControllerAnimated:LSMapAnimationsEnabled() completion:^{
+        if (self.didDismiss) { self.didDismiss(); self.didDismiss = nil; }
     }];
 }
-
-- (void)showSearchFailureMessage {
-    UIImpactFeedbackGenerator *feedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
-    [feedback impactOccurred];
-    self.coordinateValueLabel.textColor = UIColor.systemOrangeColor;
-    self.coordinateValueLabel.text = @"No results found. Try a different search.";
-    __weak typeof(self) weakSelf = self;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.6 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        typeof(self) strongSelf = weakSelf;
-        if (!strongSelf) {
-            return;
+- (BOOL)accessibilityPerformEscape { [self dismissPicker]; return YES; }
+- (NSArray<UIKeyCommand *> *)keyCommands {
+    UIKeyCommand *close = [UIKeyCommand keyCommandWithInput:UIKeyInputEscape modifierFlags:0 action:@selector(dismissPicker)];
+    close.discoverabilityTitle = @"Close location picker";
+    return @[close];
+}
+- (void)centerMap {
+    CLLocation *applied = LSSessionController.shared.snapshot.location;
+    CLLocationCoordinate2D coordinate = applied ? applied.coordinate : self.selectedCoordinate;
+    if (!CLLocationCoordinate2DIsValid(coordinate) && self.startPin) coordinate = self.startPin.coordinate;
+    if (CLLocationCoordinate2DIsValid(coordinate)) [self.mapView setRegion:MKCoordinateRegionMakeWithDistance(coordinate, 2000, 2000) animated:LSMapAnimationsEnabled()];
+    else [self showMessage:@"Choose a place or enter coordinates to center the map."];
+}
+- (void)centerReal {
+    if (self.realPin) [self.mapView setRegion:MKCoordinateRegionMakeWithDistance(self.realPin.coordinate, 2000, 2000) animated:LSMapAnimationsEnabled()];
+}
+- (void)retryMap {
+    self.mapFailed = NO;
+    MKCoordinateRegion region = self.mapView.region;
+    [self replaceMap:&region];
+    [self syncMapWorkspace];
+    self.mapRetryButton.hidden = YES;
+    self.mapErrorLabel.text = @"Loading map… You can still search or enter coordinates.";
+    self.mapErrorLabel.hidden = NO;
+}
+- (void)traitCollectionDidChange:(UITraitCollection *)previous {
+    [super traitCollectionDidChange:previous];
+    if ([self.traitCollection hasDifferentColorAppearanceComparedToTraitCollection:previous]) {
+        for (id<MKOverlay> overlay in self.mapView.overlays) {
+            MKOverlayPathRenderer *renderer = (id)[self.mapView rendererForOverlay:overlay];
+            renderer.strokeColor = [overlay isKindOfClass:MKCircle.class] ? LSAccentColor() : LSRouteColor();
+            if ([overlay isKindOfClass:MKCircle.class]) renderer.fillColor = [LSAccentColor() colorWithAlphaComponent:0.12];
+            [renderer setNeedsDisplay];
         }
-        strongSelf.coordinateValueLabel.textColor = UIColor.labelColor;
-        [strongSelf updateCoordinateLabel];
-    });
+    }
 }
-
-#pragma mark - MKLocalSearchCompleterDelegate
-
-- (void)completerDidUpdateResults:(MKLocalSearchCompleter *)completer {
-    (void)completer;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        self.searchCompletions = completer.results ?: @[];
-        [self.searchSpinner stopAnimating];
-        [self ls_updateApplyButtonEnabled];
-        [self.suggestionsTableView reloadData];
-        [self updateSearchSuggestionsVisibility];
-    });
-}
-
-- (void)completer:(MKLocalSearchCompleter *)completer didFailWithError:(NSError *)error {
-    (void)completer;
+- (void)mapViewDidFailLoadingMap:(MKMapView *)map withError:(NSError *)error {
     (void)error;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [self.searchSpinner stopAnimating];
-        [self ls_updateApplyButtonEnabled];
-        [self hideSearchSuggestions];
-    });
+    if (map != self.mapView || self.closed) return;
+    self.mapFailed = YES;
+    self.mapRetryButton.hidden = NO;
+    self.mapErrorLabel.text = @"Map unavailable. Retry the map, search for a place, or enter coordinates.";
+    self.mapErrorLabel.hidden = NO;
+    LSAnnounce(self.mapErrorLabel.text);
 }
-
-#pragma mark - UITableViewDataSource
-
-- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
-    if ([self ls_isBookmarksTableView:tableView]) {
-        return [self ls_bookmarksNumberOfSections];
-    }
-    return 1;
+- (void)mapViewDidFinishLoadingMap:(MKMapView *)map {
+    if (map == self.mapView && !self.mapFailed) { self.mapRetryButton.hidden = YES; self.mapErrorLabel.hidden = YES; }
 }
-
-- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(__unused NSInteger)section {
-    if ([self ls_isBookmarksTableView:tableView]) {
-        return [self ls_bookmarksNumberOfRowsInSection:section];
-    }
-    return self.searchCompletions.count;
-}
-
-- (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
-    if ([self ls_isBookmarksTableView:tableView]) {
-        return [self ls_bookmarksTitleForHeaderInSection:section];
-    }
-    return nil;
-}
-
-- (UIView *)tableView:(UITableView *)tableView viewForHeaderInSection:(NSInteger)section {
-    if ([self ls_isBookmarksTableView:tableView]) {
-        return [self ls_bookmarksHeaderForSection:section];
-    }
-    return nil;
-}
-
-- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
-    if ([self ls_isBookmarksTableView:tableView]) {
-        return [self ls_bookmarksCellForRowAtIndexPath:indexPath];
-    }
-
-    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"LSSearchSuggestionCell" forIndexPath:indexPath];
-    MKLocalSearchCompletion *completion = self.searchCompletions[indexPath.row];
-
-    UIListContentConfiguration *content = [UIListContentConfiguration subtitleCellConfiguration];
-    content.text = completion.title;
-    content.secondaryText = completion.subtitle;
-    content.textProperties.font = [UIFont systemFontOfSize:15.0 weight:UIFontWeightSemibold];
-    content.secondaryTextProperties.font = [UIFont systemFontOfSize:13.0 weight:UIFontWeightRegular];
-    content.secondaryTextProperties.color = UIColor.secondaryLabelColor;
-    content.image = [UIImage systemImageNamed:@"mappin.circle.fill"];
-    content.imageProperties.tintColor = UIColor.systemBlueColor;
-    cell.contentConfiguration = content;
-    cell.backgroundColor = UIColor.clearColor;
-    cell.selectionStyle = UITableViewCellSelectionStyleDefault;
-    return cell;
-}
-
-#pragma mark - UITableViewDelegate
-
-- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
-    if ([self ls_isBookmarksTableView:tableView]) {
-        [tableView deselectRowAtIndexPath:indexPath animated:YES];
-        [self ls_bookmarksDidSelectRowAtIndexPath:indexPath];
-        return;
-    }
-
-    [tableView deselectRowAtIndexPath:indexPath animated:YES];
-    if (indexPath.row >= (NSInteger)self.searchCompletions.count) {
-        return;
-    }
-
-    MKLocalSearchCompletion *completion = self.searchCompletions[indexPath.row];
-    [self resolveSearchCompletion:completion];
-}
-
-- (BOOL)tableView:(UITableView *)tableView canEditRowAtIndexPath:(NSIndexPath *)indexPath {
-    if ([self ls_isBookmarksTableView:tableView]) {
-        return [self ls_bookmarksCanEditRowAtIndexPath:indexPath];
-    }
-    return NO;
-}
-
-- (void)tableView:(UITableView *)tableView commitEditingStyle:(UITableViewCellEditingStyle)editingStyle forRowAtIndexPath:(NSIndexPath *)indexPath {
-    if ([self ls_isBookmarksTableView:tableView] && editingStyle == UITableViewCellEditingStyleDelete) {
-        [self ls_bookmarksCommitDeleteAtIndexPath:indexPath];
+- (void)mapViewDidFinishRenderingMap:(MKMapView *)map fullyRendered:(BOOL)fullyRendered {
+    if (map == self.mapView && fullyRendered) {
+        self.mapFailed = NO; self.mapRetryButton.hidden = YES; self.mapErrorLabel.hidden = YES;
     }
 }
-
-- (BOOL)tableView:(UITableView *)tableView canMoveRowAtIndexPath:(NSIndexPath *)indexPath {
-    if ([self ls_isBookmarksTableView:tableView]) {
-        return [self ls_bookmarksCanMoveRowAtIndexPath:indexPath];
-    }
-    return NO;
-}
-
-- (void)tableView:(UITableView *)tableView moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath toIndexPath:(NSIndexPath *)destinationIndexPath {
-    if ([self ls_isBookmarksTableView:tableView]) {
-        [self ls_bookmarksMoveFromIndexPath:sourceIndexPath toIndexPath:destinationIndexPath];
-    }
-}
-
-#pragma mark - UISearchBarDelegate
-
-- (void)searchBarTextDidBeginEditing:(UISearchBar *)searchBar {
-    searchBar.showsCancelButton = YES;
-    [self.searchSpinner stopAnimating];
-    [self ls_updateApplyButtonEnabled];
-    [self updateSearchSuggestionsVisibility];
-}
-
-- (void)searchBarTextDidEndEditing:(UISearchBar *)searchBar {
-    searchBar.showsCancelButton = NO;
-    [self ls_updateApplyButtonEnabled];
-    [self hideSearchSuggestions];
-}
-
-- (void)searchBarCancelButtonClicked:(UISearchBar *)searchBar {
-    [searchBar resignFirstResponder];
-    searchBar.showsCancelButton = NO;
-    [self hideSearchSuggestions];
-    [self.searchSpinner stopAnimating];
-    [self ls_updateApplyButtonEnabled];
-}
-
-- (void)searchBar:(UISearchBar *)searchBar textDidChange:(NSString *)searchText {
-    (void)searchBar;
-    [self updateSearchQueryFragment:searchText];
-}
-
-- (void)searchBarSearchButtonClicked:(UISearchBar *)searchBar {
-    if (self.searchCompletions.count > 0) {
-        [self resolveSearchCompletion:self.searchCompletions.firstObject];
-        return;
-    }
-
-    [self resolveSearchQuery:searchBar.text];
-}
-
-#pragma mark - Actions
-
-- (void)ls_updateApplyButtonEnabled {
-    BOOL searching = [self.searchSpinner isAnimating] || self.searchBar.isFirstResponder;
-    self.applyButton.enabled = !searching;
-    self.applyButton.alpha = searching ? 0.5 : 1.0;
-}
-
-- (void)textFieldDidChange:(UITextField *)textField {
-    if (textField == self.customSpeedField) {
-        NSNumber *parsed = [self ls_parsedCoordinateComponentFromText:textField.text];
-        BOOL valid = parsed && parsed.doubleValue >= 1.0 && parsed.doubleValue <= 500.0;
-        textField.layer.borderColor = valid ? UIColor.clearColor.CGColor : UIColor.systemRedColor.CGColor;
-        textField.layer.borderWidth = valid ? 0.0 : 1.5;
-        textField.layer.cornerRadius = 8.0;
-        return;
-    }
-    [self applyFieldsToCoordinate];
-}
-
-- (void)dismissKeyboard {
-    [self.view endEditing:YES];
-    [self hideSearchSuggestions];
-}
-
-- (void)handleMapTap:(UITapGestureRecognizer *)gesture {
-    if (gesture.state != UIGestureRecognizerStateEnded) {
-        return;
-    }
-
-    [self hideSearchSuggestions];
-    [self.searchBar resignFirstResponder];
-
-    CGPoint point = [gesture locationInView:self.mapView];
-    CLLocationCoordinate2D coordinate = [self.mapView convertPoint:point toCoordinateFromView:self.mapView];
-
-    if (self.coordinateMode == LSMapPickerCoordinateModeRoute) {
-        [self ls_handleRouteMapTap:coordinate];
-        return;
-    }
-
-    [self movePinToCoordinate:coordinate animated:YES];
-}
-
-- (void)handleMapLongPress:(UILongPressGestureRecognizer *)gesture {
-    if (gesture.state != UIGestureRecognizerStateBegan) {
-        return;
-    }
-
-    [self hideSearchSuggestions];
-    [self.searchBar resignFirstResponder];
-
-    CGPoint point = [gesture locationInView:self.mapView];
-    CLLocationCoordinate2D coordinate = [self.mapView convertPoint:point toCoordinateFromView:self.mapView];
-
-    if (self.coordinateMode == LSMapPickerCoordinateModeStatic) {
-        [self ls_presentStaticMapActionSheetAtCoordinate:coordinate];
-        return;
-    }
-
-    [self ls_handleRouteMapTap:coordinate];
-}
-
-- (MKOverlayRenderer *)mapView:(MKMapView *)mapView rendererForOverlay:(id<MKOverlay>)overlay {
-    (void)mapView;
-    return [self ls_rendererForMapOverlay:overlay];
-}
-
-- (void)mapViewDidFinishLoadingMap:(MKMapView *)mapView {
-    (void)mapView;
-    [self.mapSpinner stopAnimating];
-}
-
-- (MKAnnotationView *)mapView:(MKMapView *)mapView viewForAnnotation:(id<MKAnnotation>)annotation {
-    MKAnnotationView *routeView = [self ls_viewForRouteAnnotation:annotation];
-    if (routeView) {
-        return routeView;
-    }
-
-    if (annotation != self.pinAnnotation) {
-        return nil;
-    }
-
-    static NSString * const reuseIdentifier = @"LSSpoofPin";
-    MKMarkerAnnotationView *view = (MKMarkerAnnotationView *)[mapView dequeueReusableAnnotationViewWithIdentifier:reuseIdentifier];
-    if (!view) {
-        view = [[MKMarkerAnnotationView alloc] initWithAnnotation:annotation reuseIdentifier:reuseIdentifier];
-        view.canShowCallout = YES;
-        view.draggable = YES;
-        view.markerTintColor = UIColor.systemRedColor;
-        view.glyphImage = [UIImage systemImageNamed:@"mappin.and.ellipse"];
-        view.displayPriority = MKFeatureDisplayPriorityRequired;
-    } else {
-        view.annotation = annotation;
-    }
+- (MKAnnotationView *)mapView:(MKMapView *)map viewForAnnotation:(id<MKAnnotation>)annotation {
+    if ([annotation isKindOfClass:MKUserLocation.class]) return nil;
+    MKMarkerAnnotationView *view = (id)[map dequeueReusableAnnotationViewWithIdentifier:@"LSMarker"];
+    if (!view) view = [[MKMarkerAnnotationView alloc] initWithAnnotation:annotation reuseIdentifier:@"LSMarker"];
+    view.annotation = annotation;
+    view.canShowCallout = YES;
+    view.draggable = annotation == self.pin || annotation == self.startPin || annotation == self.endPin;
+    view.markerTintColor = LSAccentColor();
+    view.glyphText = nil;
+    view.glyphImage = [UIImage systemImageNamed:@"mappin"];
+    if ([annotation isKindOfClass:LSStartAnnotation.class]) { view.markerTintColor = LSRouteColor(); view.glyphText = @"1"; view.glyphImage = nil; }
+    if ([annotation isKindOfClass:LSDestinationAnnotation.class]) { view.markerTintColor = LSRouteColor(); view.glyphImage = [UIImage systemImageNamed:@"flag.fill"]; }
+    if ([annotation isKindOfClass:LSMovingAnnotation.class]) { view.markerTintColor = UIColor.systemPurpleColor; view.glyphImage = [UIImage systemImageNamed:@"location.fill"]; view.draggable = NO; }
+    if ([annotation isKindOfClass:LSRealAnnotation.class]) { view.glyphImage = [UIImage systemImageNamed:@"person.fill"]; view.draggable = NO; }
+    view.accessibilityLabel = [NSString stringWithFormat:@"%@. %@", annotation.title ?: @"Location", LSCoordinateText(annotation.coordinate)];
+    view.accessibilityHint = view.draggable ? @"Drag to edit, or use the search and coordinate buttons." : nil;
     return view;
 }
-
-- (void)mapView:(MKMapView *)mapView annotationView:(MKAnnotationView *)view didChangeDragState:(MKAnnotationViewDragState)newState fromOldState:(MKAnnotationViewDragState)oldState {
-    (void)mapView;
-    (void)oldState;
-    if (newState == MKAnnotationViewDragStateEnding || newState == MKAnnotationViewDragStateCanceling) {
-        [view setDragState:MKAnnotationViewDragStateNone animated:YES];
-        if (view.annotation == self.pinAnnotation) {
-            [self movePinToCoordinate:view.annotation.coordinate animated:NO];
-        } else {
-            [self ls_routeAnnotationDragEnded:view];
-        }
+- (void)mapView:(MKMapView *)map annotationView:(MKAnnotationView *)view didChangeDragState:(MKAnnotationViewDragState)newState fromOldState:(MKAnnotationViewDragState)oldState {
+    (void)map; (void)oldState;
+    if (newState != MKAnnotationViewDragStateEnding) return;
+    if (view.annotation == self.startPin) [self assignEndpoint:LSEndpointFrom coordinate:view.annotation.coordinate name:@"Map point"];
+    else if (view.annotation == self.endPin) [self assignEndpoint:LSEndpointTo coordinate:view.annotation.coordinate name:@"Map point"];
+    else if (view.annotation == self.pin) [self setSelection:view.annotation.coordinate name:@"Map point"];
+    [view setDragState:MKAnnotationViewDragStateNone animated:LSMapAnimationsEnabled()];
+}
+- (MKOverlayRenderer *)mapView:(MKMapView *)map rendererForOverlay:(id<MKOverlay>)overlay {
+    (void)map;
+    if ([overlay isKindOfClass:MKCircle.class]) {
+        MKCircleRenderer *renderer = [[MKCircleRenderer alloc] initWithCircle:(MKCircle *)overlay];
+        renderer.strokeColor = LSAccentColor(); renderer.fillColor = [LSAccentColor() colorWithAlphaComponent:0.12]; renderer.lineWidth = 1.5;
+        return renderer;
+    }
+    MKPolylineRenderer *renderer = [[MKPolylineRenderer alloc] initWithPolyline:(MKPolyline *)overlay];
+    renderer.strokeColor = LSRouteColor(); renderer.lineWidth = 5;
+    return renderer;
+}
+- (void)updateRadiusPreview {
+    if (self.radiusCircle) [self.mapView removeOverlay:self.radiusCircle];
+    self.radiusCircle = nil;
+    if (self.tab == LSPickerTabLocation && self.hasSelection && PersistenceManager.shared.fluctuationEnabled) {
+        self.radiusCircle = [MKCircle circleWithCenterCoordinate:self.selectedCoordinate radius:PersistenceManager.shared.fluctuationRadius];
+        [self.mapView addOverlay:self.radiusCircle];
     }
 }
-
-- (void)handleApply {
-    [self dismissKeyboard];
-    if ([self.searchSpinner isAnimating]) {
+- (void)updateRealLocation {
+    NSUInteger revision = ++self.realRevision;
+    [self.realManager stopUpdatingLocation];
+    BOOL foreground = self.view.window && (self.view.window.windowScene ? self.view.window.windowScene.activationState == UISceneActivationStateForegroundActive : UIApplication.sharedApplication.applicationState == UIApplicationStateActive);
+    BOOL enabled = PersistenceManager.shared.showRealLocation && !self.closed && foreground && self.tab != LSPickerTabSaved;
+    self.realNoticeLabel.hidden = !enabled;
+    if (!enabled) {
+        if (self.realPin) [self.mapView removeAnnotation:self.realPin];
+        self.realPin = nil; self.realCenterButton.hidden = YES; return;
+    }
+    if (!self.realManager) {
+        self.realManager = [[CLLocationManager alloc] init];
+        LSMarkLibraryLocationManager(self.realManager);
+        self.realManager.delegate = self;
+        self.realManager.desiredAccuracy = kCLLocationAccuracyHundredMeters;
+        self.realManager.distanceFilter = 50;
+    }
+    CLAuthorizationStatus status = self.realManager.authorizationStatus;
+    if (status != kCLAuthorizationStatusAuthorizedAlways && status != kCLAuthorizationStatusAuthorizedWhenInUse) {
+        if (self.realPin) [self.mapView removeAnnotation:self.realPin];
+        self.realPin = nil; self.realCenterButton.hidden = YES;
+        self.realNoticeLabel.text = @"Real location is unavailable with the app’s current permission. You can still select a location.";
         return;
     }
-    if (![self applyFieldsToCoordinate] || ![self applyAltitudeField]) {
-        [self showInvalidCoordinateFeedback];
-        return;
-    }
-
-    PersistenceManager *store = [PersistenceManager shared];
-
-    if (![store setSpoofCoordinate:self.selectedCoordinate enabled:YES]) {
-        [self showInvalidCoordinateFeedback];
-        return;
-    }
-
-    [store recordRecentCoordinate:self.selectedCoordinate name:nil];
-    [self playApplyHaptic];
-    LSSetHooksBypassed(NO);
-    [self dismissViewControllerAnimated:YES completion:nil];
+    __weak typeof(self) weakSelf = self;
+    self.realNoticeLabel.text = @"Updating real location…";
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        BOOL available = CLLocationManager.locationServicesEnabled;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            typeof(self) self = weakSelf;
+            if (!self || self.closed || revision != self.realRevision || !self.view.window ||
+                (self.view.window.windowScene && self.view.window.windowScene.activationState != UISceneActivationStateForegroundActive)) return;
+            if (available) [self.realManager startUpdatingLocation];
+            else self.realNoticeLabel.text = @"Location Services are off. You can still select a location manually.";
+        });
+    });
+}
+- (void)locationManagerDidChangeAuthorization:(CLLocationManager *)manager { if (manager == self.realManager) [self updateRealLocation]; }
+- (void)locationManager:(CLLocationManager *)manager didUpdateLocations:(NSArray<CLLocation *> *)locations {
+    CLLocation *location = locations.lastObject;
+    if (manager != self.realManager || !location || location.horizontalAccuracy < 0 || !CLLocationCoordinate2DIsValid(location.coordinate) || self.closed || !self.view.window || !PersistenceManager.shared.showRealLocation || UIApplication.sharedApplication.applicationState != UIApplicationStateActive ||
+        (self.view.window.windowScene && self.view.window.windowScene.activationState != UISceneActivationStateForegroundActive)) return;
+    if (!self.realPin) { self.realPin = [[LSRealAnnotation alloc] init]; self.realPin.title = @"Real location"; [self.mapView addAnnotation:self.realPin]; }
+    self.realPin.coordinate = location.coordinate;
+    self.realCenterButton.hidden = NO;
+    self.realNoticeLabel.text = @"Real location shown separately. Use the location button on the map to center it.";
+}
+- (void)locationManager:(CLLocationManager *)manager didFailWithError:(NSError *)error {
+    (void)error;
+    if (manager == self.realManager && !self.closed) self.realNoticeLabel.text = @"Real location could not be updated. Your selected location still works.";
 }
 
-- (void)handleCancel {
-    [self dismissViewControllerAnimated:YES completion:nil];
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)table { (void)table; return 2; }
+- (NSInteger)tableView:(UITableView *)table numberOfRowsInSection:(NSInteger)section { (void)table; return [self savedRowsInSection:section]; }
+- (UITableViewCell *)tableView:(UITableView *)table cellForRowAtIndexPath:(NSIndexPath *)path { (void)table; return [self savedCell:path]; }
+- (void)tableView:(UITableView *)table didSelectRowAtIndexPath:(NSIndexPath *)path { [table deselectRowAtIndexPath:path animated:NO]; [self previewSavedPlace:path]; }
+- (NSString *)tableView:(UITableView *)table titleForHeaderInSection:(NSInteger)section { (void)table; return section == 0 ? @"Saved places" : @"Recent locations"; }
+- (BOOL)tableView:(UITableView *)table canEditRowAtIndexPath:(NSIndexPath *)path { (void)table; return path.section == 0 && self.savedPlaces.count > 0; }
+- (BOOL)tableView:(UITableView *)table canMoveRowAtIndexPath:(NSIndexPath *)path { (void)table; return path.section == 0 && self.savedPlaces.count > 1; }
+- (UITableViewCellEditingStyle)tableView:(UITableView *)table editingStyleForRowAtIndexPath:(NSIndexPath *)path { (void)table; (void)path; return UITableViewCellEditingStyleNone; }
+- (NSIndexPath *)tableView:(UITableView *)table targetIndexPathForMoveFromRowAtIndexPath:(NSIndexPath *)source toProposedIndexPath:(NSIndexPath *)destination {
+    (void)table; (void)source;
+    return [NSIndexPath indexPathForRow:MIN(MAX(destination.row, 0), (NSInteger)self.savedPlaces.count - 1) inSection:0];
 }
-
-- (void)handleStatusPillTapped {
-    LSRouteSimulator *simulator = [LSRouteSimulator shared];
-    if (simulator.isSimulating || [[PersistenceManager shared] isSpoofingEnabled]) {
-        UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"Stop Spoofing?"
-                                                                       message:nil
-                                                                preferredStyle:UIAlertControllerStyleActionSheet];
-        __weak typeof(self) weakSelf = self;
-        [sheet addAction:[UIAlertAction actionWithTitle:@"Stop" style:UIAlertActionStyleDestructive handler:^(__unused UIAlertAction *action) {
-            typeof(self) strongSelf = weakSelf;
-            if (!strongSelf) return;
-            [strongSelf handleStopSpoofing];
-        }]];
-        [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
-        [self presentViewController:sheet animated:YES completion:nil];
-    }
-}
-
-- (void)handleStopSpoofing {
-    [[LSRouteSimulator shared] stop];
-    [[PersistenceManager shared] clearSpoof];
-    [PersistenceManager shared].simulationWasActive = NO;
-    [self playSimulationStopHaptic];
-    LSSetHooksBypassed(NO);
-    [self dismissViewControllerAnimated:YES completion:nil];
-}
-
+- (void)tableView:(UITableView *)table moveRowAtIndexPath:(NSIndexPath *)source toIndexPath:(NSIndexPath *)destination { (void)table; [self moveSavedPlace:source to:destination]; }
+- (UIContextMenuConfiguration *)tableView:(UITableView *)table contextMenuConfigurationForRowAtIndexPath:(NSIndexPath *)path point:(CGPoint)point { (void)table; (void)point; return [self savedMenu:path]; }
 @end

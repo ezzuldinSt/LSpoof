@@ -36,11 +36,14 @@ typedef NS_ENUM(NSInteger, LSTransportMode) {
 @property (nonatomic, readonly) BOOL isPaused;
 @property (nonatomic, readonly) CLLocationCoordinate2D currentCoordinate;
 @property (nonatomic, readonly) CLLocationDirection currentHeading;
+// Read on main with the other playback state.
+@property (nonatomic, readonly) double totalDistance;
+@property (nonatomic, readonly) double distanceCovered;
 @property (nonatomic, readonly, nullable) NSArray<LSRoutePoint *> *routePoints;
 @property (nonatomic, readonly) CLLocationCoordinate2D startCoordinate;
 @property (nonatomic, readonly) CLLocationCoordinate2D destinationCoordinate;
 
-- (void)startWithRoute:(MKRoute *)route;
+- (BOOL)startWithRoute:(MKRoute *)route;
 - (void)pause;
 - (void)resume;
 - (void)stop;

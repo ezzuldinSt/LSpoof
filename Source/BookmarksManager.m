@@ -2,177 +2,145 @@
 
 static NSString * const kSuiteName = @"com.locationspoofer.dylib";
 static NSString * const kBookmarksKey = @"LSBookmarks";
-static NSString * const kBookmarkNameKey = @"LSBMName";
-static NSString * const kBookmarkLatitudeKey = @"LSBMLat";
-static NSString * const kBookmarkLongitudeKey = @"LSBMLon";
-static NSString * const kBookmarkDateKey = @"LSBMDate";
-static const NSUInteger kLSMaxBookmarks = 50;
-
+static NSString *LSValidBookmarkName(id value) {
+    if (![value isKindOfClass:NSString.class]) return nil;
+    NSString *name = [value stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    return name.length && name.length <= 120 ? name : nil;
+}
+static BOOL LSValidBookmarkCoordinate(CLLocationCoordinate2D coordinate) {
+    return isfinite(coordinate.latitude) && isfinite(coordinate.longitude) && CLLocationCoordinate2DIsValid(coordinate);
+}
+@interface LSBookmark ()
+@property (nonatomic, copy) NSString *identifier;
+@property (nonatomic, copy) NSString *name;
+@property (nonatomic) CLLocationCoordinate2D coordinate;
+@property (nonatomic, strong) NSDate *createdAt;
+@end
 @implementation LSBookmark
-
 - (instancetype)initWithName:(NSString *)name coordinate:(CLLocationCoordinate2D)coordinate {
     self = [super init];
     if (self) {
+        _identifier = NSUUID.UUID.UUIDString;
         _name = [name copy];
         _coordinate = coordinate;
-        _createdAt = [NSDate date];
+        _createdAt = NSDate.date;
     }
     return self;
 }
-
-+ (NSISO8601DateFormatter *)sharedFormatter {
-    static NSISO8601DateFormatter *formatter = nil;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        formatter = [[NSISO8601DateFormatter alloc] init];
-    });
-    return formatter;
-}
-
 - (NSDictionary *)dictionaryRepresentation {
-    NSISO8601DateFormatter *formatter = [LSBookmark sharedFormatter];
-
-    return @{
-        kBookmarkNameKey: self.name ?: @"",
-        kBookmarkLatitudeKey: @(self.coordinate.latitude),
-        kBookmarkLongitudeKey: @(self.coordinate.longitude),
-        kBookmarkDateKey: [formatter stringFromDate:self.createdAt ?: [NSDate date]]
-    };
+    NSISO8601DateFormatter *formatter = [[NSISO8601DateFormatter alloc] init];
+    return @{@"LSBMID":self.identifier, @"LSBMName":self.name,
+             @"LSBMLat":@(self.coordinate.latitude), @"LSBMLon":@(self.coordinate.longitude),
+             @"LSBMDate":[formatter stringFromDate:self.createdAt]};
 }
-
-+ (instancetype)bookmarkFromDictionary:(NSDictionary *)dictionary {
-    if (![dictionary isKindOfClass:[NSDictionary class]]) {
-        return nil;
-    }
-
-    NSString *name = dictionary[kBookmarkNameKey];
-    NSNumber *latitude = dictionary[kBookmarkLatitudeKey];
-    NSNumber *longitude = dictionary[kBookmarkLongitudeKey];
-    if (![name isKindOfClass:[NSString class]] || ![latitude isKindOfClass:[NSNumber class]] || ![longitude isKindOfClass:[NSNumber class]]) {
-        return nil;
-    }
-
-    LSBookmark *bookmark = [[LSBookmark alloc] initWithName:name
-                                                 coordinate:CLLocationCoordinate2DMake(latitude.doubleValue, longitude.doubleValue)];
-
-    NSString *dateString = dictionary[kBookmarkDateKey];
-    if ([dateString isKindOfClass:[NSString class]]) {
-        NSDate *parsedDate = [[LSBookmark sharedFormatter] dateFromString:dateString];
-        if (parsedDate) {
-            bookmark.createdAt = parsedDate;
-        }
-    }
-
++ (instancetype)bookmarkFromDictionary:(id)dictionary {
+    if (![dictionary isKindOfClass:NSDictionary.class]) return nil;
+    NSString *name = LSValidBookmarkName(dictionary[@"LSBMName"]);
+    id lat = dictionary[@"LSBMLat"], lon = dictionary[@"LSBMLon"];
+    if (!name || ![lat isKindOfClass:NSNumber.class] || ![lon isKindOfClass:NSNumber.class]) return nil;
+    CLLocationCoordinate2D coordinate = CLLocationCoordinate2DMake([lat doubleValue], [lon doubleValue]);
+    if (!LSValidBookmarkCoordinate(coordinate)) return nil;
+    LSBookmark *bookmark = [[self alloc] initWithName:name coordinate:coordinate];
+    id date = dictionary[@"LSBMDate"];
+    NSISO8601DateFormatter *formatter = [[NSISO8601DateFormatter alloc] init];
+    NSDate *parsed = [date isKindOfClass:NSString.class] && [date length] <= 64 ? [formatter dateFromString:date] : nil;
+    if (date && !parsed) return nil;
+    if (parsed) bookmark.createdAt = parsed;
+    id identifier = dictionary[@"LSBMID"];
+    if ([identifier isKindOfClass:NSString.class] && [identifier length] <= 64 && [[NSUUID alloc] initWithUUIDString:identifier]) bookmark.identifier = [[NSUUID alloc] initWithUUIDString:identifier].UUIDString;
     return bookmark;
 }
-
 @end
 
 @interface BookmarksManager ()
 @property (nonatomic, strong) NSUserDefaults *defaults;
 @property (nonatomic, strong) NSMutableArray<LSBookmark *> *bookmarks;
-@property (nonatomic, assign) BOOL loaded;
 @end
-
 @implementation BookmarksManager
-
 + (instancetype)shared {
-    static BookmarksManager *instance = nil;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        instance = [[BookmarksManager alloc] initPrivate];
-    });
+    static BookmarksManager *instance;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ instance = [[self alloc] initWithDefaults:[[NSUserDefaults alloc] initWithSuiteName:kSuiteName]]; });
     return instance;
 }
-
-- (instancetype)initPrivate {
++ (NSUInteger)capacity { return 50; }
+- (instancetype)initWithDefaults:(NSUserDefaults *)defaults {
     self = [super init];
     if (self) {
-        _defaults = [[NSUserDefaults alloc] initWithSuiteName:kSuiteName];
+        _defaults = defaults;
         _bookmarks = [NSMutableArray array];
+        id stored = [defaults objectForKey:kBookmarksKey];
+        NSMutableSet *ids = [NSMutableSet set];
+        if ([stored isKindOfClass:NSArray.class]) {
+            for (id entry in stored) {
+                LSBookmark *bookmark = [LSBookmark bookmarkFromDictionary:entry];
+                if (!bookmark) continue;
+                if ([ids containsObject:bookmark.identifier]) bookmark.identifier = NSUUID.UUID.UUIDString;
+                [ids addObject:bookmark.identifier];
+                [_bookmarks addObject:bookmark];
+                // Preserve valid legacy entries above capacity; block additions until under 50.
+            }
+            [self persistLocked];
+        }
     }
     return self;
 }
-
-- (void)loadIfNeeded {
-    @synchronized(self) {
-        if (self.loaded) {
-            return;
-        }
-
-        NSArray *stored = [self.defaults arrayForKey:kBookmarksKey];
-        if ([stored isKindOfClass:[NSArray class]]) {
-            for (id entry in stored) {
-                LSBookmark *bookmark = [LSBookmark bookmarkFromDictionary:entry];
-                if (bookmark) {
-                    [self.bookmarks addObject:bookmark];
-                }
-            }
-        }
-        self.loaded = YES;
-    }
-}
-
 - (void)persistLocked {
-    NSMutableArray *payload = [NSMutableArray arrayWithCapacity:self.bookmarks.count];
-    for (LSBookmark *bookmark in self.bookmarks) {
-        [payload addObject:[bookmark dictionaryRepresentation]];
-    }
+    NSMutableArray *payload = [NSMutableArray array];
+    for (LSBookmark *bookmark in self.bookmarks) [payload addObject:bookmark.dictionaryRepresentation];
     [self.defaults setObject:payload forKey:kBookmarksKey];
 }
-
 - (NSArray<LSBookmark *> *)allBookmarks {
-    @synchronized(self) {
-        [self loadIfNeeded];
-        return [self.bookmarks copy];
-    }
+    @synchronized(self) { return [self.bookmarks copy]; }
 }
-
-- (void)addBookmarkWithName:(NSString *)name coordinate:(CLLocationCoordinate2D)coordinate {
+- (NSUInteger)indexForID:(NSString *)identifier {
+    return [self.bookmarks indexOfObjectPassingTest:^BOOL(LSBookmark *bookmark, __unused NSUInteger index, __unused BOOL *stop) {
+        return [bookmark.identifier isEqualToString:identifier];
+    }];
+}
+- (BOOL)addBookmarkWithName:(NSString *)name coordinate:(CLLocationCoordinate2D)coordinate {
+    NSString *validName = LSValidBookmarkName(name);
+    if (!validName || !LSValidBookmarkCoordinate(coordinate)) return NO;
     @synchronized(self) {
-        [self loadIfNeeded];
-        LSBookmark *bookmark = [[LSBookmark alloc] initWithName:name coordinate:coordinate];
-        [self.bookmarks insertObject:bookmark atIndex:0];
-        while (self.bookmarks.count > kLSMaxBookmarks) {
-            [self.bookmarks removeLastObject];
-        }
+        if (self.bookmarks.count >= self.class.capacity) return NO;
+        [self.bookmarks insertObject:[[LSBookmark alloc] initWithName:validName coordinate:coordinate] atIndex:0];
         [self persistLocked];
+        return YES;
     }
 }
-
-- (void)removeBookmarkAtIndex:(NSUInteger)index {
+- (BOOL)removeBookmarkWithID:(NSString *)identifier {
     @synchronized(self) {
-        [self loadIfNeeded];
-        if (index >= self.bookmarks.count) {
-            return;
-        }
+        NSUInteger index = [self indexForID:identifier];
+        if (index == NSNotFound) return NO;
         [self.bookmarks removeObjectAtIndex:index];
         [self persistLocked];
+        return YES;
     }
 }
-
-- (void)renameBookmark:(NSString *)newName atIndex:(NSUInteger)index {
+- (BOOL)renameBookmarkWithID:(NSString *)identifier name:(NSString *)name {
+    NSString *validName = LSValidBookmarkName(name);
+    if (!validName) return NO;
     @synchronized(self) {
-        [self loadIfNeeded];
-        if (index >= self.bookmarks.count) {
-            return;
-        }
-        self.bookmarks[index].name = [newName copy];
+        NSUInteger index = [self indexForID:identifier];
+        if (index == NSNotFound) return NO;
+        LSBookmark *old = self.bookmarks[index];
+        LSBookmark *replacement = [[LSBookmark alloc] initWithName:validName coordinate:old.coordinate];
+        replacement.identifier = old.identifier;
+        replacement.createdAt = old.createdAt;
+        self.bookmarks[index] = replacement;
         [self persistLocked];
+        return YES;
     }
 }
-
-- (void)moveBookmarkFromIndex:(NSUInteger)from toIndex:(NSUInteger)to {
+- (BOOL)moveBookmarkWithID:(NSString *)identifier toIndex:(NSUInteger)index {
     @synchronized(self) {
-        [self loadIfNeeded];
-        if (from >= self.bookmarks.count || to >= self.bookmarks.count || from == to) {
-            return;
-        }
+        NSUInteger from = [self indexForID:identifier];
+        if (from == NSNotFound || index >= self.bookmarks.count) return NO;
         LSBookmark *bookmark = self.bookmarks[from];
         [self.bookmarks removeObjectAtIndex:from];
-        [self.bookmarks insertObject:bookmark atIndex:to];
+        [self.bookmarks insertObject:bookmark atIndex:index];
         [self persistLocked];
+        return YES;
     }
 }
-
 @end
