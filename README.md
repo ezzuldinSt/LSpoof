@@ -46,7 +46,7 @@ The picker has three workspaces: **Location**, **Route**, and **Saved**. Its hea
 2. Review the place and coordinates on the map. Coordinate input accepts negative values, native digits, and decimal points or commas; errors appear beside the field. Typing does not rewrite the live input.
 3. Tap **Apply location** (or **Replace location** when active). This stops any moving/paused route and applies the selected point. Close the picker to return to the app.
 
-**Turn off** always disables spoofing. Remember last selection only keeps the coordinate available to preview and apply again.
+**Turn off** always disables spoofing. Remember last selection only keeps the coordinate available to preview and apply again; turning it off forgets that kept coordinate.
 
 Coordinates and saved places remain usable when online search or directions are unavailable. Map errors provide Retry; search errors retain instructions for trying again or entering coordinates.
 
@@ -55,11 +55,11 @@ Coordinates and saved places remain usable when online search or directions are 
 1. Choose **From** and **To** using search or coordinates. The named From/To map selector determines which endpoint a tap edits. Pins are draggable; Swap endpoints reverses the draft.
 2. Choose a **Walking path** or **Driving path** before **Build route**. Changing this choice after a preview refetches directions.
 3. Set playback speed: Walking (5 km/h), Cycling (15 km/h), Driving (50 km/h), or a custom value from 1 to 500 km/h. Speed changes movement without changing the chosen path. Cycling is a speed preset, not a cycling-directions API.
-4. **Start route** applies the preview. A new route draft leaves the applied session running; **Replace route** confirms replacement and starts at From.
+4. **Start route** applies the preview. A new route draft leaves the applied session running; **Replace with this route** confirms replacement and starts at From.
 
 The applied position has its own marker. Progress shows remaining distance and estimated time using playback speed. **Pause/Resume**, **Hold here**, and **Turn off** have distinct effects. Route controls remain available from Location and Saved through a labeled menu.
 
-Paused samples report zero speed. Backgrounding pauses playback; resume explicitly when returning. Completion holds and persists the destination even with the picker closed. **Replay route** restarts its retained path during the process lifetime. Relaunch restores the last checkpoint as a held location, without resuming a route. Host callback frequency still depends on the host’s location-manager activity.
+Paused samples report zero speed. Leaving the app pauses playback, and it resumes when you return; a route you paused yourself stays paused. Completion holds and persists the destination even with the picker closed. **Replay route** restarts its retained path during the process lifetime. Relaunch restores the last checkpoint as a held location, without resuming a route. Host callback frequency still depends on the host’s location-manager activity.
 
 Search and directions requests are canceled and invalidated when inputs change, the workspace changes, the picker closes, or it backgrounds. An old response cannot overwrite a newer preview.
 
@@ -72,13 +72,13 @@ Search and directions requests are canceled and invalidated when inputs change, 
 
 ## Settings and accessibility
 
-Settings contains altitude, course, held-position variation/radius, remembering, the optional real-location annotation, and the floating opener. Edits stay local until **Save settings**, which explicitly updates the current session and preferences. Cancel/swipe dismissal discards edits. Closing the picker leaves an applied session active and discards unapplied location/route drafts.
+Settings contains altitude, course, held-position variation/radius, remembering, the optional real-location annotation, and the floating opener. Edits stay local until **Save settings**, which explicitly updates the current session and preferences. Cancel or a swipe down with unsaved edits asks whether to save or discard them. Closing the picker leaves an applied session active and discards unapplied location/route drafts.
 
 The radius has a circle preview. Real location uses genuine existing permission and appears separately, with its own recenter button and unavailable message. Updates stop when the picker closes, backgrounds, or shows Saved.
 
 Controls use SF Symbols, Dynamic Type, wrapping labels, semantic light/dark colors, at least 44-point touch targets, VoiceOver names/state announcements, keyboard-aware scrolling, Escape/back dismissal, and Reduce Motion. Button/navigation text scales within bounds to keep actions reachable in compact presentations. Coordinate entry and row menus provide alternatives to map gestures and reordering drags.
 
-The maintainer has reported working functionality on a real device and supplied layout issues addressed in v1.1.0. The final layout fixes still need a follow-up device check; broader host/OS, VoiceOver, and multi-window compatibility requires testing.
+The maintainer tests releases on a real device. The v1.2 redesign still needs a full device check; broader host/OS, VoiceOver, and multi-window compatibility requires testing.
 
 ---
 

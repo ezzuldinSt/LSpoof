@@ -33,11 +33,15 @@
 - (void)writeToStore {
     if (!self.isValid) return;
     PersistenceManager *store = PersistenceManager.shared;
+    // Turning Remember off used to leave the kept coordinate behind, so the picker kept
+    // offering it as the last selection. An active session's coordinate is never touched.
+    BOOL forget = store.keepLastSpoof && !self.rememberLocation && !store.isSpoofingEnabled;
     store.altitude = self.altitude;
     store.heading = self.course;
     store.fluctuationEnabled = self.fluctuationEnabled;
     store.fluctuationRadius = self.fluctuationRadius;
     store.keepLastSpoof = self.rememberLocation;
+    if (forget) [store clearLastSpoof];
     store.showRealLocation = self.showRealLocation;
     store.showFloatingButton = self.showFloatingButton;
 }

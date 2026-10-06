@@ -159,6 +159,8 @@
         if (valid) self.draft.altitude = value;
     } else if (field == self.courseField) {
         error = self.courseError;
+        // 359.9999999 was shown as 360 at six decimals and then failed its own check.
+        if (number) value = fmod(round(value * 1e6) / 1e6, 360.0);
         valid = number && value >= 0 && value < 360;
         error.text = @"Enter a course from 0 to less than 360 degrees.";
         if (valid) self.draft.course = value;

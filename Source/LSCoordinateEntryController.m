@@ -93,18 +93,25 @@
     double limit = field == self.latitudeField ? 90 : 180;
     return value && fabs(value.doubleValue) <= limit ? value : nil;
 }
-- (void)editingChanged:(UITextField *)field {
+- (BOOL)textField:(UITextField *)field shouldChangeCharactersInRange:(NSRange)range replacementString:(NSString *)string {
+    // Pasting "lat, lon" splits it across both fields. Only a multi-character insert
+    // (paste or dictation) does this: splitting while typing "48.85 2" sent the rest of
+    // the longitude's digits into Latitude.
+    if (string.length < 2) return YES;
+    NSString *text = [(field.text ?: @"") stringByReplacingCharactersInRange:range withString:string];
     CLLocationCoordinate2D pair;
-    if (LSParseCoordinatePair(field.text, &pair)) {
-        // Pasting "lat, lon" used to fail validation; split it across both fields.
-        self.latitudeField.text = LSFormatDecimal(pair.latitude, 6);
-        self.longitudeField.text = LSFormatDecimal(pair.longitude, 6);
-        self.latitudeError.hidden = YES;
-        self.longitudeError.hidden = YES;
-        [self updateDraftPreview];
-        LSAnnounce(@"Latitude and longitude filled in");
-        return;
-    }
+    if (!LSParseCoordinatePair(text, &pair)) return YES;
+    self.latitudeField.text = LSFormatDecimal(pair.latitude, 6);
+    self.longitudeField.text = LSFormatDecimal(pair.longitude, 6);
+    self.latitudeError.hidden = YES;
+    self.longitudeError.hidden = YES;
+    self.latitudeField.accessibilityHint = nil;
+    self.longitudeField.accessibilityHint = nil;
+    [self updateDraftPreview];
+    LSAnnounce(@"Latitude and longitude filled in");
+    return NO;
+}
+- (void)editingChanged:(UITextField *)field {
     UILabel *error = field == self.latitudeField ? self.latitudeError : self.longitudeError;
     error.hidden = YES;
     field.accessibilityHint = nil;

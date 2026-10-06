@@ -406,14 +406,19 @@ NSNumber *LSParseDecimal(NSString *text, NSLocale *locale) {
 }
 BOOL LSParseCoordinatePair(NSString *text, CLLocationCoordinate2D *coordinate) {
     if (!text.length || text.length > 128) return NO;
-    static NSRegularExpression *pair;
+    static NSRegularExpression *spaced, *compact;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         // Point decimals and a comma followed by a space, so "48,85" typed in a comma
-        // locale is never mistaken for a pair.
-        pair = [NSRegularExpression regularExpressionWithPattern:@"^\\s*\\(?\\s*([+−-]?\\d{1,3}(?:\\.\\d+)?)\\s*°?\\s*(?:;\\s*|,\\s+|\\s+)([+−-]?\\d{1,3}(?:\\.\\d+)?)\\s*°?\\s*\\)?\\s*$" options:0 error:nil];
+        // locale is never mistaken for a pair. ASCII digits only: \d also matched native
+        // digits, which doubleValue read as 0, so the pair silently became 0, 0.
+        spaced = [NSRegularExpression regularExpressionWithPattern:@"^\\s*\\(?\\s*([+−-]?[0-9]{1,3}(?:\\.[0-9]+)?)\\s*°?\\s*(?:;\\s*|,\\s+|\\s+)([+−-]?[0-9]{1,3}(?:\\.[0-9]+)?)\\s*°?\\s*\\)?\\s*$" options:0 error:nil];
+        // Many apps copy "48.8584,2.2945" with no space. With a point decimal on both
+        // sides the comma can only be the separator.
+        compact = [NSRegularExpression regularExpressionWithPattern:@"^\\s*\\(?\\s*([+−-]?[0-9]{1,3}\\.[0-9]+)\\s*°?\\s*,\\s*([+−-]?[0-9]{1,3}\\.[0-9]+)\\s*°?\\s*\\)?\\s*$" options:0 error:nil];
     });
-    NSTextCheckingResult *match = [pair firstMatchInString:text options:0 range:NSMakeRange(0, text.length)];
+    NSRange whole = NSMakeRange(0, text.length);
+    NSTextCheckingResult *match = [spaced firstMatchInString:text options:0 range:whole] ?: [compact firstMatchInString:text options:0 range:whole];
     if (!match) return NO;
     NSString *(^clean)(NSRange) = ^NSString *(NSRange range) {
         return [[text substringWithRange:range] stringByReplacingOccurrencesOfString:@"−" withString:@"-"];
