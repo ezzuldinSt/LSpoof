@@ -72,12 +72,15 @@
     os_unfair_lock_unlock(&_coordLock);
 }
 
+// Messaging nil returned {0, 0}, a valid coordinate in the Gulf of Guinea.
 - (CLLocationCoordinate2D)startCoordinate {
-    return self.routePoints.firstObject.coordinate;
+    LSRoutePoint *point = self.routePoints.firstObject;
+    return point ? point.coordinate : kCLLocationCoordinate2DInvalid;
 }
 
 - (CLLocationCoordinate2D)destinationCoordinate {
-    return self.routePoints.lastObject.coordinate;
+    LSRoutePoint *point = self.routePoints.lastObject;
+    return point ? point.coordinate : kCLLocationCoordinate2DInvalid;
 }
 
 + (double)speedMetersPerSecondForMode:(LSTransportMode)mode customSpeedKmh:(double)customSpeedKmh {
@@ -226,7 +229,9 @@
     double speed = [LSRouteSimulator speedMetersPerSecondForMode:self.transportMode
                                                   customSpeedKmh:self.customSpeedKmh];
     NSTimeInterval now = NSProcessInfo.processInfo.systemUptime;
-    NSTimeInterval elapsed = MAX(0.0, now - self.lastTickTime);
+    // A stalled main thread or an unannounced suspension must not teleport the
+    // location far along the route; movement resumes at normal speed instead.
+    NSTimeInterval elapsed = MIN(1.0, MAX(0.0, now - self.lastTickTime));
     self.lastTickTime = now;
     double advanced = LSRouteAdvanceDistance(self.distanceCovered, speed, elapsed, self.totalDistance);
     if (!isfinite(advanced)) return;

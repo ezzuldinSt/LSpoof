@@ -4,7 +4,7 @@
 #import "SessionController.h"
 #import "OverlayWindow.h"
 
-@interface LSSettingsViewController () <UITextFieldDelegate>
+@interface LSSettingsViewController () <UITextFieldDelegate, UIAdaptivePresentationControllerDelegate>
 @property (nonatomic, strong) LSSettings *draft;
 @property (nonatomic, strong) UIScrollView *scroll;
 @property (nonatomic, strong) UITextField *altitudeField;
@@ -28,6 +28,7 @@
     self.view.backgroundColor = UIColor.systemGroupedBackgroundColor;
     self.draft = [LSSettings.storedSettings copy];
     self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemCancel target:self action:@selector(cancel)];
+    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemSave target:self action:@selector(save)];
     self.scroll = [[UIScrollView alloc] init];
     self.scroll.translatesAutoresizingMaskIntoConstraints = NO;
     self.scroll.keyboardDismissMode = UIScrollViewKeyboardDismissModeInteractive;
@@ -43,6 +44,7 @@
     self.radiusField.returnKeyType = UIReturnKeyDone;
     for (UITextField *field in @[self.altitudeField, self.courseField, self.radiusField]) {
         field.delegate = self;
+        [field addTarget:self action:@selector(markEdited) forControlEvents:UIControlEventEditingChanged];
         LSInstallNumberToolbar(field, self, @selector(dismissKeyboard));
     }
     self.altitudeError = LSLabel(@"", UIFontTextStyleFootnote);
@@ -57,27 +59,33 @@
     self.realSwitch.on = self.draft.showRealLocation;
     self.openerSwitch.on = self.draft.showFloatingButton;
     [self.fluctuationSwitch addTarget:self action:@selector(fluctuationChanged) forControlEvents:UIControlEventValueChanged];
+    for (UISwitch *control in @[self.fluctuationSwitch, self.rememberSwitch, self.realSwitch, self.openerSwitch]) {
+        [control addTarget:self action:@selector(markEdited) forControlEvents:UIControlEventValueChanged];
+    }
     self.radiusRow = LSFieldRow(@"Radius · 1–1,000 m", self.radiusField, self.radiusError);
     self.radiusRow.hidden = !self.fluctuationSwitch.on;
-    UILabel *sampleTitle = LSLabel(@"Location details", UIFontTextStyleHeadline);
-    sampleTitle.accessibilityTraits = UIAccessibilityTraitHeader;
     UILabel *sampleHint = LSLabel(@"Altitude applies to held locations and routes. Course and small position variations apply while holding a location; routes determine their own travel direction.", UIFontTextStyleFootnote);
     sampleHint.textColor = UIColor.secondaryLabelColor;
-    UIStackView *sample = LSStack(@[sampleTitle, sampleHint,
+    UIStackView *sample = LSStack(@[
         LSFieldRow(@"Altitude · −500 to 10,000 m", self.altitudeField, self.altitudeError),
         LSFieldRow(@"Course · 0 to less than 360°", self.courseField, self.courseError),
-        [self switchRow:@"Vary held position" detail:@"Small random changes around the selected point." control:self.fluctuationSwitch], self.radiusRow], 16);
-    UILabel *preferencesTitle = LSLabel(@"Preferences", UIFontTextStyleHeadline);
-    preferencesTitle.accessibilityTraits = UIAccessibilityTraitHeader;
-    UIStackView *preferences = LSStack(@[preferencesTitle,
-        [self switchRow:@"Remember last selection" detail:@"Turn off still stops spoofing. Keep the coordinate to use again." control:self.rememberSwitch],
-        [self switchRow:@"Show real location on map" detail:@"Uses existing permission only. This does not change the location sent to the app." control:self.realSwitch],
-        [self switchRow:@"Show floating opener" detail:@"A Location button opens this picker. You can also hold at least three fingers for a moment." control:self.openerSwitch]], 16);
+        LSSeparator(),
+        [self switchRow:@"Vary held position" detail:@"The point drifts slowly within a radius, like a real GPS fix." symbol:@"dot.radiowaves.left.and.right" color:LSRouteColor() control:self.fluctuationSwitch], self.radiusRow], 16);
+    UIStackView *preferences = LSStack(@[
+        [self switchRow:@"Remember last selection" detail:@"Turn off still stops spoofing. Keep the coordinate to use again." symbol:@"clock.arrow.circlepath" color:UIColor.systemIndigoColor control:self.rememberSwitch],
+        LSSeparator(),
+        [self switchRow:@"Show real location on map" detail:@"Uses existing permission only. This does not change the location sent to the app." symbol:@"person.crop.circle" color:UIColor.systemGrayColor control:self.realSwitch],
+        LSSeparator(),
+        [self switchRow:@"Show floating button" detail:@"A draggable button opens this picker. You can also hold three fingers on the screen for a moment." symbol:@"hand.tap.fill" color:LSAccentColor() control:self.openerSwitch]], 14);
     UILabel *saveHint = LSLabel(@"Save updates the current session and these preferences. Cancel discards your edits.", UIFontTextStyleFootnote);
     saveHint.textColor = UIColor.secondaryLabelColor;
-    UIButton *save = LSButton(@"Save settings", @"checkmark", YES);
+    UIButton *save = LSButton(@"Save settings", @"checkmark.circle.fill", YES);
     [save addTarget:self action:@selector(save) forControlEvents:UIControlEventTouchUpInside];
-    UIStackView *stack = LSStack(@[LSInsetPanel(sample), LSInsetPanel(preferences), saveHint, save], 20);
+    UIStackView *stack = LSStack(@[LSSectionLabel(@"Location details"), LSInsetPanel(LSStack(@[sampleHint, sample], 14)),
+                                   LSSectionLabel(@"Preferences"), LSInsetPanel(preferences), saveHint, save], 8);
+    [stack setCustomSpacing:24 afterView:stack.arrangedSubviews[1]];
+    [stack setCustomSpacing:16 afterView:stack.arrangedSubviews[3]];
+    [stack setCustomSpacing:16 afterView:saveHint];
     [self.scroll addSubview:stack];
     [NSLayoutConstraint activateConstraints:@[
         [self.scroll.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor],
@@ -100,7 +108,24 @@
         [self.scroll scrollRectToVisible:CGRectInset([field convertRect:field.bounds toView:self.scroll], 0, -8) animated:NO];
     }
 }
-- (UIView *)switchRow:(NSString *)title detail:(NSString *)detail control:(UISwitch *)control {
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    self.navigationController.presentationController.delegate = self;
+}
+- (void)markEdited { self.modalInPresentation = YES; }
+- (void)presentationControllerDidAttemptToDismiss:(UIPresentationController *)controller {
+    (void)controller;
+    // Swiping down used to throw away edited settings without a word.
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:nil message:@"You have unsaved changes." preferredStyle:UIAlertControllerStyleActionSheet];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Save settings" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) { [self save]; }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Discard changes" style:UIAlertActionStyleDestructive handler:^(__unused UIAlertAction *action) {
+        [self dismissViewControllerAnimated:LSMapAnimationsEnabled() completion:nil];
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Keep editing" style:UIAlertActionStyleCancel handler:nil]];
+    sheet.popoverPresentationController.barButtonItem = self.navigationItem.leftBarButtonItem;
+    [self presentViewController:sheet animated:LSMapAnimationsEnabled() completion:nil];
+}
+- (UIView *)switchRow:(NSString *)title detail:(NSString *)detail symbol:(NSString *)symbol color:(UIColor *)color control:(UISwitch *)control {
     control.accessibilityLabel = title;
     control.accessibilityHint = detail;
     control.onTintColor = LSAccentColor();
@@ -108,8 +133,11 @@
     [control.heightAnchor constraintGreaterThanOrEqualToConstant:44].active = YES;
     UILabel *hint = LSLabel(detail, UIFontTextStyleFootnote);
     hint.textColor = UIColor.secondaryLabelColor;
-    UIStackView *text = LSStack(@[LSLabel(title, UIFontTextStyleBody), hint], 4);
-    UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:@[text, control]];
+    UILabel *name = LSLabel(title, UIFontTextStyleBody);
+    name.font = LSFont(UIFontTextStyleBody, UIFontWeightMedium, 30);
+    UIStackView *text = LSStack(@[name, hint], 3);
+    UIView *badge = LSIconBadge(symbol, color, 32);
+    UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:@[badge, text, control]];
     row.axis = UILayoutConstraintAxisHorizontal;
     row.alignment = UIStackViewAlignmentCenter;
     row.spacing = 12;
@@ -178,7 +206,10 @@
     LSAnnounce(@"Settings saved");
     [self dismissViewControllerAnimated:LSMapAnimationsEnabled() completion:nil];
 }
-- (void)cancel { [self dismissViewControllerAnimated:LSMapAnimationsEnabled() completion:nil]; }
+- (void)cancel {
+    if (self.modalInPresentation) { [self presentationControllerDidAttemptToDismiss:self.navigationController.presentationController]; return; }
+    [self dismissViewControllerAnimated:LSMapAnimationsEnabled() completion:nil];
+}
 - (BOOL)accessibilityPerformEscape { [self cancel]; return YES; }
 - (NSArray<UIKeyCommand *> *)keyCommands {
     return @[[UIKeyCommand keyCommandWithInput:UIKeyInputEscape modifierFlags:0 action:@selector(cancel)]];

@@ -143,4 +143,15 @@ static BOOL LSValidBookmarkCoordinate(CLLocationCoordinate2D coordinate) {
         return YES;
     }
 }
+- (LSBookmark *)bookmarkNearCoordinate:(CLLocationCoordinate2D)coordinate {
+    if (!LSValidBookmarkCoordinate(coordinate)) return nil;
+    CLLocation *target = [[CLLocation alloc] initWithLatitude:coordinate.latitude longitude:coordinate.longitude];
+    @synchronized(self) {
+        for (LSBookmark *bookmark in self.bookmarks) {
+            CLLocation *candidate = [[CLLocation alloc] initWithLatitude:bookmark.coordinate.latitude longitude:bookmark.coordinate.longitude];
+            if ([candidate distanceFromLocation:target] < 5.0) return bookmark;
+        }
+    }
+    return nil;
+}
 @end
