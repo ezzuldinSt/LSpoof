@@ -213,11 +213,13 @@
 - (void)scheduleTickTimer {
     [self.tickTimer invalidate];
     self.lastTickTime = NSProcessInfo.processInfo.systemUptime;
-    self.tickTimer = [NSTimer scheduledTimerWithTimeInterval:0.1
-                                                      target:self
-                                                    selector:@selector(handleTick)
-                                                    userInfo:nil
-                                                     repeats:YES];
+    // Registered once, on the main run loop in common modes. The scheduled variant also
+    // put it on the calling thread's run loop in the default mode.
+    self.tickTimer = [NSTimer timerWithTimeInterval:0.1
+                                             target:self
+                                           selector:@selector(handleTick)
+                                           userInfo:nil
+                                            repeats:YES];
     [[NSRunLoop mainRunLoop] addTimer:self.tickTimer forMode:NSRunLoopCommonModes];
 }
 

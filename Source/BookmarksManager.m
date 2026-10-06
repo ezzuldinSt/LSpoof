@@ -44,7 +44,8 @@ static BOOL LSValidBookmarkCoordinate(CLLocationCoordinate2D coordinate) {
     id date = dictionary[@"LSBMDate"];
     NSISO8601DateFormatter *formatter = [[NSISO8601DateFormatter alloc] init];
     NSDate *parsed = [date isKindOfClass:NSString.class] && [date length] <= 64 ? [formatter dateFromString:date] : nil;
-    if (date && !parsed) return nil;
+    // An unreadable date used to drop the whole place, and the load-time rewrite then
+    // deleted it from storage. Keep the place; its date falls back to now.
     if (parsed) bookmark.createdAt = parsed;
     id identifier = dictionary[@"LSBMID"];
     if ([identifier isKindOfClass:NSString.class] && [identifier length] <= 64 && [[NSUUID alloc] initWithUUIDString:identifier]) bookmark.identifier = [[NSUUID alloc] initWithUUIDString:identifier].UUIDString;
