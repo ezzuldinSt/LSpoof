@@ -38,6 +38,18 @@ static NSString *LSMapTypeName(MKMapType type) {
 static NSString *LSMapTypeSymbol(MKMapType type) {
     return type == MKMapTypeHybrid ? @"square.2.layers.3d" : (type == MKMapTypeSatellite ? @"globe.americas.fill" : @"map");
 }
+// A floating surface 12 pt in from the safe area, centred and at most one column wide. The edges
+// are 999 so the column cap wins on wide screens; nothing inside can pull the surface narrower.
+static NSArray<NSLayoutConstraint *> *LSColumnConstraints(UIView *view, UILayoutGuide *safe) {
+    NSLayoutConstraint *leading = [view.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor constant:12];
+    NSLayoutConstraint *trailing = [view.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor constant:-12];
+    leading.priority = 999;
+    trailing.priority = 999;
+    return @[leading, trailing,
+             [view.centerXAnchor constraintEqualToAnchor:safe.centerXAnchor],
+             [view.leadingAnchor constraintGreaterThanOrEqualToAnchor:safe.leadingAnchor constant:12],
+             [view.widthAnchor constraintLessThanOrEqualToConstant:kLSColumnWidth]];
+}
 static void LSSetConstant(NSLayoutConstraint *constraint, CGFloat value) {
     // Layout callbacks run often; touching only changed constants keeps them from looping.
     if (constraint && fabs(constraint.constant - value) > 0.5) constraint.constant = value;
@@ -80,6 +92,41 @@ static UIButton *LSPlainIconButton(NSString *symbol, NSString *label, UIColor *t
     [NSLayoutConstraint activateConstraints:@[width, height]];
     [button setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
     [button setContentCompressionResistancePriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+    return button;
+}
+// Place card action: a symbol over a short caption on a quiet rounded tile, like the actions on
+// a place in Maps. The tiles share their row equally, so they never scroll or clip.
+static UIButton *LSPlaceAction(NSString *title, NSString *symbol) {
+    UIButtonConfiguration *config = UIButtonConfiguration.grayButtonConfiguration;
+    config.title = title;
+    config.image = [UIImage systemImageNamed:symbol];
+    config.imagePlacement = NSDirectionalRectEdgeTop;
+    config.imagePadding = 4;
+    config.preferredSymbolConfigurationForImage = [UIImageSymbolConfiguration configurationWithTextStyle:UIFontTextStyleBody scale:UIImageSymbolScaleMedium];
+    config.baseForegroundColor = LSAccentTextColor();
+    config.baseBackgroundColor = UIColor.tertiarySystemFillColor;
+    config.titleLineBreakMode = NSLineBreakByTruncatingTail;
+    config.contentInsets = NSDirectionalEdgeInsetsMake(10, 2, 9, 2);
+    config.cornerStyle = UIButtonConfigurationCornerStyleFixed;
+    UIBackgroundConfiguration *background = config.background;
+    background.cornerRadius = 14;
+    config.background = background;
+    config.titleTextAttributesTransformer = ^NSDictionary *(NSDictionary *attributes) {
+        NSMutableDictionary *result = [attributes mutableCopy];
+        result[NSFontAttributeName] = LSFont(UIFontTextStyleCaption1, UIFontWeightSemibold, 24);
+        return result;
+    };
+    UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
+    button.configuration = config;
+    button.translatesAutoresizingMaskIntoConstraints = NO;
+    button.largeContentTitle = title;
+    button.showsLargeContentViewer = YES;
+    button.scalesLargeContentImage = YES;
+    [button addInteraction:[[UILargeContentViewerInteraction alloc] init]];
+    NSLayoutConstraint *height = [button.heightAnchor constraintGreaterThanOrEqualToConstant:56];
+    height.priority = 999; // A hidden tile collapses without a conflict.
+    height.active = YES;
+    LSAddPressFeedback(button);
     return button;
 }
 static UIView *LSClusterSeparator(void) {
@@ -391,8 +438,8 @@ static void LSSetButtonRadius(UIButton *button, CGFloat radius) {
 @property (nonatomic, strong) NSLayoutConstraint *mapMinimumVisible;
 @property (nonatomic, strong) NSLayoutConstraint *cardBottom;
 @property (nonatomic, strong) NSLayoutConstraint *savedBottom;
-@property (nonatomic, strong) NSLayoutConstraint *actionsFillWidth;
-@property (nonatomic, strong) UIScrollView *actionsScroller;
+@property (nonatomic, strong) NSLayoutConstraint *scrollTop;
+@property (nonatomic, strong) NSLayoutConstraint *scrollBottom;
 @property (nonatomic, strong) UIStackView *placeStatusRow;
 @property (nonatomic, strong) UIImageView *placeStatusIcon;
 @property (nonatomic, strong) UILabel *placeStatusLabel;
@@ -443,7 +490,10 @@ static void LSSetButtonRadius(UIButton *button, CGFloat radius) {
     if (store.hasStoredCoordinate) {
         self.selectedCoordinate = store.spoofCoordinate;
         self.hasSelection = YES;
-        self.selectedName = store.isSpoofingEnabled ? @"Applied location" : @"Last selection";
+        // The spot's own name (a saved place or a recent), so the card and the header agree.
+        NSString *known = [self appliedPlaceName];
+        BOOL named = known.length && ![known isEqualToString:@"Applied location"];
+        self.selectedName = named ? known : (store.isSpoofingEnabled ? @"Applied location" : @"Last selection");
     }
     [self buildInterface];
     [self restoreRoute];
@@ -570,8 +620,7 @@ static void LSSetButtonRadius(UIButton *button, CGFloat radius) {
 
 - (UIView *)buildChrome {
     // What is happening now leads: status capsule and the applied place in large type. A playing
-    // route adds its progress line and bar; a held spot shows its coordinates off the Location
-    // tab (on it, the place card shows them). No branding competes with it.
+    // route adds its progress line and bar. No branding competes with it.
     self.statusChip = [[LSStatusChip alloc] init];
     UIStackView *chipRow = LSStack(@[self.statusChip], 0);
     chipRow.alignment = UIStackViewAlignmentLeading;
@@ -585,19 +634,19 @@ static void LSSetButtonRadius(UIButton *button, CGFloat radius) {
     self.appliedLabel.adjustsFontSizeToFitWidth = YES;
     self.appliedLabel.minimumScaleFactor = 0.75;
     self.appliedLabel.hidden = YES;
-    // Held coordinates in the header copy with a long press (VoiceOver: a custom action).
+    // The held spot's name copies its coordinates with a long press (VoiceOver: a custom action).
     self.heldMenu = [[LSMenuInteractionHandler alloc] init];
     __weak typeof(self) weakSelf = self;
     self.heldMenu.menuProvider = ^UIMenu *{
         typeof(self) self = weakSelf;
-        if (!self || self.statusDetailKind != 2) return nil;
+        if (!self || LSSessionController.shared.snapshot.mode != LSSessionModeStatic || !PersistenceManager.shared.hasStoredCoordinate) return nil;
         UIAction *copy = [UIAction actionWithTitle:@"Copy coordinates" image:[UIImage systemImageNamed:@"doc.on.doc"] identifier:nil handler:^(__unused UIAction *action) {
             [weakSelf copyHeldCoordinates];
         }];
         return [UIMenu menuWithTitle:@"" children:@[copy]];
     };
-    self.appliedLabel.userInteractionEnabled = YES;
-    [self.appliedLabel addInteraction:[[UIContextMenuInteraction alloc] initWithDelegate:self.heldMenu]];
+    self.brandLabel.userInteractionEnabled = YES;
+    [self.brandLabel addInteraction:[[UIContextMenuInteraction alloc] initWithDelegate:self.heldMenu]];
     self.statusProgress = [[LSProgressCapsule alloc] initWithFrame:CGRectZero];
     self.statusProgress.hidden = YES;
     self.statusStack = LSStack(@[chipRow, self.brandLabel, self.appliedLabel, self.statusProgress], 2);
@@ -642,10 +691,14 @@ static void LSSetButtonRadius(UIButton *button, CGFloat radius) {
     [self buildMap];
     [self buildLocationDetails];
     self.panelsStack = LSStack(@[self.routeEndpointsPanel, self.routeDetailsPanel], 14);
-    self.panelsStack.directionalLayoutMargins = NSDirectionalEdgeInsetsMake(16, 16, 24, 16);
+    self.panelsStack.directionalLayoutMargins = NSDirectionalEdgeInsetsMake(14, 0, 24, 0);
     self.panelsStack.layoutMarginsRelativeArrangement = YES;
+    // Fill, not centre: every card spans the column. The column's side margins (zero on
+    // Location, where the map runs edge to edge) are set in layoutFloatingSurfaces. A centred
+    // stack sized the cards by their content and squeezed them into a narrow strip.
     self.contentStack = LSStack(@[self.mapContainer, self.panelsStack], 0);
-    self.contentStack.alignment = UIStackViewAlignmentCenter;
+    self.contentStack.layoutMarginsRelativeArrangement = YES;
+    self.contentStack.directionalLayoutMargins = NSDirectionalEdgeInsetsZero;
     [self.scroll addSubview:self.contentStack];
     [self buildSavedUI];
     self.savedTable.translatesAutoresizingMaskIntoConstraints = NO;
@@ -654,34 +707,28 @@ static void LSSetButtonRadius(UIButton *button, CGFloat radius) {
     [self.view addSubview:chrome];
     [self buildFooter];
     UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
-    NSLayoutConstraint *chromeWidth = [chrome.widthAnchor constraintEqualToAnchor:safe.widthAnchor constant:-24];
-    chromeWidth.priority = UILayoutPriorityDefaultHigh;
-    NSLayoutConstraint *panelsWidth = [self.panelsStack.widthAnchor constraintEqualToAnchor:self.contentStack.widthAnchor];
-    panelsWidth.priority = UILayoutPriorityDefaultHigh;
     self.savedBottom = [self.savedTable.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor];
-    [NSLayoutConstraint activateConstraints:@[
+    // Location: the map runs under the floating header and footer. Route: the content scrolls
+    // between them and never shows behind or around them (constants set with the layout).
+    self.scrollTop = [self.scroll.topAnchor constraintEqualToAnchor:self.view.topAnchor];
+    self.scrollBottom = [self.scroll.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor];
+    NSMutableArray<NSLayoutConstraint *> *constraints = [NSMutableArray arrayWithArray:LSColumnConstraints(chrome, safe)];
+    [constraints addObjectsFromArray:@[
         [chrome.topAnchor constraintEqualToAnchor:safe.topAnchor constant:14],
-        [chrome.centerXAnchor constraintEqualToAnchor:safe.centerXAnchor],
-        [chrome.leadingAnchor constraintGreaterThanOrEqualToAnchor:safe.leadingAnchor constant:12],
-        [chrome.widthAnchor constraintLessThanOrEqualToConstant:kLSColumnWidth],
-        chromeWidth,
-        [self.scroll.topAnchor constraintEqualToAnchor:self.view.topAnchor],
+        self.scrollTop, self.scrollBottom,
         [self.scroll.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
         [self.scroll.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
-        [self.scroll.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
         [self.contentStack.topAnchor constraintEqualToAnchor:self.scroll.contentLayoutGuide.topAnchor],
         [self.contentStack.leadingAnchor constraintEqualToAnchor:self.scroll.contentLayoutGuide.leadingAnchor],
         [self.contentStack.trailingAnchor constraintEqualToAnchor:self.scroll.contentLayoutGuide.trailingAnchor],
         [self.contentStack.bottomAnchor constraintEqualToAnchor:self.scroll.contentLayoutGuide.bottomAnchor],
         [self.contentStack.widthAnchor constraintEqualToAnchor:self.scroll.frameLayoutGuide.widthAnchor],
-        [self.mapContainer.widthAnchor constraintEqualToAnchor:self.contentStack.widthAnchor],
-        [self.panelsStack.widthAnchor constraintLessThanOrEqualToConstant:kLSColumnWidth + 32],
-        panelsWidth,
         [self.savedTable.topAnchor constraintEqualToAnchor:chrome.bottomAnchor constant:6],
         [self.savedTable.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor],
         [self.savedTable.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor],
         self.savedBottom
     ]];
+    [NSLayoutConstraint activateConstraints:constraints];
     // The overlays pin to the view's safe area, so the map has to be in the hierarchy first.
     [self installMapOverlays];
     [self contentSizeChanged:nil];
@@ -732,17 +779,13 @@ static void LSSetButtonRadius(UIButton *button, CGFloat radius) {
     footer.translatesAutoresizingMaskIntoConstraints = NO;
     [self.view addSubview:footer];
     UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
-    NSLayoutConstraint *width = [footer.widthAnchor constraintEqualToAnchor:safe.widthAnchor constant:-24];
-    width.priority = UILayoutPriorityDefaultHigh;
     // Floats just into the home indicator area, but never closer than 12 pt to the edge.
     NSLayoutConstraint *bottom = [footer.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor constant:10];
     bottom.priority = 999;
+    [NSLayoutConstraint activateConstraints:LSColumnConstraints(footer, safe)];
     [NSLayoutConstraint activateConstraints:@[
-        [footer.centerXAnchor constraintEqualToAnchor:safe.centerXAnchor],
-        [footer.leadingAnchor constraintGreaterThanOrEqualToAnchor:safe.leadingAnchor constant:12],
-        [footer.widthAnchor constraintLessThanOrEqualToConstant:kLSColumnWidth],
         [footer.bottomAnchor constraintLessThanOrEqualToAnchor:self.view.bottomAnchor constant:-12],
-        width, bottom
+        bottom
     ]];
     self.footerView = footer;
     self.footerShown = YES;
@@ -798,50 +841,36 @@ static void LSSetButtonRadius(UIButton *button, CGFloat radius) {
     UIStackView *info = LSStack(@[self.placeStatusRow, self.placeLabel, coordinateRow], 2);
     [info setCustomSpacing:4 afterView:self.placeStatusRow];
 
-    UIButton *coordinates = LSChipButton(@"Coordinates", @"number");
+    UIButton *coordinates = LSPlaceAction(@"Coordinates", @"number");
     coordinates.accessibilityLabel = @"Edit coordinates";
     coordinates.accessibilityUserInputLabels = @[@"Coordinates", @"Edit coordinates"];
     [coordinates addTarget:self action:@selector(editCoordinates) forControlEvents:UIControlEventTouchUpInside];
-    self.savePlaceButton = LSChipButton(@"Save", @"bookmark");
+    self.savePlaceButton = LSPlaceAction(@"Save", @"bookmark");
     self.savePlaceButton.accessibilityLabel = @"Save place";
     self.savePlaceButton.accessibilityUserInputLabels = @[@"Save", @"Save place"];
-    [self.savePlaceButton addTarget:self action:@selector(saveSelectedPlace) forControlEvents:UIControlEventTouchUpInside];
-    self.radiusChip = LSChipButton(@"Wander", @"dot.radiowaves.left.and.right");
-    self.radiusChip.showsMenuAsPrimaryAction = YES;
-    self.radiusChip.accessibilityUserInputLabels = @[@"Wander", @"Wander radius"];
-    self.radiusChip.hidden = YES;
-    UIButton *link = LSChipButton(@"Link", @"link");
+    [self.savePlaceButton addTarget:self action:@selector(saveTapped) forControlEvents:UIControlEventTouchUpInside];
+    UIButton *link = LSPlaceAction(@"Link", @"link");
     link.accessibilityLabel = @"Import a map link or route file";
     link.accessibilityUserInputLabels = @[@"Link", @"Import"];
     link.showsMenuAsPrimaryAction = YES;
     link.menu = [self importMenu];
-    self.useRealButton = LSChipButton(@"My location", @"location.fill");
+    self.useRealButton = LSPlaceAction(@"My location", @"location.fill");
     self.useRealButton.accessibilityLabel = @"Use my real location";
     self.useRealButton.accessibilityUserInputLabels = @[@"My location", @"Use my real location"];
     self.useRealButton.hidden = YES;
     [self.useRealButton addTarget:self action:@selector(useRealLocation) forControlEvents:UIControlEventTouchUpInside];
-    // One scrolling strip of chips at their natural width; at accessibility sizes they stack.
-    self.locationActions = LSRow(@[coordinates, self.savePlaceButton, self.radiusChip, link, self.useRealButton], 8);
-    self.actionsScroller = [[UIScrollView alloc] init];
-    self.actionsScroller.translatesAutoresizingMaskIntoConstraints = NO;
-    self.actionsScroller.showsHorizontalScrollIndicator = NO;
-    self.actionsScroller.showsVerticalScrollIndicator = NO;
-    // Chips scroll out to the card's edge instead of being cut at its padding.
-    self.actionsScroller.clipsToBounds = NO;
-    [self.actionsScroller addSubview:self.locationActions];
-    UILayoutGuide *content = self.actionsScroller.contentLayoutGuide, *frame = self.actionsScroller.frameLayoutGuide;
-    self.actionsFillWidth = [self.locationActions.widthAnchor constraintEqualToAnchor:frame.widthAnchor];
-    [NSLayoutConstraint activateConstraints:@[
-        [self.locationActions.topAnchor constraintEqualToAnchor:content.topAnchor],
-        [self.locationActions.leadingAnchor constraintEqualToAnchor:content.leadingAnchor],
-        [self.locationActions.trailingAnchor constraintEqualToAnchor:content.trailingAnchor],
-        [self.locationActions.bottomAnchor constraintEqualToAnchor:content.bottomAnchor],
-        [self.locationActions.heightAnchor constraintEqualToAnchor:frame.heightAnchor]
-    ]];
+    // Equal tiles that always fit the card: no scrolling strip, nothing cut at the edges. A
+    // saved spot's wander radius lives in the Saved tile's menu. At accessibility sizes the
+    // tiles stack into full-width rows (layoutPlaceActions).
+    self.locationActions = [[UIStackView alloc] initWithArrangedSubviews:@[coordinates, self.savePlaceButton, link, self.useRealButton]];
+    self.locationActions.translatesAutoresizingMaskIntoConstraints = NO;
+    self.locationActions.axis = UILayoutConstraintAxisHorizontal;
+    self.locationActions.distribution = UIStackViewDistributionFillEqually;
+    self.locationActions.spacing = 8;
     self.realNoticeLabel = LSLabel(@"", UIFontTextStyleFootnote);
     self.realNoticeLabel.textColor = UIColor.secondaryLabelColor;
     self.realNoticeLabel.hidden = YES;
-    UIStackView *stack = LSStack(@[search, info, self.actionsScroller, self.realNoticeLabel], 14);
+    UIStackView *stack = LSStack(@[search, info, self.locationActions, self.realNoticeLabel], 14);
     [stack setCustomSpacing:16 afterView:search];
     UIView *card = LSGlassPanel(stack, LSRadiusL, 16);
     card.translatesAutoresizingMaskIntoConstraints = NO;
@@ -878,7 +907,6 @@ static void LSSetButtonRadius(UIButton *button, CGFloat radius) {
     container.clipsToBounds = YES;
     container.backgroundColor = UIColor.secondarySystemBackgroundColor;
     container.layer.cornerCurve = kCACornerCurveContinuous;
-    container.layer.maskedCorners = kCALayerMinXMaxYCorner | kCALayerMaxXMaxYCorner;
     __weak typeof(self) weakSelf = self;
     container.didLayout = ^{ [weakSelf mapContainerDidLayout]; };
     self.mapContainer = container;
@@ -966,18 +994,25 @@ static void LSSetButtonRadius(UIButton *button, CGFloat radius) {
     // rather than shrinking to nothing behind it.
     self.mapMinimumVisible = [guide.heightAnchor constraintGreaterThanOrEqualToConstant:150];
     self.cardBottom = [self.locationDetails.bottomAnchor constraintEqualToAnchor:container.bottomAnchor constant:-120];
-    NSLayoutConstraint *cardWidth = [self.locationDetails.widthAnchor constraintEqualToAnchor:safe.widthAnchor constant:-24];
-    cardWidth.priority = UILayoutPriorityDefaultHigh;
     // Clear of the Maps logo and legal link in the bottom corners.
     NSLayoutConstraint *hintWidth = [self.mapHintView.widthAnchor constraintLessThanOrEqualToAnchor:guide.widthAnchor constant:-128];
     hintWidth.priority = 999;
     NSLayoutConstraint *stateWidth = [self.mapStateView.widthAnchor constraintLessThanOrEqualToAnchor:guide.widthAnchor constant:-24];
     stateWidth.priority = 999;
+    NSLayoutConstraint *guideLeading = [guide.leadingAnchor constraintEqualToAnchor:container.leadingAnchor constant:12];
+    NSLayoutConstraint *guideTrailing = [guide.trailingAnchor constraintEqualToAnchor:container.trailingAnchor constant:-12];
+    guideLeading.priority = UILayoutPriorityDefaultLow;
+    guideTrailing.priority = UILayoutPriorityDefaultLow;
     NSLayoutConstraint *stateCenter = [self.mapStateView.centerYAnchor constraintEqualToAnchor:guide.centerYAnchor];
     stateCenter.priority = UILayoutPriorityDefaultHigh;
     [NSLayoutConstraint activateConstraints:@[
-        [guide.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor constant:12],
-        [guide.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor constant:-12],
+        // 12 pt inside the map and the safe area, whichever is tighter: on Route the map is an
+        // inset card, and its controls must not hang over its rounded edge.
+        guideLeading, guideTrailing,
+        [guide.leadingAnchor constraintGreaterThanOrEqualToAnchor:safe.leadingAnchor constant:12],
+        [guide.leadingAnchor constraintGreaterThanOrEqualToAnchor:container.leadingAnchor constant:12],
+        [guide.trailingAnchor constraintLessThanOrEqualToAnchor:safe.trailingAnchor constant:-12],
+        [guide.trailingAnchor constraintLessThanOrEqualToAnchor:container.trailingAnchor constant:-12],
         self.mapGuideTop, self.mapGuideToBottom,
         [self.mapControls.topAnchor constraintEqualToAnchor:guide.topAnchor],
         [self.mapControls.trailingAnchor constraintEqualToAnchor:guide.trailingAnchor],
@@ -989,11 +1024,9 @@ static void LSSetButtonRadius(UIButton *button, CGFloat radius) {
         [self.mapStateView.topAnchor constraintGreaterThanOrEqualToAnchor:guide.topAnchor],
         [self.mapStateView.widthAnchor constraintLessThanOrEqualToConstant:340],
         stateWidth, stateCenter,
-        [self.locationDetails.centerXAnchor constraintEqualToAnchor:safe.centerXAnchor],
-        [self.locationDetails.leadingAnchor constraintGreaterThanOrEqualToAnchor:safe.leadingAnchor constant:12],
-        [self.locationDetails.widthAnchor constraintLessThanOrEqualToConstant:kLSColumnWidth],
-        cardWidth, self.cardBottom
+        self.cardBottom
     ]];
+    [NSLayoutConstraint activateConstraints:LSColumnConstraints(self.locationDetails, safe)];
     [self installCompass];
 }
 - (void)installCompass {
@@ -1064,21 +1097,34 @@ static void LSSetButtonRadius(UIButton *button, CGFloat radius) {
     [self installCompass];
 }
 - (void)layoutFloatingSurfaces {
-    CGFloat height = self.view.bounds.size.height;
+    CGSize size = self.view.bounds.size;
+    CGFloat height = size.height;
     if (height <= 0 || !self.chromeView.superview || !self.mapGuideTop) return;
     BOOL location = self.tab == LSPickerTabLocation;
+    UIEdgeInsets safe = self.view.safeAreaInsets;
     CGFloat top = CGRectGetMaxY(self.chromeView.frame) + kLSFloatGap;
     CGFloat bottom = !self.footerShown ? 0 : MAX(0, height - CGRectGetMinY(self.footerView.frame)) + kLSFloatGap;
-    LSSetConstant(self.mapGuideTop, top);
-    LSSetConstant(self.cardBottom, -MAX(bottom, self.view.safeAreaInsets.bottom + 12));
+    LSSetConstant(self.cardBottom, -MAX(bottom, safe.bottom + 12));
     LSSetConstant(self.savedBottom, -bottom);
     LSSetConstant(self.mapMinimumVisible, height < 500 ? 90 : 150);
-    // Location: the map is the whole sheet. Route: a generous map with the planner below.
-    CGFloat routeMap = top + MAX(240, (height - top) * 0.45);
-    LSSetConstant(self.mapHeight, location ? height : routeMap);
-    UIEdgeInsets inset = UIEdgeInsetsMake(0, 0, location ? 0 : bottom, 0);
+    // Location: the map is the whole sheet, under the floating header and footer. Route: the
+    // scroll view sits between them, so nothing scrolls behind the header, peeks out around it
+    // or shows below the footer buttons.
+    LSSetConstant(self.scrollTop, location ? 0 : top);
+    LSSetConstant(self.scrollBottom, location ? 0 : -bottom);
+    LSSetConstant(self.mapGuideTop, location ? top : 12);
+    // Route: the map is a card in the same column as the planner below it.
+    CGFloat column = MAX(16, (size.width - kLSColumnWidth) / 2);
+    CGFloat leading = location ? 0 : MAX(column, safe.left + 16), trailing = location ? 0 : MAX(column, safe.right + 16);
+    NSDirectionalEdgeInsets margins = NSDirectionalEdgeInsetsMake(0, leading, 0, trailing);
+    NSDirectionalEdgeInsets current = self.contentStack.directionalLayoutMargins;
+    if (current.leading != margins.leading || current.trailing != margins.trailing) self.contentStack.directionalLayoutMargins = margins;
+    CGFloat available = height - (location ? 0 : top + bottom);
+    LSSetConstant(self.mapHeight, location ? height : MIN(400, MAX(220, available * 0.45)));
+    // With the footer hidden the content still clears the home indicator.
+    UIEdgeInsets inset = UIEdgeInsetsMake(0, 0, location || bottom > 0 ? 0 : safe.bottom, 0);
     if (!UIEdgeInsetsEqualToEdgeInsets(self.scroll.contentInset, inset)) self.scroll.contentInset = inset;
-    UIEdgeInsets indicators = UIEdgeInsetsMake(top, 0, bottom, 0);
+    UIEdgeInsets indicators = location ? UIEdgeInsetsMake(top, 0, bottom, 0) : UIEdgeInsetsZero;
     if (!UIEdgeInsetsEqualToEdgeInsets(self.scroll.verticalScrollIndicatorInsets, indicators)) self.scroll.verticalScrollIndicatorInsets = indicators;
 }
 - (void)mapContainerDidLayout {
@@ -1140,10 +1186,17 @@ static void LSSetButtonRadius(UIButton *button, CGFloat radius) {
     UILayoutConstraintAxis axis = large ? UILayoutConstraintAxisVertical : UILayoutConstraintAxisHorizontal;
     if (self.locationActions.axis == axis) return;
     self.locationActions.axis = axis;
-    self.locationActions.alignment = large ? UIStackViewAlignmentFill : UIStackViewAlignmentCenter;
-    self.actionsFillWidth.active = large;
-    self.actionsScroller.scrollEnabled = !large;
-    [self.actionsScroller setContentOffset:CGPointZero animated:NO];
+    self.locationActions.distribution = large ? UIStackViewDistributionFill : UIStackViewDistributionFillEqually;
+    // Full-width rows read left to right, with titles that wrap instead of truncating.
+    for (UIButton *button in self.locationActions.arrangedSubviews) {
+        UIButtonConfiguration *config = button.configuration;
+        config.imagePlacement = large ? NSDirectionalRectEdgeLeading : NSDirectionalRectEdgeTop;
+        config.imagePadding = large ? 10 : 4;
+        config.titleLineBreakMode = large ? NSLineBreakByWordWrapping : NSLineBreakByTruncatingTail;
+        config.contentInsets = large ? NSDirectionalEdgeInsetsMake(12, 16, 12, 16) : NSDirectionalEdgeInsetsMake(10, 2, 9, 2);
+        button.configuration = config;
+        button.contentHorizontalAlignment = large ? UIControlContentHorizontalAlignmentLeading : UIControlContentHorizontalAlignmentCenter;
+    }
 }
 - (void)updateMapStyleButton {
     UIButtonConfiguration *config = self.mapStyleButton.configuration;
@@ -1303,13 +1356,7 @@ static void LSSetButtonRadius(UIButton *button, CGFloat radius) {
     self.coordinateLabel.accessibilityLabel = [NSString stringWithFormat:@"Coordinates %@", self.coordinateLabel.text];
     self.coordinateCopyButton.hidden = NO;
     self.coordinateCopyButton.enabled = YES;
-    LSBookmark *saved = [BookmarksManager.shared bookmarkNearCoordinate:coordinate];
-    UIButtonConfiguration *save = self.savePlaceButton.configuration;
-    save.title = saved ? @"Saved" : @"Save";
-    save.image = [UIImage systemImageNamed:saved ? @"bookmark.fill" : @"bookmark"];
-    self.savePlaceButton.configuration = save;
-    self.savePlaceButton.accessibilityLabel = saved ? [NSString stringWithFormat:@"Saved as %@", saved.name] : @"Save place";
-    [self updateRadiusChip:saved];
+    [self updateSaveAction:[BookmarksManager.shared bookmarkNearCoordinate:coordinate]];
     [self updatePlaceStatus];
     [self updateRadiusPreview];
     [self updateFooter];
@@ -1382,8 +1429,8 @@ static void LSSetButtonRadius(UIButton *button, CGFloat radius) {
     self.scroll.hidden = saved;
     self.scroll.alwaysBounceVertical = !location;
     self.mapView.showsScale = !route;
-    // On Route the map ends above the planner, so its lower corners round off.
-    self.mapContainer.layer.cornerRadius = route ? LSRadiusL : 0;
+    // On Route the map is a card like the planner below it; on Location it runs edge to edge.
+    self.mapContainer.layer.cornerRadius = route ? LSRadiusM : 0;
     [self setMapGuideForLocation:location];
     // A renamed saved place shows its new name in the header.
     self.appliedName = nil;
@@ -1522,9 +1569,10 @@ static void LSSetButtonRadius(UIButton *button, CGFloat radius) {
     } else if (mode == LSSessionModeStatic) {
         title = [self appliedPlaceName];
         // The held spot, not the wandering sample, so the line stays calm.
+        // Coordinates stay out of the header: the place card and the Saved rows show them, and
+        // a long press on the name copies them.
         PersistenceManager *store = PersistenceManager.shared;
         NSString *coordinates = LSCoordinateText(store.hasStoredCoordinate ? store.spoofCoordinate : location.coordinate);
-        if (self.tab != LSPickerTabLocation) detail = coordinates;
         spoken = [NSString stringWithFormat:@"Coordinates %@", coordinates];
     } else {
         LSRouteSimulator *engine = LSRouteSimulator.shared;
@@ -1543,11 +1591,10 @@ static void LSSetButtonRadius(UIButton *button, CGFloat radius) {
         self.statusStack.accessibilityTraits = mode == LSSessionModeMoving ? UIAccessibilityTraitUpdatesFrequently : UIAccessibilityTraitNone;
         self.statusProgress.fillColor = LSSessionColor(mode);
     }
-    // 0: no line, 1: route progress (rounded digits), 2: held coordinates (monospaced).
-    NSInteger kind = !detail ? 0 : (playing ? 1 : 2);
+    // 0: no line, 1: route progress (rounded digits).
+    NSInteger kind = detail ? 1 : 0;
     if (kind != self.statusDetailKind) {
         self.statusDetailKind = kind;
-        if (kind) self.appliedLabel.font = kind == 1 ? LSNumberFont(UIFontTextStyleFootnote, UIFontWeightMedium, 22) : LSMonoFont(UIFontTextStyleFootnote, UIFontWeightMedium, 22);
         if (kind) self.appliedLabel.text = detail;
         LSSetHidden(self.appliedLabel, kind == 0, animated);
         [self.view setNeedsLayout];
@@ -2020,15 +2067,33 @@ static void LSSetButtonRadius(UIButton *button, CGFloat radius) {
     share.popoverPresentationController.sourceRect = anchor == source ? source.bounds : CGRectMake(CGRectGetMidX(self.view.bounds), CGRectGetMidY(self.view.bounds), 1, 1);
     [self presentViewController:share animated:LSMapAnimationsEnabled() completion:nil];
 }
-- (void)updateRadiusChip:(LSBookmark *)saved {
-    self.radiusChip.hidden = saved == nil;
-    if (!saved) return;
-    NSString *title = !isfinite(saved.radius) ? @"Wander: default" : (saved.radius > 0 ? [NSString stringWithFormat:@"Wander %@ m", LSFormatDecimal(saved.radius, 0)] : @"No wander");
-    UIButtonConfiguration *config = self.radiusChip.configuration;
-    config.title = title;
-    self.radiusChip.configuration = config;
-    self.radiusChip.accessibilityLabel = [NSString stringWithFormat:@"Wander radius for %@: %@", saved.name, title];
-    self.radiusChip.menu = [self radiusMenuForBookmark:saved];
+// A saved spot's tile reads Saved and opens a menu: its wander radius, or another copy.
+- (void)updateSaveAction:(LSBookmark *)saved {
+    UIButton *button = self.savePlaceButton;
+    UIButtonConfiguration *config = button.configuration;
+    config.title = saved ? @"Saved" : @"Save";
+    config.image = [UIImage systemImageNamed:saved ? @"bookmark.fill" : @"bookmark"];
+    button.configuration = config;
+    button.largeContentTitle = config.title;
+    button.showsMenuAsPrimaryAction = saved != nil;
+    if (!saved) {
+        button.menu = nil;
+        button.accessibilityLabel = @"Save place";
+        button.accessibilityHint = nil;
+        return;
+    }
+    NSString *wander = !isfinite(saved.radius) ? @"default wander" : (saved.radius > 0 ? [NSString stringWithFormat:@"wanders %@ m", LSFormatDecimal(saved.radius, 0)] : @"stays put");
+    button.accessibilityLabel = [NSString stringWithFormat:@"Saved as %@, %@", saved.name, wander];
+    button.accessibilityHint = @"Shows the wander radius and save options.";
+    __weak typeof(self) weakSelf = self;
+    UIAction *copy = [UIAction actionWithTitle:@"Save another copy" image:[UIImage systemImageNamed:@"plus.square.on.square"] identifier:nil handler:^(__unused UIAction *action) {
+        [weakSelf saveSelectedPlace];
+    }];
+    button.menu = [UIMenu menuWithTitle:saved.name children:@[[self radiusMenuForBookmark:saved], copy]];
+}
+- (void)saveTapped {
+    // A saved spot's tile opens its menu instead.
+    if (!self.savePlaceButton.showsMenuAsPrimaryAction) [self saveSelectedPlace];
 }
 
 #pragma mark - Editors
