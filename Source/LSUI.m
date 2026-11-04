@@ -450,6 +450,88 @@ NSString *LSRelativeDate(NSDate *date) {
     return [formatter localizedStringForDate:date relativeToDate:NSDate.date];
 }
 
+// MARK: - Design foundation
+const CGFloat LSSpaceXS = 4, LSSpaceS = 8, LSSpaceM = 12, LSSpaceL = 16, LSSpaceXL = 24;
+const CGFloat LSRadiusS = 12, LSRadiusM = 20, LSRadiusL = 28;
+
+BOOL LSReduceTransparency(void) { return UIAccessibilityIsReduceTransparencyEnabled(); }
+BOOL LSIncreaseContrast(void) { return UIAccessibilityDarkerSystemColorsEnabled(); }
+BOOL LSDifferentiateWithoutColor(void) { return UIAccessibilityShouldDifferentiateWithoutColor(); }
+BOOL LSLiquidGlassAvailable(void) { return NSClassFromString(@"UIGlassEffect") != Nil; }
+
+UIVisualEffectView *LSGlassView(CGFloat cornerRadius, BOOL interactive) {
+    UIVisualEffect *effect = nil;
+    // UIGlassEffect is newer than the SDK this builds with, so it is looked up at run time.
+    Class glass = NSClassFromString(@"UIGlassEffect");
+    if (glass && [glass isSubclassOfClass:UIVisualEffect.class]) {
+        effect = [[glass alloc] init];
+        if (interactive) {
+            @try { [effect setValue:@YES forKey:@"interactive"]; } @catch (__unused NSException *e) {}
+        }
+    }
+    if (!effect) effect = [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterial];
+    UIVisualEffectView *view = [[UIVisualEffectView alloc] initWithEffect:effect];
+    view.translatesAutoresizingMaskIntoConstraints = NO;
+    view.layer.cornerRadius = cornerRadius;
+    view.layer.cornerCurve = kCACornerCurveContinuous;
+    view.clipsToBounds = YES;
+    return view;
+}
+
+static void LSRunSpring(NSTimeInterval duration, CGFloat damping, CGFloat velocity, dispatch_block_t animations, dispatch_block_t completion) {
+    if (!animations) return;
+    BOOL motion = LSMapAnimationsEnabled();
+    [UIView animateWithDuration:motion ? duration : 0.2 delay:0
+         usingSpringWithDamping:motion ? damping : 1.0 initialSpringVelocity:motion ? velocity : 0
+                        options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
+                     animations:animations
+                     completion:^(__unused BOOL finished) { if (completion) completion(); }];
+}
+void LSAnimate(dispatch_block_t animations, dispatch_block_t completion) { LSRunSpring(0.42, 0.88, 0.2, animations, completion); }
+void LSAnimateBouncy(dispatch_block_t animations, dispatch_block_t completion) { LSRunSpring(0.5, 0.68, 0.6, animations, completion); }
+
+@interface LSPressFeedback : NSObject @end
+@implementation LSPressFeedback
++ (void)down:(UIControl *)control {
+    if (!LSMapAnimationsEnabled()) return;
+    [UIView animateWithDuration:0.12 delay:0 options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
+                     animations:^{ control.transform = CGAffineTransformMakeScale(0.96, 0.96); } completion:nil];
+}
++ (void)up:(UIControl *)control {
+    LSAnimateBouncy(^{ control.transform = CGAffineTransformIdentity; }, nil);
+}
+@end
+void LSAddPressFeedback(UIControl *control) {
+    [control addTarget:LSPressFeedback.class action:@selector(down:) forControlEvents:UIControlEventTouchDown | UIControlEventTouchDragEnter];
+    [control addTarget:LSPressFeedback.class action:@selector(up:) forControlEvents:UIControlEventTouchUpInside | UIControlEventTouchUpOutside | UIControlEventTouchCancel | UIControlEventTouchDragExit];
+}
+void LSHapticImpact(UIImpactFeedbackStyle style) { [[[UIImpactFeedbackGenerator alloc] initWithStyle:style] impactOccurred]; }
+void LSHapticError(void) { [[[UINotificationFeedbackGenerator alloc] init] notificationOccurred:UINotificationFeedbackTypeError]; }
+
+UIView *LSEmptyState(NSString *symbol, NSString *title, NSString *message, UIButton *action) {
+    UIImageView *icon = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:symbol]];
+    icon.tintColor = UIColor.tertiaryLabelColor;
+    icon.contentMode = UIViewContentModeScaleAspectFit;
+    icon.preferredSymbolConfiguration = [UIImageSymbolConfiguration configurationWithTextStyle:UIFontTextStyleLargeTitle scale:UIImageSymbolScaleLarge];
+    icon.isAccessibilityElement = NO;
+    UILabel *titleLabel = LSLabel(title, UIFontTextStyleTitle3);
+    titleLabel.font = LSFont(UIFontTextStyleTitle3, UIFontWeightSemibold, 32);
+    titleLabel.textAlignment = NSTextAlignmentCenter;
+    titleLabel.accessibilityTraits = UIAccessibilityTraitHeader;
+    UILabel *messageLabel = LSLabel(message, UIFontTextStyleSubheadline);
+    messageLabel.textColor = UIColor.secondaryLabelColor;
+    messageLabel.textAlignment = NSTextAlignmentCenter;
+    NSMutableArray<UIView *> *views = [NSMutableArray arrayWithObjects:icon, titleLabel, messageLabel, nil];
+    if (action) [views addObject:action];
+    UIStackView *stack = LSStack(views, LSSpaceS);
+    stack.alignment = UIStackViewAlignmentCenter;
+    [stack setCustomSpacing:LSSpaceM afterView:icon];
+    if (action) [stack setCustomSpacing:LSSpaceL afterView:messageLabel];
+    stack.layoutMargins = UIEdgeInsetsMake(LSSpaceXL, LSSpaceXL, LSSpaceXL, LSSpaceXL);
+    stack.layoutMarginsRelativeArrangement = YES;
+    return stack;
+}
+
 @interface LSStatusChip ()
 @property (nonatomic, strong) UIView *dot;
 @property (nonatomic, strong) UILabel *label;

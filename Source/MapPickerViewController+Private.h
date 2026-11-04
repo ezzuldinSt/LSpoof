@@ -170,4 +170,12 @@ typedef NS_ENUM(NSInteger, LSEndpoint) { LSEndpointFrom, LSEndpointStop, LSEndpo
 // Wander radius choices for a saved place, as a submenu.
 - (UIMenu *)radiusMenuForBookmark:(LSBookmark *)place;
 @end
+// Per-area additions. Each screen owner adds its own properties and declarations in its
+// own block so concurrent work on the picker does not collide.
+@interface MapPickerViewController () // Shell, header, Location tab and footer (MapPickerViewController.m)
+@end
+@interface MapPickerViewController () // Route planner and playback (MapPickerViewController+Route.m)
+@end
+@interface MapPickerViewController () // Saved places (MapPickerViewController+Bookmarks.m)
+@end
 NS_ASSUME_NONNULL_END

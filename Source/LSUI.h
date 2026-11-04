@@ -48,6 +48,35 @@ FOUNDATION_EXPORT NSString *LSFormatDecimal(double value, NSUInteger fractionDig
 FOUNDATION_EXPORT NSString *LSCoordinateText(CLLocationCoordinate2D coordinate);
 FOUNDATION_EXPORT NSString *LSRelativeDate(NSDate *date);
 
+// MARK: - Design foundation (shared by every screen)
+// Spacing and corner scale. Nested corners should be concentric: inner = outer - inset.
+FOUNDATION_EXPORT const CGFloat LSSpaceXS;  // 4
+FOUNDATION_EXPORT const CGFloat LSSpaceS;   // 8
+FOUNDATION_EXPORT const CGFloat LSSpaceM;   // 12
+FOUNDATION_EXPORT const CGFloat LSSpaceL;   // 16
+FOUNDATION_EXPORT const CGFloat LSSpaceXL;  // 24
+FOUNDATION_EXPORT const CGFloat LSRadiusS;  // 12, fields and small controls
+FOUNDATION_EXPORT const CGFloat LSRadiusM;  // 20, cards
+FOUNDATION_EXPORT const CGFloat LSRadiusL;  // 28, floating panels and sheets
+// YES when the OS offers the system Liquid Glass material (iOS 26 and later).
+FOUNDATION_EXPORT BOOL LSLiquidGlassAvailable(void);
+// Floating material surface for controls and panels that sit over the map. Uses Liquid
+// Glass when available, otherwise a system blur material. Put content in contentView.
+FOUNDATION_EXPORT UIVisualEffectView *LSGlassView(CGFloat cornerRadius, BOOL interactive);
+// Standard spring (about 0.4 s, no overshoot) and a livelier one for small confirmations.
+// Both respect Reduce Motion by running a short cross-fade-length animation instead.
+FOUNDATION_EXPORT void LSAnimate(dispatch_block_t animations, dispatch_block_t _Nullable completion);
+FOUNDATION_EXPORT void LSAnimateBouncy(dispatch_block_t animations, dispatch_block_t _Nullable completion);
+// Scales a control slightly while pressed and springs it back on release.
+FOUNDATION_EXPORT void LSAddPressFeedback(UIControl *control);
+FOUNDATION_EXPORT void LSHapticImpact(UIImpactFeedbackStyle style);
+FOUNDATION_EXPORT void LSHapticError(void);
+FOUNDATION_EXPORT BOOL LSReduceTransparency(void);
+FOUNDATION_EXPORT BOOL LSIncreaseContrast(void);
+FOUNDATION_EXPORT BOOL LSDifferentiateWithoutColor(void);
+// Centered zero state: large symbol, title, message and an optional action.
+FOUNDATION_EXPORT UIView *LSEmptyState(NSString *symbol, NSString *title, NSString *message, UIButton * _Nullable action);
+
 // Colored dot and label describing the applied session.
 @interface LSStatusChip : UIView
 - (void)setTitle:(NSString *)title color:(UIColor *)color active:(BOOL)active;
