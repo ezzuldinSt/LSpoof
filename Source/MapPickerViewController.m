@@ -112,6 +112,87 @@ static void LSSetButtonRadius(UIButton *button, CGFloat radius) {
 }
 @end
 
+// Thin capsule under the header that fills as a route plays. Each 4 Hz refresh glides the fill
+// linearly to the new value, so it moves continuously instead of stepping.
+@interface LSProgressCapsule : UIView
+@property (nonatomic, strong) UIColor *fillColor;
+@property (nonatomic, readonly) double progress;
+- (void)setProgress:(double)progress animated:(BOOL)animated;
+@end
+@implementation LSProgressCapsule {
+    CALayer *_fill;
+    CGSize _laidOutSize;
+}
+- (instancetype)initWithFrame:(CGRect)frame {
+    if ((self = [super initWithFrame:frame])) {
+        self.translatesAutoresizingMaskIntoConstraints = NO;
+        self.userInteractionEnabled = NO;
+        self.isAccessibilityElement = NO;
+        self.backgroundColor = UIColor.tertiarySystemFillColor;
+        self.layer.masksToBounds = YES;
+        _fill = [CALayer layer];
+        _fill.anchorPoint = CGPointMake(0, 0.5);
+        [self.layer addSublayer:_fill];
+        _fillColor = LSAccentColor();
+        [self resolveFill];
+    }
+    return self;
+}
+- (CGSize)intrinsicContentSize { return CGSizeMake(UIViewNoIntrinsicMetric, 3); }
+- (void)resolveFill {
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    _fill.backgroundColor = [_fillColor resolvedColorWithTraitCollection:self.traitCollection].CGColor;
+    [CATransaction commit];
+}
+- (void)setFillColor:(UIColor *)fillColor {
+    _fillColor = fillColor ?: LSAccentColor();
+    [self resolveFill];
+}
+- (void)traitCollectionDidChange:(UITraitCollection *)previous {
+    [super traitCollectionDidChange:previous];
+    [self resolveFill];
+}
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    CGRect bounds = self.bounds;
+    // Text beside it changes every tick; only a real size change may cut a glide short.
+    if (CGSizeEqualToSize(bounds.size, _laidOutSize)) return;
+    _laidOutSize = bounds.size;
+    self.layer.cornerRadius = bounds.size.height / 2;
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    [_fill removeAnimationForKey:@"glide"];
+    _fill.cornerRadius = bounds.size.height / 2;
+    _fill.position = CGPointMake(0, CGRectGetMidY(bounds));
+    _fill.bounds = CGRectMake(0, 0, bounds.size.width * _progress, bounds.size.height);
+    [CATransaction commit];
+}
+- (void)setProgress:(double)progress animated:(BOOL)animated {
+    progress = MIN(1, MAX(0, isfinite(progress) ? progress : 0));
+    if (fabs(progress - _progress) < 0.0005) return;
+    _progress = progress;
+    CGRect bounds = self.bounds;
+    CGFloat from = ((CALayer *)_fill.presentationLayer ?: _fill).bounds.size.width;
+    CGFloat to = bounds.size.width * progress;
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    _fill.bounds = CGRectMake(0, 0, to, bounds.size.height);
+    // Small steps glide; a jump (seek, replay, restart) snaps.
+    if (animated && self.window && LSMapAnimationsEnabled() && fabs(to - from) < bounds.size.width * 0.2) {
+        CABasicAnimation *glide = [CABasicAnimation animationWithKeyPath:@"bounds.size.width"];
+        glide.fromValue = @(from);
+        glide.toValue = @(to);
+        glide.duration = 0.25;
+        glide.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionLinear];
+        [_fill addAnimation:glide forKey:@"glide"];
+    } else {
+        [_fill removeAnimationForKey:@"glide"];
+    }
+    [CATransaction commit];
+}
+@end
+
 // The applied spot and the real location are drawn as location dots rather than pins, so they
 // read as "where the app thinks you are" instead of as places you picked. The applied dot keeps
 // a soft pulse while a session is live, and its arrow follows the route heading.
@@ -315,6 +396,10 @@ static void LSSetButtonRadius(UIButton *button, CGFloat radius) {
 @property (nonatomic, weak) NSLayoutConstraint *scheduleButtonHeight;
 @property (nonatomic, strong) NSMutableDictionary<NSNumber *, UIColor *> *puckColors;
 @property (nonatomic, copy) NSString *geocodedName;
+@property (nonatomic, strong) LSProgressCapsule *statusProgress;
+@property (nonatomic) NSInteger statusDetailKind;
+@property (nonatomic) BOOL footerShown;
+@property (nonatomic) BOOL scheduleDotShown;
 @property (nonatomic) CLLocationCoordinate2D geocodedCoordinate;
 @end
 
@@ -350,6 +435,7 @@ static void LSSetButtonRadius(UIButton *button, CGFloat radius) {
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(sceneDeactivated:) name:UISceneWillDeactivateNotification object:nil];
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(sceneActivated:) name:UISceneDidActivateNotification object:nil];
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(scheduleChanged:) name:LSSchedulerDidChangeNotification object:nil];
+    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(differentiateWithoutColorChanged:) name:UIAccessibilityShouldDifferentiateWithoutColorDidChangeNotification object:nil];
     [self updateScheduleBanner];
 }
 - (void)viewWillAppear:(BOOL)animated {
@@ -447,6 +533,8 @@ static void LSSetButtonRadius(UIButton *button, CGFloat radius) {
     UIStackView *row = self.footerPrimaryRow;
     row.axis = large ? UILayoutConstraintAxisVertical : UILayoutConstraintAxisHorizontal;
     row.alignment = large ? UIStackViewAlignmentFill : UIStackViewAlignmentCenter;
+    // Required hugging would fight the full-width fill.
+    [self.scheduleButton setContentHuggingPriority:large ? UILayoutPriorityDefaultLow : UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
     self.scheduleButtonHeight.priority = large ? UILayoutPriorityDefaultLow : 999;
     UIButtonConfiguration *clock = self.scheduleButton.configuration;
     clock.title = large ? @"Schedule" : nil;
@@ -460,9 +548,9 @@ static void LSSetButtonRadius(UIButton *button, CGFloat radius) {
 #pragma mark - Layout
 
 - (UIView *)buildChrome {
-    // What is happening now leads: status capsule and the applied place in large type. Its
-    // coordinates live in the place card (and the spoken value); only a playing route adds a
-    // progress line. No branding competes with it.
+    // What is happening now leads: status capsule and the applied place in large type. A playing
+    // route adds its progress line and bar; a held spot shows its coordinates off the Location
+    // tab (on it, the place card shows them). No branding competes with it.
     self.statusChip = [[LSStatusChip alloc] init];
     UIStackView *chipRow = LSStack(@[self.statusChip], 0);
     chipRow.alignment = UIStackViewAlignmentLeading;
@@ -476,8 +564,11 @@ static void LSSetButtonRadius(UIButton *button, CGFloat radius) {
     self.appliedLabel.adjustsFontSizeToFitWidth = YES;
     self.appliedLabel.minimumScaleFactor = 0.75;
     self.appliedLabel.hidden = YES;
-    self.statusStack = LSStack(@[chipRow, self.brandLabel, self.appliedLabel], 2);
+    self.statusProgress = [[LSProgressCapsule alloc] initWithFrame:CGRectZero];
+    self.statusProgress.hidden = YES;
+    self.statusStack = LSStack(@[chipRow, self.brandLabel, self.appliedLabel, self.statusProgress], 2);
     [self.statusStack setCustomSpacing:6 afterView:chipRow];
+    [self.statusStack setCustomSpacing:6 afterView:self.appliedLabel];
     self.statusStack.isAccessibilityElement = YES;
     [self.statusStack setContentHuggingPriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
     [self.statusStack setContentCompressionResistancePriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
@@ -620,6 +711,7 @@ static void LSSetButtonRadius(UIButton *button, CGFloat radius) {
         width, bottom
     ]];
     self.footerView = footer;
+    self.footerShown = YES;
 }
 - (void)buildLocationDetails {
     UIButtonConfiguration *searchStyle = UIButtonConfiguration.grayButtonConfiguration;
@@ -942,7 +1034,7 @@ static void LSSetButtonRadius(UIButton *button, CGFloat radius) {
     if (height <= 0 || !self.chromeView.superview || !self.mapGuideTop) return;
     BOOL location = self.tab == LSPickerTabLocation;
     CGFloat top = CGRectGetMaxY(self.chromeView.frame) + kLSFloatGap;
-    CGFloat bottom = self.footerView.hidden ? 0 : MAX(0, height - CGRectGetMinY(self.footerView.frame)) + kLSFloatGap;
+    CGFloat bottom = !self.footerShown ? 0 : MAX(0, height - CGRectGetMinY(self.footerView.frame)) + kLSFloatGap;
     LSSetConstant(self.mapGuideTop, top);
     LSSetConstant(self.cardBottom, -MAX(bottom, self.view.safeAreaInsets.bottom + 12));
     LSSetConstant(self.savedBottom, -bottom);
@@ -1272,6 +1364,8 @@ static void LSSetButtonRadius(UIButton *button, CGFloat radius) {
     [self updateRadiusPreview];
     self.footerKey = nil;
     [self updateFooter];
+    // The header shows held coordinates only off the Location tab.
+    [self updateStatusForSnapshot:LSSessionController.shared.snapshot];
     if (saved) self.savedHeaderDirty = YES;
     [self.view setNeedsLayout];
 }
@@ -1342,7 +1436,7 @@ static void LSSetButtonRadius(UIButton *button, CGFloat radius) {
 - (void)showMessage:(NSString *)message { [self showMessage:message symbol:nil]; }
 - (void)showMessage:(NSString *)message symbol:(NSString *)symbol {
     // Above the footer, so the status header stays readable.
-    LSShowToastAbove(self.view, self.footerView.hidden ? nil : self.footerView, message, symbol);
+    LSShowToastAbove(self.view, [self toastAnchorView], message, symbol);
 }
 
 #pragma mark - Session
@@ -1387,33 +1481,50 @@ static void LSSetButtonRadius(UIButton *button, CGFloat radius) {
     CLLocation *location = snapshot.location;
     BOOL playing = location && (mode == LSSessionModeMoving || mode == LSSessionModePaused);
     NSString *title, *detail = nil, *spoken;
+    double progress = 0;
     if (mode == LSSessionModeOff || !location) {
         title = @"Nothing applied";
         spoken = @"Your app sees its real location";
     } else if (mode == LSSessionModeStatic) {
         title = [self appliedPlaceName];
-        // The held spot, not the wandering sample, so the value stays calm.
+        // The held spot, not the wandering sample, so the line stays calm.
         PersistenceManager *store = PersistenceManager.shared;
-        spoken = [NSString stringWithFormat:@"Coordinates %@", LSCoordinateText(store.hasStoredCoordinate ? store.spoofCoordinate : location.coordinate)];
+        NSString *coordinates = LSCoordinateText(store.hasStoredCoordinate ? store.spoofCoordinate : location.coordinate);
+        if (self.tab != LSPickerTabLocation) detail = coordinates;
+        spoken = [NSString stringWithFormat:@"Coordinates %@", coordinates];
     } else {
         LSRouteSimulator *engine = LSRouteSimulator.shared;
         double total = engine.totalDistance;
-        double progress = total > 0 ? MIN(1, engine.distanceCovered / total) : 0;
+        progress = total > 0 ? MIN(1, engine.distanceCovered / total) : 0;
         NSString *name = LSSessionController.shared.retainedRoute.name;
         title = name.length ? name : @"Route";
         detail = [NSString stringWithFormat:@"%.0f%% done", floor(progress * 100)];
         if (total > 0) detail = [detail stringByAppendingFormat:@" · %@ to go", [self distanceText:MAX(0, total - engine.distanceCovered)]];
         spoken = detail;
     }
+    BOOL animated = self.view.window != nil;
     if (mode != self.statusMode) {
         self.statusMode = mode;
         self.statusStack.accessibilityCustomActions = [self statusActionsForMode:mode];
         self.statusStack.accessibilityTraits = mode == LSSessionModeMoving ? UIAccessibilityTraitUpdatesFrequently : UIAccessibilityTraitNone;
+        self.statusProgress.fillColor = LSSessionColor(mode);
     }
-    if (self.appliedLabel.hidden == playing) {
-        LSSetHidden(self.appliedLabel, !playing, self.view.window != nil);
+    // 0: no line, 1: route progress (rounded digits), 2: held coordinates (monospaced).
+    NSInteger kind = !detail ? 0 : (playing ? 1 : 2);
+    if (kind != self.statusDetailKind) {
+        self.statusDetailKind = kind;
+        if (kind) self.appliedLabel.font = kind == 1 ? LSNumberFont(UIFontTextStyleFootnote, UIFontWeightMedium, 22) : LSMonoFont(UIFontTextStyleFootnote, UIFontWeightMedium, 22);
+        if (kind) self.appliedLabel.text = detail;
+        LSSetHidden(self.appliedLabel, kind == 0, animated);
         [self.view setNeedsLayout];
     }
+    if (self.statusProgress.hidden == playing) {
+        // Starts from where the route is, not with a sweep from zero.
+        if (playing) [self.statusProgress setProgress:progress animated:NO];
+        LSSetHidden(self.statusProgress, !playing, animated);
+        [self.view setNeedsLayout];
+    }
+    if (playing) [self.statusProgress setProgress:progress animated:YES];
     if (![self.brandLabel.text isEqualToString:title]) self.brandLabel.text = title;
     if (detail && ![self.appliedLabel.text isEqualToString:detail]) self.appliedLabel.text = detail;
     NSString *label = [NSString stringWithFormat:@"Status: %@. %@", LSSessionTitle(mode), title];
@@ -1532,7 +1643,6 @@ static void LSSetButtonRadius(UIButton *button, CGFloat radius) {
     self.primaryButton.configuration = primary;
     self.primaryButton.accessibilityLabel = title;
     self.primaryButton.accessibilityHint = applied ? @"This spot is already applied. Pick another place to replace it." : nil;
-    self.primaryButton.hidden = self.tab == LSPickerTabSaved;
     // LSSetButtonEnabled fades the fallback glow too; Liquid Glass never gets one.
     LSSetButtonEnabled(self.primaryButton, self.tab == LSPickerTabRoute ? (controlsCurrentRoute || routeReady) : (self.hasSelection && !applied));
     UIButtonConfiguration *hold = self.holdButton.configuration;
@@ -1541,23 +1651,28 @@ static void LSSetButtonRadius(UIButton *button, CGFloat radius) {
     self.holdButton.configuration = hold;
     self.holdButton.accessibilityLabel = hold.title;
     self.holdButton.accessibilityHint = controlsCurrentRoute ? @"Stops movement and holds the current point." : @"Pause, resume, or stop movement and hold here.";
-    self.holdButton.hidden = !moving;
     self.holdButton.showsMenuAsPrimaryAction = !controlsCurrentRoute;
     __weak typeof(self) weakSelf = self;
     UIAction *pause = [UIAction actionWithTitle:mode == LSSessionModePaused ? @"Resume route" : @"Pause route" image:[UIImage systemImageNamed:mode == LSSessionModePaused ? @"play.fill" : @"pause.fill"] identifier:nil handler:^(__unused UIAction *action) { [weakSelf togglePause]; }];
     UIAction *stop = [UIAction actionWithTitle:@"Stop route and hold here" image:[UIImage systemImageNamed:@"stop.fill"] identifier:nil handler:^(__unused UIAction *action) { [weakSelf holdHere]; }];
     self.holdButton.menu = controlsCurrentRoute ? nil : [UIMenu menuWithTitle:@"Applied route" children:@[pause, stop]];
-    self.playbackRow.hidden = mode == LSSessionModeOff;
-    self.offButton.hidden = mode == LSSessionModeOff;
     self.savePlaceButton.enabled = self.hasSelection;
-    self.scheduleButton.hidden = self.tab == LSPickerTabSaved;
+    // Rows spring in and out, so the footer glass grows and shrinks instead of jumping.
+    BOOL animated = self.view.window != nil;
+    BOOL saved = self.tab == LSPickerTabSaved, off = mode == LSSessionModeOff;
+    LSSetHidden(self.holdButton, !moving, animated);
+    LSSetHidden(self.offButton, off, animated);
+    LSSetHidden(self.playbackRow, off, animated);
+    LSSetHidden(self.footerPrimaryRow, saved, animated);
     // Nothing to show on Saved while off: no empty glass bar.
-    BOOL empty = self.primaryButton.hidden && self.playbackRow.hidden;
-    if (self.footerView.hidden != empty) {
-        self.footerView.hidden = empty;
+    BOOL shown = !(saved && off);
+    if (shown != self.footerShown) {
+        self.footerShown = shown;
+        LSSetHidden(self.footerView, !shown, animated);
         [self.view setNeedsLayout];
     }
 }
+- (UIView *)toastAnchorView { return self.footerShown ? self.footerView : nil; }
 - (void)primaryAction {
     if (self.tab == LSPickerTabRoute) {
         LSSessionMode mode = LSSessionController.shared.snapshot.mode;
@@ -1638,7 +1753,7 @@ static void LSSetButtonRadius(UIButton *button, CGFloat radius) {
     NSString *message = @"Spoofing is off. Your app sees its real location.";
     if (!held) { [self showMessage:message symbol:@"location.slash.fill"]; return; }
     __weak typeof(self) weakSelf = self;
-    LSShowActionToast(self.view, self.footerView.hidden ? nil : self.footerView, message, @"location.slash.fill", @"Apply again", ^{
+    LSShowActionToast(self.view, [self toastAnchorView], message, @"location.slash.fill", @"Apply again", ^{
         typeof(self) self = weakSelf;
         if (!self || self.closed || LSSessionController.shared.snapshot.mode != LSSessionModeOff) return;
         [self applyCoordinate:previous name:name];
@@ -1660,42 +1775,88 @@ static void LSSetButtonRadius(UIButton *button, CGFloat radius) {
 
 - (void)buildScheduleBadge {
     // A pending or running schedule shows as a dot on the clock instead of a row in the header,
-    // so the map keeps the room. The summary is the button's spoken value, and the schedule
-    // screen it opens shows the details with Change and Cancel.
+    // so the map keeps the room. Tapping the clock then opens a menu headed by the schedule's
+    // summary, with Change and Cancel; the summary is also the button's spoken value.
     UIView *dot = [[UIView alloc] init];
     dot.translatesAutoresizingMaskIntoConstraints = NO;
     dot.userInteractionEnabled = NO;
     dot.isAccessibilityElement = NO;
     dot.backgroundColor = UIColor.systemIndigoColor;
-    dot.layer.cornerRadius = 5.5;
-    dot.layer.borderWidth = 2;
-    dot.layer.borderColor = [UIColor.systemBackgroundColor resolvedColorWithTraitCollection:self.traitCollection].CGColor;
+    dot.layer.cornerRadius = 4.5;
     dot.hidden = YES;
     [self.scheduleButton addSubview:dot];
     [NSLayoutConstraint activateConstraints:@[
-        [dot.widthAnchor constraintEqualToConstant:11],
-        [dot.heightAnchor constraintEqualToConstant:11],
+        [dot.widthAnchor constraintEqualToConstant:9],
+        [dot.heightAnchor constraintEqualToConstant:9],
         [dot.centerXAnchor constraintEqualToAnchor:self.scheduleButton.trailingAnchor constant:-11],
         [dot.centerYAnchor constraintEqualToAnchor:self.scheduleButton.topAnchor constant:11]
     ]];
     self.scheduleBanner = dot;
 }
+- (void)setScheduleDotShown:(BOOL)shown animated:(BOOL)animated {
+    if (shown == self.scheduleDotShown) return;
+    self.scheduleDotShown = shown;
+    UIView *dot = self.scheduleBanner;
+    if (!animated || !LSMapAnimationsEnabled()) {
+        [dot.layer removeAllAnimations];
+        dot.hidden = !shown;
+        dot.alpha = 1;
+        dot.transform = CGAffineTransformIdentity;
+        return;
+    }
+    __weak typeof(self) weakSelf = self;
+    if (shown) {
+        dot.hidden = NO;
+        dot.alpha = 0;
+        dot.transform = CGAffineTransformMakeScale(0.3, 0.3);
+        LSAnimateBouncy(^{ dot.alpha = 1; dot.transform = CGAffineTransformIdentity; }, nil);
+    } else {
+        LSAnimate(^{ dot.alpha = 0; dot.transform = CGAffineTransformMakeScale(0.3, 0.3); }, ^{
+            if (weakSelf.scheduleDotShown) return;
+            dot.hidden = YES;
+            dot.alpha = 1;
+            dot.transform = CGAffineTransformIdentity;
+        });
+    }
+}
 - (void)updateScheduleBanner {
     LSSchedule *schedule = LSScheduler.shared.schedule;
     BOOL scheduled = schedule != nil;
     NSString *summary = schedule.summary;
-    BOOL shown = !self.scheduleBanner.hidden && self.scheduleBanner.alpha > 0.01;
-    LSSetHidden(self.scheduleBanner, !scheduled, self.view.window != nil);
-    if (scheduled && !shown && self.view.window) LSBump(self.scheduleButton);
+    // Under Differentiate Without Color the symbol itself carries the state.
+    BOOL glyph = UIAccessibilityShouldDifferentiateWithoutColor();
+    [self setScheduleDotShown:scheduled && !glyph animated:self.view.window != nil];
     UIButtonConfiguration *clock = self.scheduleButton.configuration;
-    UIImage *image = [UIImage systemImageNamed:scheduled ? @"clock.fill" : @"clock"];
+    UIImage *image = [UIImage systemImageNamed:!scheduled ? @"clock" : (glyph ? @"clock.badge.checkmark.fill" : @"clock.fill")];
     if (![clock.image isEqual:image]) {
         clock.image = image;
         self.scheduleButton.configuration = clock;
     }
     self.scheduleButton.accessibilityValue = scheduled ? summary : nil;
-    self.scheduleButton.accessibilityHint = scheduled ? @"Change or cancel the schedule." : @"Start this location or route later, and turn it off at a set time.";
+    self.scheduleButton.accessibilityHint = scheduled ? @"Shows the schedule, with Change and Cancel." : @"Start this location or route later, and turn it off at a set time.";
+    self.scheduleButton.showsMenuAsPrimaryAction = scheduled;
+    self.scheduleButton.menu = scheduled ? [self scheduleMenuWithSummary:summary] : nil;
     [self updateFooter];
+}
+- (UIMenu *)scheduleMenuWithSummary:(NSString *)summary {
+    __weak typeof(self) weakSelf = self;
+    UIAction *change = [UIAction actionWithTitle:@"Change schedule" image:[UIImage systemImageNamed:@"clock.arrow.circlepath"] identifier:nil handler:^(__unused UIAction *action) {
+        [weakSelf openSchedule];
+    }];
+    UIAction *cancel = [UIAction actionWithTitle:@"Cancel schedule" image:[UIImage systemImageNamed:@"xmark.circle"] identifier:nil handler:^(__unused UIAction *action) {
+        typeof(self) self = weakSelf;
+        if (!self || self.closed) return;
+        [LSScheduler.shared cancel];
+        LSHapticSuccess();
+        [self updateScheduleBanner];
+        [self showMessage:@"Schedule cancelled." symbol:@"clock.badge.xmark"];
+    }];
+    cancel.attributes = UIMenuElementAttributesDestructive;
+    return [UIMenu menuWithTitle:summary ?: @"Schedule" children:@[change, cancel]];
+}
+- (void)differentiateWithoutColorChanged:(NSNotification *)note {
+    (void)note;
+    if (!self.closed) [self updateScheduleBanner];
 }
 - (void)scheduleChanged:(NSNotification *)note {
     (void)note;
@@ -1907,7 +2068,6 @@ static void LSSetButtonRadius(UIButton *button, CGFloat radius) {
 - (void)traitCollectionDidChange:(UITraitCollection *)previous {
     [super traitCollectionDidChange:previous];
     if ([self.traitCollection hasDifferentColorAppearanceComparedToTraitCollection:previous]) {
-        self.scheduleBanner.layer.borderColor = [UIColor.systemBackgroundColor resolvedColorWithTraitCollection:self.traitCollection].CGColor;
         // Only the renderers made here; the route screen re-resolves its own.
         for (MKOverlayRenderer *renderer in self.defaultRenderers) {
             if (![renderer isKindOfClass:MKOverlayPathRenderer.class]) continue;

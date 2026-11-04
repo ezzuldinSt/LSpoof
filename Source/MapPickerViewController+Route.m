@@ -3,6 +3,7 @@
 #import "LSMapLinks.h"
 #import "LSTrackIO.h"
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
+#import <objc/runtime.h>
 
 static const NSUInteger kLSMaximumStops = 10;
 static const double kLSLongestTripMinutes = 30 * 24 * 60;
@@ -210,8 +211,15 @@ static UIView *LSRouteCollapsible(UIView *content) {
 @property (nonatomic, copy, nullable) UIContentSizeCategory stackFrom;
 @property (nonatomic) UIStackViewAlignment rowAlignment;
 @property (nonatomic, copy, nullable) dispatch_block_t traitsChanged;
+// When the row is one VoiceOver element, what a double tap does.
+@property (nonatomic, copy, nullable) dispatch_block_t activated;
 @end
 @implementation LSTraitStack
+- (BOOL)accessibilityActivate {
+    if (!self.activated) return [super accessibilityActivate];
+    self.activated();
+    return YES;
+}
 - (void)didMoveToWindow {
     [super didMoveToWindow];
     [self applyAxis];
@@ -557,6 +565,18 @@ static LSTraitStack *LSRouteRow(NSArray<UIView *> *views, CGFloat spacing, UISta
 }
 @end
 
+// Forwards a map gesture's start to the draw-in, without the recognizer pointing at the picker.
+@interface LSRouteGestureRelay : NSObject
+@property (nonatomic, copy, nullable) dispatch_block_t began;
+- (void)fire:(UIGestureRecognizer *)gesture;
+@end
+@implementation LSRouteGestureRelay
+- (void)fire:(UIGestureRecognizer *)gesture {
+    if (gesture.state == UIGestureRecognizerStateBegan && self.began) self.began();
+}
+@end
+static char ls_routeRelayKey;
+
 // VoiceOver swipes up or down on the speed line to step the speed.
 @interface LSAdjustableLabel : UILabel
 @property (nonatomic, copy, nullable) dispatch_block_t increment, decrement;
@@ -887,11 +907,11 @@ static UIButton *LSSpeedChip(NSString *title, NSString *symbol, NSString *value,
     return chip;
 }
 // A menu built when it opens, so menus that show current values cost nothing between taps.
-static UIMenu *LSLiveMenu(NSString *title, UIMenu * _Nullable (^build)(void)) {
+static UIMenu *LSLiveMenu(NSString *title, UIMenuOptions options, UIMenu * _Nullable (^build)(void)) {
     UIDeferredMenuElement *element = [UIDeferredMenuElement elementWithUncachedProvider:^(void (^completion)(NSArray<UIMenuElement *> *)) {
         completion(build().children ?: @[]);
     }];
-    return [UIMenu menuWithTitle:title children:@[element]];
+    return [UIMenu menuWithTitle:title image:nil identifier:nil options:options children:@[element]];
 }
 static void LSSetChipSubtitle(UIButton *chip, NSString *subtitle) {
     UIButtonConfiguration *config = chip.configuration;
@@ -1100,7 +1120,13 @@ static LSRoute *LSRouteFromTrackFile(NSURL *url, LSTrack **trackOut, NSString **
     self.importButton.accessibilityHint = @"Paste an Apple Maps, Google Maps or Waze link, or open a GPX, TCX or FIT file.";
     UIStackView *importRow = LSStack(@[self.importButton], 0);
     importRow.alignment = UIStackViewAlignmentLeading;
-    UIStackView *endpointContent = LSStack(@[endpointRow, targetTitle, targets, importRow], 12);
+    // Shown while the planner is open over the route that is playing, to fold it away again.
+    UIButton *done = LSTextButton(@"Done", nil);
+    done.accessibilityHint = @"Folds the route back into one line.";
+    [done addTarget:self action:@selector(closeRouteEditor) forControlEvents:UIControlEventTouchUpInside];
+    self.routeEditHeader = LSRouteCollapsible(LSSectionHeader(@"Playing this route", done));
+    self.routeEditHeader.hidden = YES;
+    UIStackView *endpointContent = LSStack(@[self.routeEditHeader, endpointRow, targetTitle, targets, importRow], 12);
     [endpointContent setCustomSpacing:16 afterView:endpointRow];
     [endpointContent setCustomSpacing:6 afterView:targetTitle];
     [endpointContent setCustomSpacing:14 afterView:targets];
@@ -1117,6 +1143,18 @@ static LSRoute *LSRouteFromTrackFile(NSURL *url, LSTrack **trackOut, NSString **
     [edit setContentCompressionResistancePriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
     [edit addTarget:self action:@selector(openRouteEditor) forControlEvents:UIControlEventTouchUpInside];
     LSTraitStack *trip = LSRouteRow(@[self.routeTripLabel, edit], 10, UIStackViewAlignmentCenter, UIContentSizeCategoryAccessibilityMedium);
+    // One VoiceOver element: the trip, with Edit route as its action and its double tap.
+    trip.isAccessibilityElement = YES;
+    trip.accessibilityTraits = UIAccessibilityTraitButton;
+    trip.accessibilityHint = @"Double tap to edit the route.";
+    trip.activated = ^{ [weakSelf openRouteEditor]; };
+    trip.accessibilityCustomActions = @[[[UIAccessibilityCustomAction alloc] initWithName:@"Edit route" actionHandler:^BOOL(__unused UIAccessibilityCustomAction *action) {
+        [weakSelf openRouteEditor];
+        return YES;
+    }]];
+    // The place symbols are drawn into the text, so rebuild it for new sizes and appearances.
+    trip.traitsChanged = ^{ [weakSelf updateTripSummary]; };
+    self.routeTripRow = trip;
     self.routeTripCard = LSInsetPanel(trip);
     self.routeTripCard.hidden = YES;
     self.routeEndpointsPanel = LSRouteCollapsible(LSStack(@[self.progressPanel, self.routeTripCard, self.routeEndpointsCard], 14));
@@ -1230,10 +1268,10 @@ static LSRoute *LSRouteFromTrackFile(NSURL *url, LSTrack **trackOut, NSString **
     self.routeDetailsPanel = LSRouteCollapsible(details);
 
     // Built each time they open, from the current values, instead of on every refresh.
-    self.motionButton.menu = LSLiveMenu(@"Motion", ^UIMenu *{ return [weakSelf motionMenu]; });
-    self.waitButton.menu = LSLiveMenu(@"Wait at each stop", ^UIMenu *{ return [weakSelf waitMenu]; });
-    self.finishButton.menu = LSLiveMenu(@"Arrive on time", ^UIMenu *{ return [weakSelf finishMenu]; });
-    self.shareButton.menu = LSLiveMenu(@"Share route", ^UIMenu *{ return [weakSelf shareMenu]; });
+    self.motionButton.menu = LSLiveMenu(@"Motion", UIMenuOptionsSingleSelection, ^UIMenu *{ return [weakSelf motionMenu]; });
+    self.waitButton.menu = LSLiveMenu(@"Wait at each stop", UIMenuOptionsSingleSelection, ^UIMenu *{ return [weakSelf waitMenu]; });
+    self.finishButton.menu = LSLiveMenu(@"Arrive on time", 0, ^UIMenu *{ return [weakSelf finishMenu]; });
+    self.shareButton.menu = LSLiveMenu(@"Share route", 0, ^UIMenu *{ return [weakSelf shareMenu]; });
     self.importButton.menu = [self importMenu];
     [self rebuildStopRows];
 }
@@ -1460,7 +1498,7 @@ static LSRoute *LSRouteFromTrackFile(NSURL *url, LSTrack **trackOut, NSString **
     [self stopsChanged];
     // VoiceOver moves to the toast, which reads the message and offers Undo.
     __weak typeof(self) weakSelf = self;
-    LSShowActionToast(self.view, [self routeToastAnchorView], [NSString stringWithFormat:@"Removed stop %lu, %@", (unsigned long)index + 1, place],
+    LSShowActionToast(self.view, [self toastAnchorView], [NSString stringWithFormat:@"Removed stop %lu, %@", (unsigned long)index + 1, place],
                       @"trash.fill", @"Undo", ^{ [weakSelf restoreStop:stop atIndex:index]; });
 }
 
@@ -1481,31 +1519,6 @@ static LSRoute *LSRouteFromTrackFile(NSURL *url, LSTrack **trackOut, NSString **
     [self focusStopAtIndex:position];
 }
 
-// Toasts sit just above the floating footer. The shell keeps the footer to itself, but the
-// scroll view's bottom inset on this tab is exactly the part the footer covers.
-- (nullable UIView *)routeToastAnchorView {
-    CGFloat covered = self.tab == LSPickerTabRoute ? self.scroll.contentInset.bottom : 0;
-    if (!(covered > 0) || !self.view) return nil;
-    UIView *anchor = self.routeToastAnchor;
-    if (anchor.superview != self.view) {
-        [anchor removeFromSuperview];
-        anchor = [[UIView alloc] init];
-        anchor.translatesAutoresizingMaskIntoConstraints = NO;
-        anchor.hidden = YES;
-        anchor.userInteractionEnabled = NO;
-        [self.view addSubview:anchor];
-        NSLayoutConstraint *height = [anchor.heightAnchor constraintEqualToConstant:covered];
-        [NSLayoutConstraint activateConstraints:@[
-            [anchor.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
-            [anchor.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
-            [anchor.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor], height
-        ]];
-        self.routeToastAnchor = anchor;
-        self.routeToastAnchorHeight = height;
-    }
-    self.routeToastAnchorHeight.constant = covered;
-    return anchor;
-}
 
 - (void)removeStopTapped:(UIButton *)sender {
     if (sender.tag >= 0) [self removeStopAtIndex:(NSUInteger)sender.tag];
@@ -1936,12 +1949,61 @@ static LSRoute *LSRouteFromTrackFile(NSURL *url, LSTrack **trackOut, NSString **
     [self.routeTraceView removeFromSuperview];
     self.routeTraceView = nil;
     [self revealRouteOverlays];
-    // Markers held back for the draw-in come back at once.
-    for (MKAnnotationView *view in self.routeHiddenMarkers) {
-        view.alpha = 1;
-        view.transform = CGAffineTransformIdentity;
-    }
+    [self stopWatchingMapGestures];
+    // Markers held back for the draw-in come back at once, as they were.
+    NSArray<MKAnnotationView *> *markers = self.routeHiddenMarkers;
+    NSArray<NSNumber *> *alphas = self.routeHiddenMarkerAlphas;
     self.routeHiddenMarkers = nil;
+    self.routeHiddenMarkerAlphas = nil;
+    [markers enumerateObjectsUsingBlock:^(MKAnnotationView *view, NSUInteger index, __unused BOOL *stop) {
+        view.alpha = index < alphas.count ? (CGFloat)alphas[index].doubleValue : 1;
+        view.transform = CGAffineTransformIdentity;
+    }];
+}
+
+// The trace is drawn in screen points and cannot follow a moving map, so a pan, pinch or
+// rotation ends the draw-in at once. The relay rides on each recognizer, so it can never
+// outlive one that still points at it.
+- (void)watchMapGesturesForDrawIn {
+    [self stopWatchingMapGestures];
+    MKMapView *map = self.mapView;
+    if (!map) return;
+    NSMutableArray<UIView *> *views = [NSMutableArray arrayWithObject:map];
+    for (UIView *child in map.subviews) {
+        [views addObject:child];
+        [views addObjectsFromArray:child.subviews];
+    }
+    LSRouteGestureRelay *relay = [[LSRouteGestureRelay alloc] init];
+    __weak typeof(self) weakSelf = self;
+    relay.began = ^{ [weakSelf mapMovedDuringDrawIn]; };
+    NSMutableArray<UIGestureRecognizer *> *watched = [NSMutableArray array];
+    for (UIView *view in views) {
+        for (UIGestureRecognizer *gesture in view.gestureRecognizers) {
+            BOOL moves = [gesture isKindOfClass:UIPanGestureRecognizer.class] || [gesture isKindOfClass:UIPinchGestureRecognizer.class] ||
+                         [gesture isKindOfClass:UIRotationGestureRecognizer.class];
+            if (!moves || [watched containsObject:gesture]) continue;
+            [gesture addTarget:relay action:@selector(fire:)];
+            objc_setAssociatedObject(gesture, &ls_routeRelayKey, relay, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            [watched addObject:gesture];
+        }
+    }
+    self.routeDrawGestures = watched;
+}
+
+- (void)stopWatchingMapGestures {
+    for (UIGestureRecognizer *gesture in self.routeDrawGestures) {
+        id relay = objc_getAssociatedObject(gesture, &ls_routeRelayKey);
+        if (relay) [gesture removeTarget:relay action:@selector(fire:)];
+        objc_setAssociatedObject(gesture, &ls_routeRelayKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    self.routeDrawGestures = nil;
+}
+
+- (void)mapMovedDuringDrawIn {
+    if (!self.routeTraceView) return;
+    [self.routeTraceView removeFromSuperview];
+    self.routeTraceView = nil;
+    [self finishRouteDrawIn:self.routeDrawRevision];
 }
 
 // From, the stops in order, then To: the order they land in after the draw-in.
@@ -2014,20 +2076,36 @@ static LSRoute *LSRouteFromTrackFile(NSURL *url, LSTrack **trackOut, NSString **
     [trace.layer addSublayer:head];
     // Below the view that holds the markers, so the trace never paints over a pin; when that
     // view cannot be found the trace goes on top, with the markers hidden until it is done.
+    // Only directly under the map (or one level down) and untransformed, where map points and
+    // the host's points line up.
     NSArray<MKAnnotationView *> *markers = [self routeMarkerViews];
     UIView *markerHost = markers.firstObject.superview;
-    if (markerHost && markerHost != map && markerHost.superview && [markerHost isDescendantOfView:map]) {
-        trace.frame = [map convertRect:map.bounds toView:markerHost.superview];
-        [markerHost.superview insertSubview:trace belowSubview:markerHost];
+    UIView *hostParent = markerHost.superview;
+    BOOL placeable = markerHost && markerHost != map && hostParent && (hostParent == map || hostParent.superview == map) &&
+                     CGAffineTransformIsIdentity(markerHost.transform) && CGAffineTransformIsIdentity(hostParent.transform);
+    if (placeable) {
+        trace.frame = [map convertRect:map.bounds toView:hostParent];
+        [hostParent insertSubview:trace belowSubview:markerHost];
     } else {
         [map addSubview:trace];
     }
     self.routeTraceView = trace;
-    for (MKAnnotationView *view in markers) {
-        view.alpha = 0;
-        view.transform = CGAffineTransformMakeScale(0.5, 0.5);
+    [self watchMapGesturesForDrawIn];
+    // The markers land after the line. Not with VoiceOver, where hiding a pin would lose its
+    // focus, and not ones MapKit has already faded out to avoid a collision.
+    NSMutableArray<MKAnnotationView *> *hidden = [NSMutableArray array];
+    NSMutableArray<NSNumber *> *alphas = [NSMutableArray array];
+    if (!UIAccessibilityIsVoiceOverRunning()) {
+        for (MKAnnotationView *view in markers) {
+            if (view.alpha < 0.01) continue;
+            [hidden addObject:view];
+            [alphas addObject:@(view.alpha)];
+            view.alpha = 0;
+            view.transform = CGAffineTransformMakeScale(0.5, 0.5);
+        }
     }
-    self.routeHiddenMarkers = markers;
+    self.routeHiddenMarkers = hidden;
+    self.routeHiddenMarkerAlphas = alphas;
     NSTimeInterval duration = MIN(0.9, MAX(0.5, length / 1000.0));
     CAMediaTimingFunction *timing = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
     __weak typeof(self) weakSelf = self;
@@ -2057,6 +2135,7 @@ static LSRoute *LSRouteFromTrackFile(NSURL *url, LSTrack **trackOut, NSString **
     if (revision != self.routeDrawRevision) return;
     self.routeDrawInPending = NO;
     [self revealRouteOverlays];
+    [self stopWatchingMapGestures];
     UIView *trace = self.routeTraceView;
     self.routeTraceView = nil;
     if (trace) {
@@ -2065,16 +2144,19 @@ static LSRoute *LSRouteFromTrackFile(NSURL *url, LSTrack **trackOut, NSString **
     }
     // The markers spring in 60 ms apart, From first and To last.
     NSArray<MKAnnotationView *> *markers = self.routeHiddenMarkers;
+    NSArray<NSNumber *> *alphas = self.routeHiddenMarkerAlphas;
     self.routeHiddenMarkers = nil;
+    self.routeHiddenMarkerAlphas = nil;
     if (!markers.count) return;
     LSHapticPinDrop();
     __weak typeof(self) weakSelf = self;
     [markers enumerateObjectsUsingBlock:^(MKAnnotationView *view, NSUInteger index, __unused BOOL *stop) {
+        CGFloat alpha = index < alphas.count ? (CGFloat)alphas[index].doubleValue : 1;
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(index * 0.06 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             // A newer draw-in may have hidden this marker again in the meantime.
             if ([weakSelf.routeHiddenMarkers containsObject:view]) return;
             LSAnimateBouncy(^{
-                view.alpha = 1;
+                view.alpha = alpha;
                 view.transform = CGAffineTransformIdentity;
             }, nil);
         });
@@ -2903,6 +2985,7 @@ static LSRoute *LSRouteFromTrackFile(NSURL *url, LSTrack **trackOut, NSString **
     BOOL folded = playingDraft && !self.routeEditorOpen;
     LSSetHidden(self.routeEndpointsCard, folded, animated);
     LSSetHidden(self.routeTripCard, !folded, animated);
+    LSSetHidden(self.routeEditHeader, !(playingDraft && self.routeEditorOpen), animated);
     [self trackMilestonesActive:active complete:complete];
     [self syncRouteCasing];
     [self updateRouteTraveled:NO];
@@ -2919,16 +3002,64 @@ static LSRoute *LSRouteFromTrackFile(NSURL *url, LSTrack **trackOut, NSString **
     });
 }
 
+- (void)closeRouteEditor {
+    self.routeEditorOpen = NO;
+    LSHapticSelection();
+    [self updatePlayback];
+    UIView *trip = self.routeTripRow;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (trip.window) UIAccessibilityPostNotification(UIAccessibilityLayoutChangedNotification, trip);
+    });
+}
+
+// "◉ Home → ⦿ Office · 3 stops · next: Stop 2". Rebuilt when the plan changes and on
+// milestones, not on the playback tick.
 - (void)updateTripSummary {
     NSString *from = self.startPin ? (self.startPin.subtitle.length ? self.startPin.subtitle : LSCoordinateText(self.startPin.coordinate)) : @"From";
     NSString *to = self.endPin ? (self.endPin.subtitle.length ? self.endPin.subtitle : LSCoordinateText(self.endPin.coordinate)) : @"To";
     NSUInteger stops = self.routeStops.count;
     NSString *count = [NSString stringWithFormat:@"%lu %@", (unsigned long)stops, stops == 1 ? @"stop" : @"stops"];
-    BOOL rtl = self.routeTripLabel.effectiveUserInterfaceLayoutDirection == UIUserInterfaceLayoutDirectionRightToLeft;
-    NSString *text = [NSString stringWithFormat:@"%@ %@ %@", from, rtl ? @"←" : @"→", to];
-    LSSetText(self.routeTripLabel, stops ? [NSString stringWithFormat:@"%@ · via %@", text, count] : text);
-    self.routeTripLabel.accessibilityLabel = stops ? [NSString stringWithFormat:@"Route from %@ to %@, via %@", from, to, count]
-                                                   : [NSString stringWithFormat:@"Route from %@ to %@", from, to];
+    LSRouteSimulator *engine = LSRouteSimulator.shared;
+    BOOL playing = self.fetchedRoute && !self.routeDraftChanged && engine.route == self.fetchedRoute && engine.isSimulating;
+    NSUInteger passed = [self passedStopCount];
+    NSString *next = playing && stops && passed < stops ? [NSString stringWithFormat:@"Stop %lu", (unsigned long)passed + 1] : nil;
+    NSMutableString *tail = [NSMutableString string];
+    if (stops) [tail appendFormat:@" · %@", count];
+    if (next) [tail appendFormat:@" · next: %@", next];
+    UILabel *label = self.routeTripLabel;
+    BOOL rtl = label.effectiveUserInterfaceLayoutDirection == UIUserInterfaceLayoutDirectionRightToLeft;
+    NSString *plain = [NSString stringWithFormat:@"%@ %@ %@%@", from, rtl ? @"←" : @"→", to, tail];
+    // Text and appearance both count: the marker colours are resolved into the images.
+    NSString *key = [NSString stringWithFormat:@"%@|%ld|%ld|%@", plain, (long)label.traitCollection.userInterfaceStyle,
+                     (long)label.traitCollection.accessibilityContrast, label.traitCollection.preferredContentSizeCategory];
+    if (!label.attributedText.length || ![self.routeTripKey isEqualToString:key]) {
+        self.routeTripKey = key;
+        UIFont *font = label.font;
+        UITraitCollection *traits = label.traitCollection;
+        NSDictionary *attributes = @{NSFontAttributeName: font, NSForegroundColorAttributeName: UIColor.labelColor};
+        NSAttributedString *(^marker)(NSInteger) = ^NSAttributedString *(NSInteger target) {
+            UIColor *color = [LSFillColor(LSTargetColor(target)) resolvedColorWithTraitCollection:traits];
+            UIImage *image = [UIImage systemImageNamed:kLSTargetSymbols[target] withConfiguration:[UIImageSymbolConfiguration configurationWithFont:font scale:UIImageSymbolScaleMedium]];
+            NSMutableAttributedString *mark = [[NSAttributedString attributedStringWithAttachment:
+                [NSTextAttachment textAttachmentWithImage:[image imageWithTintColor:color renderingMode:UIImageRenderingModeAlwaysOriginal]]] mutableCopy];
+            [mark appendAttributedString:[[NSAttributedString alloc] initWithString:@"\u00A0" attributes:attributes]];
+            return mark;
+        };
+        NSMutableAttributedString *text = [[NSMutableAttributedString alloc] init];
+        [text appendAttributedString:marker(LSEndpointFrom)];
+        [text appendAttributedString:[[NSAttributedString alloc] initWithString:[NSString stringWithFormat:@"%@ %@ ", from, rtl ? @"←" : @"→"] attributes:attributes]];
+        [text appendAttributedString:marker(LSEndpointTo)];
+        [text appendAttributedString:[[NSAttributedString alloc] initWithString:to attributes:attributes]];
+        if (tail.length) {
+            [text appendAttributedString:[[NSAttributedString alloc] initWithString:tail
+                attributes:@{NSFontAttributeName: font, NSForegroundColorAttributeName: UIColor.secondaryLabelColor}]];
+        }
+        label.attributedText = text;
+    }
+    NSMutableString *spoken = [NSMutableString stringWithFormat:@"Route from %@ to %@", from, to];
+    if (stops) [spoken appendFormat:@", via %@", count];
+    if (next) [spoken appendFormat:@", next %@", next];
+    self.routeTripRow.accessibilityLabel = spoken;
 }
 
 - (NSString *)destinationOfRoute:(LSRoute *)route {
@@ -3080,6 +3211,7 @@ static LSRoute *LSRouteFromTrackFile(NSURL *url, LSTrack **trackOut, NSString **
 }
 
 - (void)refreshStopProgress {
+    [self updateTripSummary];
     for (LSStopAnnotation *stop in self.routeStops) {
         MKMarkerAnnotationView *view = (id)[self.mapView viewForAnnotation:stop];
         if ([view isKindOfClass:MKMarkerAnnotationView.class]) [self styleRouteAnnotationView:view];

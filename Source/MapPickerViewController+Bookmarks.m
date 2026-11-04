@@ -1,6 +1,7 @@
 #import "MapPickerViewController+Private.h"
 #import "PersistenceManager.h"
 #import "LSMapLinks.h"
+#import "LSPlaceSearchController.h"
 
 // Row identities, so list changes animate as inserts, deletes and moves instead of a reload.
 // "s|" is a saved place, "r|" a recent location, "p|" a placeholder row.
@@ -63,6 +64,21 @@ static BOOL LSSavedKeysUnique(NSArray<NSArray<NSString *> *> *keys) {
 static BOOL LSSavedMatches(NSString *name, CLLocationCoordinate2D coordinate, NSString *filter) {
     return [name localizedStandardContainsString:filter] || [LSCoordinateText(coordinate) containsString:filter];
 }
+// Where the filter matched, found the way LSSavedMatches compares (names ignore case and accents).
+static NSRange LSSavedMatchRange(NSString *text, NSString *filter, BOOL localized) {
+    if (!text.length || !filter.length) return NSMakeRange(NSNotFound, 0);
+    if (!localized) return [text rangeOfString:filter];
+    return [text rangeOfString:filter options:NSCaseInsensitiveSearch | NSDiacriticInsensitiveSearch | NSWidthInsensitiveSearch
+                         range:NSMakeRange(0, text.length) locale:NSLocale.currentLocale];
+}
+// The typed match in bold label colour against a quieter rest, as Search styles typed matches.
+static NSAttributedString *LSSavedHighlighted(NSString *text, NSRange match, UIFont *font, UIFont *strongFont) {
+    NSMutableAttributedString *styled = [[NSMutableAttributedString alloc] initWithString:text ?: @""
+                                                                               attributes:@{NSFontAttributeName: font, NSForegroundColorAttributeName: UIColor.secondaryLabelColor}];
+    if (match.location != NSNotFound && NSMaxRange(match) <= styled.length)
+        [styled addAttributes:@{NSFontAttributeName: strongFont, NSForegroundColorAttributeName: UIColor.labelColor} range:match];
+    return styled;
+}
 static void LSSavedTintImages(UIView *view, UIColor *color) {
     if ([view isKindOfClass:UIImageView.class]) {
         // Badge glyphs carry a hierarchical colour, which wins over tintColor.
@@ -114,40 +130,48 @@ static void LSSavedPlaceStyle(NSString *name, NSString **symbol, UIColor **color
 
 #pragma mark - Map preview for the context menu
 
-static NSCache<NSString *, UIImage *> *LSSavedSnapshotCache(void) {
+// One preview's pictures: the map, and the wander circle and pin drawn on their own so they
+// can animate separately. `point` is the place in the map image's coordinates.
+@interface LSSavedPreviewImages : NSObject
+@property (nonatomic, strong) UIImage *map;
+@property (nonatomic, strong, nullable) UIImage *ring;
+@property (nonatomic, strong) UIImage *pin;
+@property (nonatomic) CGPoint point;
+@end
+@implementation LSSavedPreviewImages
+@end
+
+static NSCache<NSString *, LSSavedPreviewImages *> *LSSavedSnapshotCache(void) {
     static NSCache *cache;
     static dispatch_once_t once;
-    dispatch_once(&once, ^{ cache = [[NSCache alloc] init]; cache.countLimit = 32; });
+    // Costs are bytes: room for a dozen or so map previews.
+    dispatch_once(&once, ^{ cache = [[NSCache alloc] init]; cache.totalCostLimit = 32 * 1024 * 1024; });
     return cache;
 }
-// The snapshot with the place drawn on it the way the picker's map shows it: a tinted disc
-// with a white ring, and the dashed wander circle when the place wanders and `circle` is YES.
-static UIImage *LSSavedRenderSnapshot(MKMapSnapshot *snapshot, CLLocationCoordinate2D coordinate, double radius, BOOL circle, NSString *symbol, UIColor *tint, UITraitCollection *traits) {
-    UIImage *base = snapshot.image;
-    UIColor *color = [LSFillColor(tint) resolvedColorWithTraitCollection:traits];
-    UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat formatForTraitCollection:traits];
-    format.scale = base.scale;
-    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:base.size format:format];
+static NSUInteger LSSavedImageCost(UIImage *image) {
+    return image ? (NSUInteger)(image.size.width * image.scale * image.size.height * image.scale * 4) : 0;
+}
+// The dashed wander circle, as the picker's map draws it. Safe off the main thread.
+static UIImage *LSSavedRenderRing(CGFloat radius, UIColor *color, UIGraphicsImageRendererFormat *format) {
+    CGFloat side = ceil(radius * 2 + 4);
+    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(side, side) format:format];
+    return [renderer imageWithActions:^(__unused UIGraphicsImageRendererContext *context) {
+        UIBezierPath *ring = [UIBezierPath bezierPathWithArcCenter:CGPointMake(side / 2, side / 2) radius:radius startAngle:0 endAngle:2 * M_PI clockwise:YES];
+        [[color colorWithAlphaComponent:0.14] setFill];
+        [ring fill];
+        CGFloat dash[] = {6, 4};
+        [ring setLineDash:dash count:2 phase:0];
+        ring.lineWidth = 1.5;
+        [color setStroke];
+        [ring stroke];
+    }];
+}
+// The place's pin: a tinted disc with a white ring and the row's glyph. Safe off the main thread.
+static UIImage *LSSavedRenderPin(UIImage *glyph, UIColor *color, UIGraphicsImageRendererFormat *format) {
+    CGFloat diameter = 30, side = 44;
+    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(side, side) format:format];
     return [renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
-        [base drawAtPoint:CGPointZero];
-        CGPoint center = [snapshot pointForCoordinate:coordinate];
-        if (circle && radius > 0) {
-            MKMapPoint origin = MKMapPointForCoordinate(coordinate);
-            MKMapPoint east = MKMapPointMake(origin.x + radius * MKMapPointsPerMeterAtLatitude(coordinate.latitude), origin.y);
-            CGFloat pixels = fabs([snapshot pointForCoordinate:MKCoordinateForMapPoint(east)].x - center.x);
-            if (pixels >= 3) {
-                UIBezierPath *ring = [UIBezierPath bezierPathWithArcCenter:center radius:pixels startAngle:0 endAngle:2 * M_PI clockwise:YES];
-                [[color colorWithAlphaComponent:0.14] setFill];
-                [ring fill];
-                CGFloat dash[] = {6, 4};
-                [ring setLineDash:dash count:2 phase:0];
-                ring.lineWidth = 1.5;
-                [color setStroke];
-                [ring stroke];
-            }
-        }
-        CGFloat diameter = 30;
-        CGRect disc = CGRectMake(center.x - diameter / 2, center.y - diameter / 2, diameter, diameter);
+        CGRect disc = CGRectMake((side - diameter) / 2, (side - diameter) / 2, diameter, diameter);
         CGContextRef cg = context.CGContext;
         CGContextSaveGState(cg);
         CGContextSetShadowWithColor(cg, CGSizeMake(0, 2), 5, [UIColor colorWithWhite:0 alpha:0.3].CGColor);
@@ -156,9 +180,7 @@ static UIImage *LSSavedRenderSnapshot(MKMapSnapshot *snapshot, CLLocationCoordin
         CGContextRestoreGState(cg);
         [color setFill];
         [[UIBezierPath bezierPathWithOvalInRect:CGRectInset(disc, 2.5, 2.5)] fill];
-        UIImage *glyph = [[UIImage systemImageNamed:symbol withConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:13 weight:UIImageSymbolWeightBold]]
-                          imageWithTintColor:UIColor.whiteColor renderingMode:UIImageRenderingModeAlwaysOriginal];
-        if (glyph) [glyph drawInRect:CGRectMake(center.x - glyph.size.width / 2, center.y - glyph.size.height / 2, glyph.size.width, glyph.size.height)];
+        if (glyph) [glyph drawInRect:CGRectMake((side - glyph.size.width) / 2, (side - glyph.size.height) / 2, glyph.size.width, glyph.size.height)];
     }];
 }
 
@@ -175,7 +197,8 @@ static UIImage *LSSavedRenderSnapshot(MKMapSnapshot *snapshot, CLLocationCoordin
     UITraitCollection *_traits;
     UIStackView *_captionText;
     CGFloat _captionHeight;
-    UIImageView *_imageView, *_circleView;
+    UIImageView *_imageView, *_ringView, *_pinView;
+    LSSavedPreviewImages *_images;
     UIActivityIndicatorView *_spinner;
     UILabel *_fallback;
     MKMapSnapshotter *_snapshotter;
@@ -225,11 +248,13 @@ static UIImage *LSSavedRenderSnapshot(MKMapSnapshot *snapshot, CLLocationCoordin
     [super viewDidLoad];
     self.view.backgroundColor = UIColor.secondarySystemBackgroundColor;
     _imageView = [[UIImageView alloc] init];
-    _circleView = [[UIImageView alloc] init];
-    for (UIImageView *view in @[_imageView, _circleView]) {
-        view.translatesAutoresizingMaskIntoConstraints = NO;
-        view.contentMode = UIViewContentModeScaleAspectFill;
-        view.clipsToBounds = YES;
+    _imageView.translatesAutoresizingMaskIntoConstraints = NO;
+    _imageView.contentMode = UIViewContentModeScaleAspectFill;
+    _imageView.clipsToBounds = YES;
+    // The ring and pin are placed by frame over the map (placeOverlays).
+    _ringView = [[UIImageView alloc] init];
+    _pinView = [[UIImageView alloc] init];
+    for (UIImageView *view in @[_imageView, _ringView, _pinView]) {
         view.alpha = 0;
         view.accessibilityIgnoresInvertColors = YES;
     }
@@ -245,17 +270,12 @@ static UIImage *LSSavedRenderSnapshot(MKMapSnapshot *snapshot, CLLocationCoordin
     UIVisualEffectView *caption = LSGlassView(0, NO);
     UIStackView *text = _captionText;
     [caption.contentView addSubview:text];
-    for (UIView *view in @[_imageView, _circleView, _spinner, _fallback, caption]) [self.view addSubview:view];
-    NSMutableArray<NSLayoutConstraint *> *constraints = [NSMutableArray array];
-    for (UIImageView *view in @[_imageView, _circleView]) {
-        [constraints addObjectsFromArray:@[
-            [view.topAnchor constraintEqualToAnchor:self.view.topAnchor],
-            [view.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
-            [view.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
-            [view.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor]
-        ]];
-    }
-    [constraints addObjectsFromArray:@[
+    for (UIView *view in @[_imageView, _ringView, _pinView, _spinner, _fallback, caption]) [self.view addSubview:view];
+    [NSLayoutConstraint activateConstraints:@[
+        [_imageView.topAnchor constraintEqualToAnchor:self.view.topAnchor],
+        [_imageView.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [_imageView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [_imageView.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
         [_spinner.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
         [_spinner.centerYAnchor constraintEqualToAnchor:caption.topAnchor constant:-MAX(self.preferredContentSize.height - _captionHeight, 40) / 2],
         [_fallback.centerYAnchor constraintEqualToAnchor:_spinner.centerYAnchor],
@@ -269,8 +289,26 @@ static UIImage *LSSavedRenderSnapshot(MKMapSnapshot *snapshot, CLLocationCoordin
         [text.leadingAnchor constraintEqualToAnchor:caption.contentView.leadingAnchor constant:LSSpaceL],
         [text.trailingAnchor constraintEqualToAnchor:caption.contentView.trailingAnchor constant:-LSSpaceL]
     ]];
-    [NSLayoutConstraint activateConstraints:constraints];
     [self loadSnapshot];
+}
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    [self placeOverlays];
+}
+// The ring and pin sit on the place in the map image, wherever aspect fill puts that image.
+- (void)placeOverlays {
+    LSSavedPreviewImages *images = _images;
+    CGSize bounds = self.view.bounds.size, size = images.map.size;
+    if (!images || size.width <= 0 || size.height <= 0 || bounds.width <= 0 || bounds.height <= 0) return;
+    CGFloat scale = MAX(bounds.width / size.width, bounds.height / size.height);
+    CGPoint center = CGPointMake((bounds.width - size.width * scale) / 2 + images.point.x * scale,
+                                 (bounds.height - size.height * scale) / 2 + images.point.y * scale);
+    for (UIImageView *view in @[_ringView, _pinView]) {
+        // Bounds and center rather than frame, so a running scale animation is left alone.
+        CGSize side = view.image.size;
+        view.bounds = CGRectMake(0, 0, side.width * scale, side.height * scale);
+        view.center = center;
+    }
 }
 - (void)viewDidDisappear:(BOOL)animated {
     [super viewDidDisappear:animated];
@@ -285,10 +323,9 @@ static UIImage *LSSavedRenderSnapshot(MKMapSnapshot *snapshot, CLLocationCoordin
     // The pin sits in the middle of the map the caption leaves uncovered.
     CGFloat pinY = round(MAX(size.height - _captionHeight, size.height * 0.4) / 2);
     NSString *key = [NSString stringWithFormat:@"%.6f,%.6f|%.0f|%d|%.0fx%.0f@%.0f|%.0f|%@", _coordinate.latitude, _coordinate.longitude, _radius, dark, size.width, size.height, scale, pinY, _symbol];
-    NSString *plainKey = [key stringByAppendingString:@"|plain"];
-    NSCache<NSString *, UIImage *> *cache = LSSavedSnapshotCache();
-    UIImage *cached = [cache objectForKey:key];
-    if (cached) { [self showSnapshot:cached plain:[cache objectForKey:plainKey] animated:NO]; return; }
+    NSCache<NSString *, LSSavedPreviewImages *> *cache = LSSavedSnapshotCache();
+    LSSavedPreviewImages *cached = [cache objectForKey:key];
+    if (cached) { [self showImages:cached animated:NO]; return; }
     MKMapSnapshotOptions *options = [[MKMapSnapshotOptions alloc] init];
     double span = MAX(700, _radius * 6);
     double perPoint = span / MAX(size.width, 1) * MKMapPointsPerMeterAtLatitude(_coordinate.latitude);
@@ -297,38 +334,65 @@ static UIImage *LSSavedRenderSnapshot(MKMapSnapshot *snapshot, CLLocationCoordin
     options.size = size;
     UITraitCollection *traits = [UITraitCollection traitCollectionWithTraitsFromCollections:@[_traits, [UITraitCollection traitCollectionWithDisplayScale:scale]]];
     options.traitCollection = traits;
+    // Colours and the glyph are resolved here; the drawing itself runs off the main thread.
+    UIColor *color = [LSFillColor(_tint) resolvedColorWithTraitCollection:traits];
+    UIImage *glyph = [[UIImage systemImageNamed:_symbol withConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:13 weight:UIImageSymbolWeightBold]]
+                      imageWithTintColor:UIColor.whiteColor renderingMode:UIImageRenderingModeAlwaysOriginal];
+    UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat preferredFormat];
+    format.scale = scale;
+    format.opaque = NO;
     _snapshotter = [[MKMapSnapshotter alloc] initWithOptions:options];
     __weak typeof(self) weakSelf = self;
     CLLocationCoordinate2D coordinate = _coordinate;
     double radius = _radius;
-    NSString *symbol = _symbol;
-    UIColor *tint = _tint;
     [_snapshotter startWithCompletionHandler:^(MKMapSnapshot *snapshot, NSError *error) {
         LSSavedPreviewController *strongSelf = weakSelf;
         if (!strongSelf) return;
         strongSelf->_snapshotter = nil;
         if (!snapshot || error) { [strongSelf showFallback]; return; }
-        UIImage *image = LSSavedRenderSnapshot(snapshot, coordinate, radius, YES, symbol, tint, traits);
-        UIImage *plain = radius > 0 ? LSSavedRenderSnapshot(snapshot, coordinate, radius, NO, symbol, tint, traits) : nil;
-        [cache setObject:image forKey:key];
-        if (plain) [cache setObject:plain forKey:plainKey];
-        [strongSelf showSnapshot:image plain:plain animated:YES];
+        UIImage *map = snapshot.image;
+        CGPoint point = [snapshot pointForCoordinate:coordinate];
+        CGFloat ringRadius = 0;
+        if (radius > 0) {
+            MKMapPoint origin = MKMapPointForCoordinate(coordinate);
+            MKMapPoint east = MKMapPointMake(origin.x + radius * MKMapPointsPerMeterAtLatitude(coordinate.latitude), origin.y);
+            ringRadius = fabs([snapshot pointForCoordinate:MKCoordinateForMapPoint(east)].x - point.x);
+        }
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            UIImage *pinImage = LSSavedRenderPin(glyph, color, format);
+            UIImage *ringImage = ringRadius >= 3 ? LSSavedRenderRing(ringRadius, color, format) : nil;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                LSSavedPreviewImages *images = [[LSSavedPreviewImages alloc] init];
+                images.map = map;
+                images.ring = ringImage;
+                images.pin = pinImage;
+                images.point = point;
+                [cache setObject:images forKey:key cost:LSSavedImageCost(map) + LSSavedImageCost(ringImage) + LSSavedImageCost(pinImage)];
+                [weakSelf showImages:images animated:YES];
+            });
+        });
     }];
 }
-// `plain` is the same map without the wander circle. The circle follows a moment after the
-// map, so it reads as the area the spot will move in rather than part of the map.
-- (void)showSnapshot:(UIImage *)image plain:(nullable UIImage *)plain animated:(BOOL)animated {
+- (void)showImages:(LSSavedPreviewImages *)images animated:(BOOL)animated {
     [_spinner stopAnimating];
-    BOOL motion = LSMapAnimationsEnabled();
-    BOOL staged = plain && motion;
-    _imageView.image = staged ? plain : image;
-    _circleView.image = staged ? image : nil;
-    UIImageView *imageView = _imageView, *circleView = _circleView;
-    if (animated && motion) [UIView animateWithDuration:0.25 animations:^{ imageView.alpha = 1; }];
-    else imageView.alpha = 1;
-    if (!staged) return;
-    [UIView animateWithDuration:0.3 delay:(animated ? 0.25 : 0) + 0.15 options:UIViewAnimationOptionCurveEaseOut
-                     animations:^{ circleView.alpha = 1; } completion:nil];
+    _images = images;
+    _imageView.image = images.map;
+    _ringView.image = images.ring;
+    _ringView.hidden = !images.ring;
+    _pinView.image = images.pin;
+    [self placeOverlays];
+    UIImageView *map = _imageView, *ring = _ringView, *pin = _pinView;
+    if (!LSMapAnimationsEnabled()) { map.alpha = 1; pin.alpha = 1; ring.alpha = 1; return; }
+    // The map and pin come in together. The wander circle follows a moment later and settles
+    // from slightly smaller, so it reads as the area the spot moves in rather than part of the map.
+    NSTimeInterval fade = animated ? 0.25 : 0;
+    if (animated) [UIView animateWithDuration:fade animations:^{ map.alpha = 1; pin.alpha = 1; }];
+    else { map.alpha = 1; pin.alpha = 1; }
+    if (!images.ring) return;
+    ring.transform = CGAffineTransformMakeScale(0.92, 0.92);
+    [UIView animateWithDuration:0.3 delay:fade + 0.15 options:UIViewAnimationOptionCurveEaseOut animations:^{ ring.alpha = 1; } completion:nil];
+    [UIView animateWithDuration:0.55 delay:fade + 0.15 usingSpringWithDamping:0.72 initialSpringVelocity:0 options:UIViewAnimationOptionAllowUserInteraction
+                     animations:^{ ring.transform = CGAffineTransformIdentity; } completion:nil];
 }
 - (void)showFallback {
     [_spinner stopAnimating];
@@ -353,7 +417,9 @@ static UIImage *LSSavedRenderSnapshot(MKMapSnapshot *snapshot, CLLocationCoordin
 @property (nonatomic, strong) UIStackView *textStack;
 @property (nonatomic, strong) UIButton *moreButton;
 - (NSString *)layoutShape;
-- (void)revealAppliedPill;
+- (void)revealPill:(UILabel *)pill;
+- (void)setTitle:(NSString *)title color:(UIColor *)color match:(NSRange)match;
+- (void)setCoordinates:(NSString *)text match:(NSRange)match;
 @end
 @implementation LSSavedRowCell
 - (instancetype)initWithStyle:(UITableViewCellStyle)style reuseIdentifier:(NSString *)reuseIdentifier {
@@ -420,23 +486,46 @@ static UIImage *LSSavedRenderSnapshot(MKMapSnapshot *snapshot, CLLocationCoordin
 - (void)prepareForReuse {
     [super prepareForReuse];
     self.badgeHolder.transform = CGAffineTransformIdentity;
-    [self.appliedPill.layer removeAllAnimations];
-    self.appliedPill.alpha = 1;
-    self.appliedPill.transform = CGAffineTransformIdentity;
+    for (UILabel *pill in @[self.appliedPill, self.savedPill]) {
+        [pill.layer removeAllAnimations];
+        pill.alpha = 1;
+        pill.transform = CGAffineTransformIdentity;
+    }
 }
 // Everything that decides the row's height. Only a row whose shape changed is measured again.
 - (NSString *)layoutShape {
     return [NSString stringWithFormat:@"%@|%@|%@|%d%d%d%d%d", self.titleLabel.text ?: @"", self.detailLabel.text ?: @"", self.coordinateLabel.text ?: @"",
             self.detailLabel.hidden, self.coordinateLabel.hidden, self.appliedPill.hidden, self.savedPill.hidden, self.badgeHolder.hidden];
 }
-// The pill a row gains when its place is applied fades in and gives a small bump.
-- (void)revealAppliedPill {
-    UILabel *pill = self.appliedPill;
+// A pill a row gains (Applied now, Saved) fades in and gives a small bump.
+- (void)revealPill:(UILabel *)pill {
     if (!pill.window || pill.hidden) return;
     pill.alpha = 0;
     [UIView animateWithDuration:0.22 delay:0 options:UIViewAnimationOptionCurveEaseOut | UIViewAnimationOptionAllowUserInteraction
                      animations:^{ pill.alpha = 1; } completion:nil];
     LSBump(pill);
+}
+// Attributed text resets the label's font and colour, so both are set again on every pass.
+- (void)setTitle:(NSString *)title color:(UIColor *)color match:(NSRange)match {
+    UIFont *strong = LSFont(UIFontTextStyleBody, UIFontWeightSemibold, 30);
+    if (match.location == NSNotFound) {
+        self.titleLabel.font = strong;
+        self.titleLabel.textColor = color;
+        self.titleLabel.text = title;
+        return;
+    }
+    self.titleLabel.attributedText = LSSavedHighlighted(title, match, LSFont(UIFontTextStyleBody, UIFontWeightRegular, 30), strong);
+}
+- (void)setCoordinates:(NSString *)text match:(NSRange)match {
+    UIFont *mono = LSMonospacedFont(UIFontTextStyleCaption2);
+    if (match.location == NSNotFound) {
+        self.coordinateLabel.font = mono;
+        self.coordinateLabel.textColor = UIColor.secondaryLabelColor;
+        self.coordinateLabel.text = text;
+        return;
+    }
+    UIFont *strong = [[UIFontMetrics metricsForTextStyle:UIFontTextStyleCaption2] scaledFontForFont:[UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightSemibold]];
+    self.coordinateLabel.attributedText = LSSavedHighlighted(text, match, mono, strong);
 }
 - (void)layoutSubviews {
     [super layoutSubviews];
@@ -476,6 +565,15 @@ static UIImage *LSSavedRenderSnapshot(MKMapSnapshot *snapshot, CLLocationCoordin
 @end
 
 #pragma mark - Section header
+
+// A changed count cross-dissolves instead of jumping. Appearing or clearing is left to layout.
+static void LSSavedSetCount(UILabel *label, NSString *text) {
+    NSString *old = label.text ?: @"";
+    if ([old isEqualToString:text]) return;
+    if (!label.window || !old.length || !text.length) { label.text = text; return; }
+    [UIView transitionWithView:label duration:0.2 options:UIViewAnimationOptionTransitionCrossDissolve | UIViewAnimationOptionAllowUserInteraction
+                    animations:^{ label.text = text; } completion:nil];
+}
 
 @interface LSSavedSectionHeader : UITableViewHeaderFooterView
 @property (nonatomic, strong) UILabel *heading;
@@ -716,9 +814,10 @@ static UIImage *LSSavedRenderSnapshot(MKMapSnapshot *snapshot, CLLocationCoordin
         LSSavedRowCell *cell = (LSSavedRowCell *)[table cellForRowAtIndexPath:path];
         if (![cell isKindOfClass:LSSavedRowCell.class] || ![self savedKeyAtPath:path]) continue;
         NSString *shape = [cell layoutShape];
-        BOOL wasApplied = !cell.appliedPill.hidden;
+        BOOL wasApplied = !cell.appliedPill.hidden, wasSaved = !cell.savedPill.hidden;
         [self configureSavedCell:cell path:path];
-        if (!wasApplied) [cell revealAppliedPill];
+        if (!wasApplied) [cell revealPill:cell.appliedPill];
+        if (!wasSaved) [cell revealPill:cell.savedPill];
         if (resize || [shape isEqualToString:[cell layoutShape]]) continue;
         // New text can change a row's height; the table only re-lays out when one did.
         CGSize fitting = CGSizeMake(cell.bounds.size.width, UILayoutFittingCompressedSize.height);
@@ -790,15 +889,16 @@ static UIImage *LSSavedRenderSnapshot(MKMapSnapshot *snapshot, CLLocationCoordin
     // The limit only matters once it is near.
     BOOL nearLimit = total >= capacity * 4 / 5;
     if (filtering) {
-        savedHeader.countLabel.text = [NSString stringWithFormat:@"%lu of %lu", visible, total];
+        LSSavedSetCount(savedHeader.countLabel, [NSString stringWithFormat:@"%lu of %lu", visible, total]);
         savedHeader.heading.accessibilityLabel = [NSString stringWithFormat:@"Saved places, %lu of %lu match", visible, total];
     } else {
-        savedHeader.countLabel.text = total == 0 ? @"" : (nearLimit ? [NSString stringWithFormat:@"%lu of %lu", total, capacity] : [NSString stringWithFormat:@"%lu", total]);
+        LSSavedSetCount(savedHeader.countLabel, total == 0 ? @"" : (nearLimit ? [NSString stringWithFormat:@"%lu of %lu", total, capacity] : [NSString stringWithFormat:@"%lu", total]));
         savedHeader.heading.accessibilityLabel = total == 0 ? @"Saved places" : (nearLimit ? [NSString stringWithFormat:@"Saved places, %lu of %lu", total, capacity]
                                                                                        : [NSString stringWithFormat:@"Saved places, %lu", total]);
     }
-    recentHeader.countLabel.text = filtering && self.allRecentCount ? [NSString stringWithFormat:@"%lu of %lu", (unsigned long)self.recents.count, (unsigned long)self.allRecentCount] : @"";
-    recentHeader.heading.accessibilityLabel = recentHeader.countLabel.text.length ? [NSString stringWithFormat:@"Recently applied, %@ match", recentHeader.countLabel.text] : @"Recently applied";
+    NSString *recentCount = filtering && self.allRecentCount ? [NSString stringWithFormat:@"%lu of %lu", (unsigned long)self.recents.count, (unsigned long)self.allRecentCount] : @"";
+    LSSavedSetCount(recentHeader.countLabel, recentCount);
+    recentHeader.heading.accessibilityLabel = recentCount.length ? [NSString stringWithFormat:@"Recently applied, %@ match", recentCount] : @"Recently applied";
     self.editSavedButton.hidden = total < 2;
     self.editSavedButton.enabled = visible > 1 && !filtering;
     // Nothing to clear means no Clear button, rather than one that explains itself after a tap.
@@ -850,12 +950,17 @@ static UIImage *LSSavedRenderSnapshot(MKMapSnapshot *snapshot, CLLocationCoordin
 - (void)savedFilterChanged {
     [self reloadSavedPlacesAnimated:YES];
     // VoiceOver hears how many places match once typing pauses, not after every letter.
-    static NSUInteger revision;
-    NSUInteger current = ++revision;
+    NSUInteger revision = ++self.savedFilterRevision;
     __weak typeof(self) weakSelf = self;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         MapPickerViewController *strongSelf = weakSelf;
-        if (!strongSelf || current != revision || strongSelf.closed || strongSelf.tab != LSPickerTabSaved || ![strongSelf savedFilterText].length) return;
+        if (!strongSelf || revision != strongSelf.savedFilterRevision || strongSelf.closed || strongSelf.tab != LSPickerTabSaved) return;
+        if (![strongSelf savedFilterText].length) {
+            // Cleared: everything is back.
+            unsigned long all = strongSelf.allSavedPlaces.count + strongSelf.allRecentCount;
+            if (all) LSAnnounce(all == 1 ? @"Showing 1 place." : [NSString stringWithFormat:@"Showing all %lu places.", all]);
+            return;
+        }
         unsigned long count = strongSelf.savedPlaces.count + strongSelf.recents.count;
         LSAnnounce(count == 0 ? @"No matches." : (count == 1 ? @"1 place matches." : [NSString stringWithFormat:@"%lu places match.", count]));
     });
@@ -919,9 +1024,11 @@ static UIImage *LSSavedRenderSnapshot(MKMapSnapshot *snapshot, CLLocationCoordin
     NSDate *date = nil;
     if (![self entryAtPath:path name:&name coordinate:&coordinate date:&date]) {
         NSString *title, *message, *symbol;
-        if ([key isEqualToString:LSSavedNoMatchKey]) {
+        // No saved match can still be a place: the row opens place search with the same text.
+        BOOL search = [key isEqualToString:LSSavedNoMatchKey];
+        if (search) {
             title = [NSString stringWithFormat:@"No matches for “%@”", [self savedFilterText]];
-            message = @"Try part of a name or of the coordinates.";
+            message = [NSString stringWithFormat:@"Search places for “%@”", [self savedFilterText]];
             symbol = @"magnifyingglass";
         } else if ([key isEqualToString:LSSavedEmptyKey]) {
             title = @"No saved places yet";
@@ -933,20 +1040,21 @@ static UIImage *LSSavedRenderSnapshot(MKMapSnapshot *snapshot, CLLocationCoordin
             symbol = @"clock";
         }
         [cell setBadgeSymbol:symbol color:UIColor.systemGrayColor muted:YES];
-        cell.titleLabel.text = title;
-        cell.titleLabel.textColor = UIColor.secondaryLabelColor;
+        [cell setTitle:title color:UIColor.secondaryLabelColor match:NSMakeRange(NSNotFound, 0)];
         cell.detailLabel.text = message;
+        cell.detailLabel.textColor = search ? LSAccentTextColor() : UIColor.secondaryLabelColor;
         cell.detailLabel.hidden = NO;
         cell.coordinateLabel.hidden = YES;
         cell.appliedPill.hidden = YES;
         cell.savedPill.hidden = YES;
         cell.accessoryView = nil;
+        cell.accessoryType = search ? UITableViewCellAccessoryDisclosureIndicator : UITableViewCellAccessoryNone;
         cell.showsReorderControl = NO;
-        cell.selectionStyle = UITableViewCellSelectionStyleNone;
+        cell.selectionStyle = search ? UITableViewCellSelectionStyleDefault : UITableViewCellSelectionStyleNone;
         cell.accessibilityLabel = title;
         cell.accessibilityValue = message;
-        cell.accessibilityHint = nil;
-        cell.accessibilityTraits = UIAccessibilityTraitStaticText;
+        cell.accessibilityHint = search ? @"Opens place search with this text." : nil;
+        cell.accessibilityTraits = search ? UIAccessibilityTraitButton : UIAccessibilityTraitStaticText;
         cell.accessibilityCustomActions = nil;
         return;
     }
@@ -958,8 +1066,9 @@ static UIImage *LSSavedRenderSnapshot(MKMapSnapshot *snapshot, CLLocationCoordin
     UIColor *color = nil;
     [self savedStyleForName:name saved:saved coordinate:coordinate symbol:&symbol color:&color];
     [cell setBadgeSymbol:symbol color:color muted:NO];
-    cell.titleLabel.text = name;
-    cell.titleLabel.textColor = UIColor.labelColor;
+    NSString *filter = [self savedFilterText];
+    NSString *coordinates = LSCoordinateText(coordinate);
+    [cell setTitle:name color:UIColor.labelColor match:LSSavedMatchRange(name, filter, YES)];
     // One calm secondary line: distance, age, wander.
     NSMutableArray<NSString *> *line = [NSMutableArray array], *spoken = [NSMutableArray array];
     if (active) [spoken addObject:@"Applied now"];
@@ -980,15 +1089,17 @@ static UIImage *LSSavedRenderSnapshot(MKMapSnapshot *snapshot, CLLocationCoordin
     }
     if (match) [spoken addObject:[NSString stringWithFormat:@"Saved as %@", match.name]];
     cell.detailLabel.text = [line componentsJoinedByString:@" · "];
+    cell.detailLabel.textColor = UIColor.secondaryLabelColor;
     cell.detailLabel.hidden = line.count == 0;
     // Kept at accessibility sizes too, wrapping onto a second line when it must.
-    cell.coordinateLabel.text = LSCoordinateText(coordinate);
+    [cell setCoordinates:coordinates match:LSSavedMatchRange(coordinates, filter, NO)];
     cell.coordinateLabel.hidden = NO;
     cell.appliedPill.hidden = !active;
     cell.savedPill.hidden = active || !match;
     cell.moreButton.menu = [self menuForPath:path];
     cell.moreButton.accessibilityLabel = [NSString stringWithFormat:@"Actions for %@", name];
     cell.accessoryView = cell.moreButton;
+    cell.accessoryType = UITableViewCellAccessoryNone;
     cell.showsReorderControl = saved;
     cell.selectionStyle = UITableViewCellSelectionStyleDefault;
     cell.accessibilityLabel = name;
@@ -1065,10 +1176,32 @@ static UIImage *LSSavedRenderSnapshot(MKMapSnapshot *snapshot, CLLocationCoordin
     LSAnnounce(@"Place previewed. Apply location when you’re ready.");
 }
 - (void)previewSavedPlace:(NSIndexPath *)path {
+    if ([[self savedKeyAtPath:path] isEqualToString:LSSavedNoMatchKey]) { [self searchPlacesForSavedFilter]; return; }
     NSString *name = nil;
     CLLocationCoordinate2D coordinate;
     NSDate *date = nil;
     if ([self entryAtPath:path name:&name coordinate:&coordinate date:&date]) [self previewCoordinate:coordinate name:name];
+}
+// Place search, already running the filter's text. A choice previews on the Location tab.
+- (void)searchPlacesForSavedFilter {
+    NSString *query = [self savedFilterText];
+    if (!query.length || self.closed) return;
+    [self.savedFilterField resignFirstResponder];
+    LSHapticSelection();
+    LSPlaceSearchController *search = [[LSPlaceSearchController alloc] init];
+    search.title = @"Search places";
+    search.initialQuery = query;
+    search.initialCoordinate = self.selectedCoordinate;
+    search.searchRegion = self.mapView.region;
+    // As openPlaceChooser does: a choice that arrives after another selection is dropped.
+    NSUInteger revision = ++self.selectionRevision;
+    __weak typeof(self) weakSelf = self;
+    search.didChoose = ^(CLLocationCoordinate2D coordinate, NSString *name) {
+        MapPickerViewController *strongSelf = weakSelf;
+        if (!strongSelf || strongSelf.closed || strongSelf.selectionRevision != revision) return;
+        [strongSelf previewCoordinate:coordinate name:name];
+    };
+    [self presentEditor:search];
 }
 - (void)applySavedKey:(NSString *)key coordinate:(CLLocationCoordinate2D)coordinate name:(NSString *)name {
     [self applyCoordinate:coordinate name:name];

@@ -225,21 +225,36 @@ static NSString *LSMapAppName(LSMapApp app) {
     }
     return @"map";
 }
+// Distances in the user's units ("33 ft", "10 m"). Kept: building a formatter is not cheap.
+static MKDistanceFormatter *LSShortDistanceFormatter(void) {
+    static MKDistanceFormatter *formatter;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        formatter = [[MKDistanceFormatter alloc] init];
+        formatter.unitStyle = MKDistanceFormatterUnitStyleAbbreviated;
+    });
+    return formatter;
+}
+// Initial compass bearing from one point to another, 0 to 360 degrees clockwise from north.
+static double LSBearingBetween(CLLocationCoordinate2D from, CLLocationCoordinate2D to) {
+    double phi1 = from.latitude * M_PI / 180, phi2 = to.latitude * M_PI / 180, dLambda = (to.longitude - from.longitude) * M_PI / 180;
+    double bearing = atan2(sin(dLambda) * cos(phi2), cos(phi1) * sin(phi2) - sin(phi1) * cos(phi2) * cos(dLambda)) * 180 / M_PI;
+    return fmod(bearing + 360, 360);
+}
 // "Moved 12 m north-east": distance in the user's units and the nearest of eight directions.
 static NSString *LSMoveText(CLLocationCoordinate2D from, CLLocationCoordinate2D to) {
     CLLocationDistance distance = LSDistanceBetween(from, to);
     if (distance == CLLocationDistanceMax) return nil;
-    MKDistanceFormatter *formatter = [[MKDistanceFormatter alloc] init];
-    formatter.unitStyle = MKDistanceFormatterUnitStyleAbbreviated;
+    MKDistanceFormatter *formatter = LSShortDistanceFormatter();
     if (distance < 1) return [NSString stringWithFormat:@"Moved less than %@", [formatter stringFromDistance:1]];
-    double phi1 = from.latitude * M_PI / 180, phi2 = to.latitude * M_PI / 180, dLambda = (to.longitude - from.longitude) * M_PI / 180;
-    double bearing = atan2(sin(dLambda) * cos(phi2), cos(phi1) * sin(phi2) - sin(phi1) * cos(phi2) * cos(dLambda)) * 180 / M_PI;
     static NSArray<NSString *> *names;
     static dispatch_once_t once;
     dispatch_once(&once, ^{ names = @[@"north", @"north-east", @"east", @"south-east", @"south", @"south-west", @"west", @"north-west"]; });
-    long index = lround(fmod(bearing + 360, 360) / 45) % 8;
+    long index = lround(LSBearingBetween(from, to) / 45) % 8;
     return [NSString stringWithFormat:@"Moved %@ %@", [formatter stringFromDistance:distance], names[(NSUInteger)index]];
 }
+
+static NSString *const kLSMoveArrowSymbol = @"location.north.fill";
 
 // Floating button that lets touches beside it reach the content underneath.
 @interface LSPassThroughView : UIView
@@ -248,21 +263,6 @@ static NSString *LSMoveText(CLLocationCoordinate2D from, CLLocationCoordinate2D 
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
     UIView *hit = [super hitTest:point withEvent:event];
     return hit == self ? nil : hit;
-}
-@end
-
-// Keeps a glass child a true capsule (and its shadow matching) at any height: the button
-// inside grows with Dynamic Type and its subtitle.
-@interface LSCapsuleView : UIView
-@property (nonatomic, weak) UIView *rounded;
-@end
-@implementation LSCapsuleView
-- (void)layoutSubviews {
-    [super layoutSubviews];
-    CGFloat radius = CGRectGetHeight(self.bounds) / 2;
-    if (radius <= 0) return;
-    self.rounded.layer.cornerRadius = radius;
-    self.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:self.bounds cornerRadius:radius].CGPath;
 }
 @end
 
@@ -277,7 +277,15 @@ static NSString *LSMoveText(CLLocationCoordinate2D from, CLLocationCoordinate2D 
     self.translatesAutoresizingMaskIntoConstraints = NO;
     self.userInteractionEnabled = NO;
     [self updateColors];
+    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(reduceTransparencyChanged:)
+                                               name:UIAccessibilityReduceTransparencyStatusDidChangeNotification object:nil];
     return self;
+}
+- (void)dealloc {
+    [NSNotificationCenter.defaultCenter removeObserver:self];
+}
+- (void)reduceTransparencyChanged:(__unused NSNotification *)notification {
+    [self updateColors];
 }
 - (void)updateColors {
     UIColor *base = [UIColor.systemGroupedBackgroundColor resolvedColorWithTraitCollection:self.traitCollection];
@@ -398,12 +406,14 @@ static BOOL LSMapDragTaught;
 @property (nonatomic, strong) LSEntryStatusView *latitudeStatus;
 @property (nonatomic, strong) LSEntryStatusView *longitudeStatus;
 @property (nonatomic, strong) UIView *footer;
-@property (nonatomic, strong) UIVisualEffectView *footerGlass;
-@property (nonatomic, strong) UIView *footerCapsule;
 @property (nonatomic, strong) UIButton *clipboardButton;
 @property (nonatomic) BOOL dragHintAllowed;
 @property (nonatomic) CLLocationCoordinate2D dragStartCoordinate;
 @property (nonatomic, copy) NSString *moveNote;
+@property (nonatomic) double moveBearing; // Degrees from north, NAN when the move has no direction.
+@property (nonatomic, copy) NSString *readoutIconSymbol;
+@property (nonatomic) CGFloat readoutIconRotation;
+@property (nonatomic) NSUInteger clipboardFlashToken;
 @property (nonatomic) NSUInteger moveNoteToken;
 @property (nonatomic, copy) NSString *announcementPrefix;
 @property (nonatomic) NSInteger readoutActionsSignature;
@@ -617,7 +627,6 @@ static BOOL LSMapDragTaught;
     [self.undoButton setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
     [self.undoButton setContentCompressionResistancePriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
     [self.undoButton addTarget:self action:@selector(undoLastChange) forControlEvents:UIControlEventTouchUpInside];
-    LSAddPressFeedback(self.undoButton);
     UIButtonConfiguration *copyConfig = UIButtonConfiguration.plainButtonConfiguration;
     copyConfig.image = [UIImage systemImageNamed:@"doc.on.doc"];
     copyConfig.preferredSymbolConfigurationForImage = [UIImageSymbolConfiguration configurationWithTextStyle:UIFontTextStyleBody scale:UIImageSymbolScaleMedium];
@@ -831,51 +840,36 @@ static UIView *LSEntryHeader(NSString *text) {
 }
 
 - (void)buildFooter {
-    // A floating glass capsule riding the keyboard, so the action stays in reach while typing;
-    // the content fades out beneath it instead of being cut by a bar.
+    // The action floats on the keyboard, so it stays in reach while typing; the content fades
+    // out beneath it instead of being cut by a bar.
     LSFadeView *fade = [[LSFadeView alloc] init];
     [self.view addSubview:fade];
     self.footer = [[LSPassThroughView alloc] init];
     self.footer.translatesAutoresizingMaskIntoConstraints = NO;
     [self.view addSubview:self.footer];
-    LSCapsuleView *capsule = [[LSCapsuleView alloc] init];
-    self.footerCapsule = capsule;
-    self.footerCapsule.translatesAutoresizingMaskIntoConstraints = NO;
-    self.footerCapsule.layer.shadowColor = UIColor.blackColor.CGColor;
-    self.footerCapsule.layer.shadowOpacity = LSLiquidGlassAvailable() ? 0.08 : 0.16; // Liquid Glass draws its own depth.
-    self.footerCapsule.layer.shadowRadius = 16;
-    self.footerCapsule.layer.shadowOffset = CGSizeMake(0, 6);
-    self.footerGlass = LSGlassView(LSRadiusL, NO);
-    capsule.rounded = self.footerGlass;
-    [self.footerCapsule addSubview:self.footerGlass];
-    [self.footer addSubview:self.footerCapsule];
     self.chooseButton = LSButton(@"Use this spot", @"mappin.and.ellipse", YES);
     UIButtonConfiguration *config = self.chooseButton.configuration;
     config.titleAlignment = UIButtonConfigurationTitleAlignmentCenter;
-    config.cornerStyle = UIButtonConfigurationCornerStyleCapsule; // Concentric with the glass around it.
+    config.cornerStyle = UIButtonConfigurationCornerStyleCapsule;
     self.chooseButton.configuration = config;
-    self.chooseButton.layer.shadowOpacity = 0; // The capsule casts the shadow.
     [self.chooseButton addTarget:self action:@selector(choose) forControlEvents:UIControlEventTouchUpInside];
-    LSAddPressFeedback(self.chooseButton);
-    [self.footerGlass.contentView addSubview:self.chooseButton];
-    const CGFloat ring = 6;
+    // With Liquid Glass the prominent button is already glass and floats on its own (glass on
+    // glass refracts twice). Otherwise a frosted capsule rings it and casts the one shadow.
+    UIView *action = self.chooseButton;
+    if (!LSLiquidGlassAvailable()) {
+        LSSetButtonGlow(self.chooseButton, NO);
+        action = LSGlassCapsule(self.chooseButton, 6);
+    }
+    [self.footer addSubview:action];
     [NSLayoutConstraint activateConstraints:@[
         [fade.topAnchor constraintEqualToAnchor:self.footer.topAnchor constant:-LSSpaceXL],
         [fade.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
         [fade.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
         [fade.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
-        [self.footerCapsule.topAnchor constraintEqualToAnchor:self.footer.topAnchor constant:LSSpaceS],
-        [self.footerCapsule.bottomAnchor constraintEqualToAnchor:self.footer.bottomAnchor constant:-LSSpaceS],
-        [self.footerCapsule.leadingAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.leadingAnchor constant:LSSpaceL],
-        [self.footerCapsule.trailingAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.trailingAnchor constant:-LSSpaceL],
-        [self.footerGlass.topAnchor constraintEqualToAnchor:self.footerCapsule.topAnchor],
-        [self.footerGlass.leadingAnchor constraintEqualToAnchor:self.footerCapsule.leadingAnchor],
-        [self.footerGlass.trailingAnchor constraintEqualToAnchor:self.footerCapsule.trailingAnchor],
-        [self.footerGlass.bottomAnchor constraintEqualToAnchor:self.footerCapsule.bottomAnchor],
-        [self.chooseButton.topAnchor constraintEqualToAnchor:self.footerGlass.contentView.topAnchor constant:ring],
-        [self.chooseButton.bottomAnchor constraintEqualToAnchor:self.footerGlass.contentView.bottomAnchor constant:-ring],
-        [self.chooseButton.leadingAnchor constraintEqualToAnchor:self.footerGlass.contentView.leadingAnchor constant:ring],
-        [self.chooseButton.trailingAnchor constraintEqualToAnchor:self.footerGlass.contentView.trailingAnchor constant:-ring]
+        [action.topAnchor constraintEqualToAnchor:self.footer.topAnchor constant:LSSpaceS],
+        [action.bottomAnchor constraintEqualToAnchor:self.footer.bottomAnchor constant:-LSSpaceS],
+        [action.leadingAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.leadingAnchor constant:LSSpaceL],
+        [action.trailingAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.trailingAnchor constant:-LSSpaceL]
     ]];
 }
 
@@ -987,7 +981,6 @@ static UIView *LSEntryHeader(NSString *text) {
 - (void)refreshStatusForField:(UITextField *)field strict:(BOOL)strict {
     BOOL latitude = field == self.latitudeField;
     LSEntryStatusView *status = latitude ? self.latitudeStatus : self.longitudeStatus;
-    NSString *name = latitude ? @"Latitude" : @"Longitude";
     NSString *range = latitude ? @"From −90 (south) to 90 (north)." : @"From −180 (west) to 180 (east).";
     NSString *text = LSTrimmed(field.text);
     NSNumber *value = LSParseDecimal(text, NSLocale.currentLocale);
@@ -1003,11 +996,9 @@ static UIView *LSEntryHeader(NSString *text) {
     } else {
         [status setTone:LSEntryToneNeutral text:range spoken:nil];
     }
-    // The error goes in the label, since VoiceOver users can turn hints off.
-    BOOL error = status.tone == LSEntryToneError;
-    field.accessibilityLabel = error ? [NSString stringWithFormat:@"%@, error: %@", name, status.label.text] : name;
     field.accessibilityHint = status.tone == LSEntryToneSuccess ? [NSString stringWithFormat:@"%@. %@", status.label.accessibilityLabel, range] : range;
-    LSSetFieldInvalid(field, error); // The shared field owns its focus and error ring.
+    // The ring, and the message in the label, since VoiceOver users can turn hints off.
+    LSSetFieldError(field, status.tone == LSEntryToneError ? status.label.text : nil);
 }
 - (BOOL)validate:(UITextField *)field {
     NSNumber *value = [self valueForField:field];
@@ -1532,6 +1523,7 @@ static UIView *LSEntryHeader(NSString *text) {
     // Live readout while dragging; the fields are written once the map settles.
     self.lastMapMotion = CACurrentMediaTime();
     self.readoutState = LSReadoutStateDragging;
+    if ([self.readoutIconSymbol isEqualToString:kLSMoveArrowSymbol]) [self showReadoutIcon:@"mappin.circle.fill" tint:LSAccentColor() rotation:0 dissolve:YES];
     self.readoutTitle.font = self.coordinateFont;
     self.readoutTitle.text = LSHemisphereText(center);
     self.readoutSubtitle.text = @"Release to use this spot";
@@ -1603,20 +1595,30 @@ static UIView *LSEntryHeader(NSString *text) {
 }
 // Shared end of a map drag and a VoiceOver nudge: write the fields, offer Undo, and say how far it went.
 - (void)moveTo:(CLLocationCoordinate2D)coordinate from:(CLLocationCoordinate2D)from previousLatitude:(NSString *)previousLatitude previousLongitude:(NSString *)previousLongitude {
-    self.latitudeField.text = LSFormatDecimal(coordinate.latitude, 6);
-    self.longitudeField.text = LSFormatDecimal(coordinate.longitude, 6);
+    [self crossFadeField:self.latitudeField toText:LSFormatDecimal(coordinate.latitude, 6)];
+    [self crossFadeField:self.longitudeField toText:LSFormatDecimal(coordinate.longitude, 6)];
     self.linkName = nil;
     [self invalidateSmartLookup];
     if (self.smartStatus.tone == LSEntryToneSuccess) [self showSmartHint];
     [self refreshStatusForField:self.latitudeField strict:NO];
     [self refreshStatusForField:self.longitudeField strict:NO];
-    [self showMoveNote:LSMoveText(from, coordinate)];
+    CLLocationDistance distance = LSDistanceBetween(from, coordinate);
+    BOOL directed = distance >= 1 && distance != CLLocationDistanceMax;
+    [self showMoveNote:LSMoveText(from, coordinate) bearing:directed ? LSBearingBetween(from, coordinate) : NAN];
     [self updateDraftPreviewImmediately:YES]; // After a drag the map is already centred there and stays put.
     [self offerUndoLatitude:previousLatitude longitude:previousLongitude];
     [self announceReadoutWithPrefix:nil];
 }
-- (void)showMoveNote:(NSString *)note {
+// The new value fades in, so a drag or nudge visibly rewrites the fields.
+- (void)crossFadeField:(UITextField *)field toText:(NSString *)text {
+    if ([field.text isEqualToString:text]) return;
+    if (!field.window) { field.text = text; return; }
+    [UIView transitionWithView:field duration:0.15 options:UIViewAnimationOptionTransitionCrossDissolve | UIViewAnimationOptionAllowUserInteraction
+                    animations:^{ field.text = text; } completion:nil];
+}
+- (void)showMoveNote:(NSString *)note bearing:(double)bearing {
     self.moveNote = note;
+    self.moveBearing = bearing;
     NSUInteger token = ++self.moveNoteToken;
     __weak typeof(self) weakSelf = self;
     // Long enough to read; then the place name comes back.
@@ -1648,7 +1650,24 @@ static UIView *LSEntryHeader(NSString *text) {
     UIPasteboard.generalPasteboard.string = text; // Writing never triggers the paste prompt.
     LSHapticSelection();
     LSShowToastAbove(self.view, self.footer, [NSString stringWithFormat:@"Copied %@", text], @"doc.on.doc");
+    // The button itself confirms the copy for a moment.
+    NSUInteger token = ++self.clipboardFlashToken;
+    [self showClipboardSymbol:@"checkmark" color:LSSuccessColor()];
+    __weak typeof(self) weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        typeof(self) self = weakSelf;
+        if (!self || token != self.clipboardFlashToken) return;
+        [self showClipboardSymbol:@"doc.on.doc" color:LSAccentTextColor()];
+    });
     return YES;
+}
+- (void)showClipboardSymbol:(NSString *)symbol color:(UIColor *)color {
+    UIButtonConfiguration *config = self.clipboardButton.configuration;
+    config.image = [UIImage systemImageNamed:symbol];
+    config.baseForegroundColor = color;
+    if (!self.clipboardButton.window) { self.clipboardButton.configuration = config; return; }
+    [UIView transitionWithView:self.clipboardButton duration:0.2 options:UIViewAnimationOptionTransitionCrossDissolve | UIViewAnimationOptionAllowUserInteraction
+                    animations:^{ self.clipboardButton.configuration = config; } completion:nil];
 }
 - (void)refreshReadoutActions {
     BOOL undo = !self.undoButton.hidden;
@@ -1660,9 +1679,10 @@ static UIView *LSEntryHeader(NSString *text) {
     __weak typeof(self) weakSelf = self;
     NSMutableArray<UIAccessibilityCustomAction *> *actions = [NSMutableArray array];
     NSArray<NSArray *> *moves = @[@[@"north", @10, @0], @[@"south", @-10, @0], @[@"east", @0, @10], @[@"west", @0, @-10]];
+    NSString *step = [LSShortDistanceFormatter() stringFromDistance:10]; // "33 ft" or "10 m"
     for (NSArray *move in moves) {
         double north = [move[1] doubleValue], east = [move[2] doubleValue];
-        [actions addObject:[[UIAccessibilityCustomAction alloc] initWithName:[NSString stringWithFormat:@"Move 10 m %@", move[0]]
+        [actions addObject:[[UIAccessibilityCustomAction alloc] initWithName:[NSString stringWithFormat:@"Move %@ %@", step, move[0]]
                                                                actionHandler:^BOOL(__unused UIAccessibilityCustomAction *action) {
             return [weakSelf nudgeNorth:north east:east];
         }]];
@@ -1712,6 +1732,7 @@ static UIView *LSEntryHeader(NSString *text) {
     LSReadoutState state;
     NSString *title, *subtitle, *symbol, *spoken;
     UIColor *tint = LSAccentColor();
+    CGFloat rotation = 0;
     if (!self.hasPreview) {
         state = LSReadoutStateEmpty;
         symbol = @"mappin.slash";
@@ -1723,6 +1744,10 @@ static UIView *LSEntryHeader(NSString *text) {
         NSString *name = [self previewName], *context = [self previewContext];
         NSString *coordinate = LSHemisphereText(self.previewCoordinate);
         symbol = @"mappin.circle.fill";
+        if (self.moveNote && !isnan(self.moveBearing)) {
+            symbol = kLSMoveArrowSymbol; // Points the way the spot just moved.
+            rotation = (self.moveBearing > 180 ? self.moveBearing - 360 : self.moveBearing) * M_PI / 180;
+        }
         if (name.length) {
             state = LSReadoutStateNamed;
             title = name;
@@ -1739,12 +1764,12 @@ static UIView *LSEntryHeader(NSString *text) {
     }
     self.readoutText.accessibilityValue = spoken;
     BOOL stateChanged = state != self.readoutState;
+    // The row cross-dissolves as a whole when the state changes; otherwise only the icon does.
+    [self showReadoutIcon:symbol tint:tint rotation:rotation dissolve:!stateChanged];
     if (!stateChanged && [title isEqualToString:self.readoutTitle.text] && [subtitle isEqualToString:self.readoutSubtitle.text]) return;
     self.readoutState = state;
     UIFont *font = state == LSReadoutStateCoordinate ? self.coordinateFont : self.nameFont;
     void (^apply)(void) = ^{
-        self.readoutIcon.image = [UIImage systemImageNamed:symbol];
-        self.readoutIcon.tintColor = tint;
         self.readoutTitle.font = font;
         self.readoutTitle.text = title;
         self.readoutSubtitle.text = subtitle;
@@ -1752,6 +1777,22 @@ static UIView *LSEntryHeader(NSString *text) {
     if (!stateChanged || !self.view.window) { apply(); return; }
     [UIView transitionWithView:self.readoutRow duration:0.25 options:UIViewAnimationOptionTransitionCrossDissolve | UIViewAnimationOptionAllowUserInteraction animations:apply completion:nil];
     LSAnimate(^{ [self.view layoutIfNeeded]; }, nil);
+}
+- (void)showReadoutIcon:(NSString *)symbol tint:(UIColor *)tint rotation:(CGFloat)rotation dissolve:(BOOL)dissolve {
+    BOOL changed = ![symbol isEqualToString:self.readoutIconSymbol];
+    BOOL turned = fabs(rotation - self.readoutIconRotation) > 0.001;
+    self.readoutIconSymbol = symbol;
+    self.readoutIconRotation = rotation;
+    void (^image)(void) = ^{
+        self.readoutIcon.image = [UIImage systemImageNamed:symbol];
+        self.readoutIcon.tintColor = tint;
+    };
+    void (^turn)(void) = ^{ self.readoutIcon.transform = CGAffineTransformMakeRotation(rotation); };
+    if (!self.readoutIcon.window) { image(); turn(); return; }
+    if (!changed) self.readoutIcon.tintColor = tint;
+    else if (dissolve) [UIView transitionWithView:self.readoutIcon duration:0.2 options:UIViewAnimationOptionTransitionCrossDissolve | UIViewAnimationOptionAllowUserInteraction animations:image completion:nil];
+    else image();
+    if (turned) LSAnimate(turn, nil);
 }
 - (void)scheduleGeocode {
     [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(reverseGeocodePreview) object:nil];
@@ -1790,7 +1831,12 @@ static UIView *LSEntryHeader(NSString *text) {
 
 #pragma mark Finishing
 
+- (void)cancelPendingAnnouncement {
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(announceReadout) object:nil];
+    self.announcementPrefix = nil;
+}
 - (void)stopLookups {
+    [self cancelPendingAnnouncement];
     self.smartRevision++;
     self.previewRevision++;
     self.geocoding = NO;
@@ -1798,6 +1844,10 @@ static UIView *LSEntryHeader(NSString *text) {
     [self.linkSearch cancel];
     self.linkSearch = nil;
     [NSObject cancelPreviousPerformRequestsWithTarget:self];
+}
+- (void)viewWillDisappear:(BOOL)animated {
+    [super viewWillDisappear:animated];
+    [self cancelPendingAnnouncement]; // Nothing is read out about a screen that is leaving.
 }
 - (void)viewDidDisappear:(BOOL)animated {
     [super viewDidDisappear:animated];

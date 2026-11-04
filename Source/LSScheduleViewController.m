@@ -193,7 +193,6 @@ static UIView *LSScheduleBullet(NSString *symbol, NSString *text) {
 static UIButton *LSScheduleChip(NSString *title, NSString *spoken) {
     UIButton *chip = LSChipButton(title, nil);
     chip.accessibilityLabel = spoken;
-    LSAddPressFeedback(chip);
     return chip;
 }
 // Chips scroll sideways instead of wrapping, so large text never pushes them off screen.
@@ -210,6 +209,39 @@ static UIView *LSScheduleChipStrip(NSArray<UIButton *> *chips) {
         [row.trailingAnchor constraintEqualToAnchor:strip.contentLayoutGuide.trailingAnchor],
         [row.heightAnchor constraintEqualToAnchor:strip.frameLayoutGuide.heightAnchor]]];
     return strip;
+}
+
+// Soft fade from clear to the page colour behind the pinned action, so content scrolling
+// under it dims instead of colliding with it.
+@interface LSScheduleFadeView : UIView
+@end
+@implementation LSScheduleFadeView
++ (Class)layerClass { return CAGradientLayer.class; }
+- (instancetype)initWithFrame:(CGRect)frame {
+    if ((self = [super initWithFrame:frame])) {
+        self.translatesAutoresizingMaskIntoConstraints = NO;
+        self.userInteractionEnabled = NO;
+        self.isAccessibilityElement = NO;
+        [self updateColors];
+    }
+    return self;
+}
+- (void)updateColors {
+    UIColor *page = [UIColor.systemGroupedBackgroundColor resolvedColorWithTraitCollection:self.traitCollection];
+    CAGradientLayer *gradient = (CAGradientLayer *)self.layer;
+    gradient.colors = @[(__bridge id)[page colorWithAlphaComponent:0].CGColor, (__bridge id)[page colorWithAlphaComponent:0.9].CGColor, (__bridge id)page.CGColor];
+    gradient.locations = @[@0, @0.5, @1];
+}
+- (void)traitCollectionDidChange:(UITraitCollection *)previous {
+    [super traitCollectionDidChange:previous];
+    [self updateColors];
+}
+@end
+
+// A countdown under an hour is live: VoiceOver re-reads it while focused.
+static UIAccessibilityTraits LSScheduleSummaryTraits(NSDate *start, BOOL active) {
+    NSTimeInterval ahead = start.timeIntervalSinceNow;
+    return UIAccessibilityTraitStaticText | (!active && ahead > 0 && ahead < 3600 ? UIAccessibilityTraitUpdatesFrequently : UIAccessibilityTraitNone);
 }
 
 #pragma mark - Controller
@@ -234,6 +266,7 @@ static UIView *LSScheduleChipStrip(NSArray<UIButton *> *chips) {
 @property (nonatomic, strong) UIStackView *errorRow;
 @property (nonatomic, strong) UILabel *errorLabel;
 @property (nonatomic, strong) UIButton *saveButton;
+@property (nonatomic, strong, nullable) UIView *actionBar;
 @property (nonatomic, strong, nullable) NSTimer *clock;
 @property (nonatomic) NSTimeInterval duration;
 @end
@@ -278,8 +311,44 @@ static UIView *LSScheduleChipStrip(NSArray<UIButton *> *chips) {
         [page.widthAnchor constraintLessThanOrEqualToConstant:640],
         fullWidth, emptyHeight
     ]];
+    if (self.subject.length) [self buildActionBar];
     [self reloadContent];
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(scheduleChanged:) name:LSSchedulerDidChangeNotification object:nil];
+}
+
+// The one primary action floats on glass above the bottom safe area, so it stays in reach
+// on small phones and at accessibility sizes however long the page gets.
+- (void)buildActionBar {
+    LSScheduleFadeView *fade = [[LSScheduleFadeView alloc] init];
+    UIView *bar = LSGlassCapsule(self.saveButton, LSSpaceS);
+    self.actionBar = bar;
+    [self.view addSubview:fade];
+    [self.view addSubview:bar];
+    UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
+    NSLayoutConstraint *fullWidth = [bar.widthAnchor constraintEqualToAnchor:safe.widthAnchor constant:-40];
+    fullWidth.priority = 999;
+    [NSLayoutConstraint activateConstraints:@[
+        [bar.centerXAnchor constraintEqualToAnchor:safe.centerXAnchor],
+        [bar.widthAnchor constraintLessThanOrEqualToConstant:640],
+        fullWidth,
+        [bar.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor constant:-LSSpaceS],
+        [fade.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [fade.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [fade.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
+        [fade.topAnchor constraintEqualToAnchor:bar.topAnchor constant:-LSSpaceXL]]];
+}
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    if (!self.actionBar) return;
+    // Lets the last card scroll clear of the pinned action; the safe area is added by UIKit.
+    CGFloat covered = MAX(0, CGRectGetHeight(self.view.bounds) - self.view.safeAreaInsets.bottom - CGRectGetMinY(self.actionBar.frame) + LSSpaceS);
+    if (fabs(self.scroll.contentInset.bottom - covered) < 0.5) return;
+    UIEdgeInsets inset = self.scroll.contentInset;
+    inset.bottom = covered;
+    self.scroll.contentInset = inset;
+    UIEdgeInsets indicators = self.scroll.verticalScrollIndicatorInsets;
+    indicators.bottom = covered;
+    self.scroll.verticalScrollIndicatorInsets = indicators;
 }
 
 - (void)viewWillAppear:(BOOL)animated {
@@ -348,7 +417,6 @@ static UIView *LSScheduleChipStrip(NSArray<UIButton *> *chips) {
     style.baseBackgroundColor = LSErrorColor(); // Tinted style: a soft red pill, not red on blue.
     self.cancelButton.configuration = style;
     [self.cancelButton addTarget:self action:@selector(confirmCancel:) forControlEvents:UIControlEventTouchUpInside];
-    LSAddPressFeedback(self.cancelButton);
     UIStackView *body = LSStack(@[chipLine, self.currentSlot, self.cancelButton], LSSpaceL);
     [self.currentSection addArrangedSubview:LSScheduleInset(LSSectionLabel(@"Current schedule"))];
     [self.currentSection addArrangedSubview:LSInsetPanel(body)];
@@ -382,8 +450,13 @@ static UIView *LSScheduleChipStrip(NSArray<UIButton *> *chips) {
     UIStackView *summary = (UIStackView *)slot.arrangedSubviews.firstObject;
     UILabel *headline = (UILabel *)summary.arrangedSubviews.firstObject;
     if ([signature isEqualToString:previous] && [summary isKindOfClass:UIStackView.class] && [headline isKindOfClass:UILabel.class]) {
-        headline.text = LSScheduleHeadline(start, end, active);
+        NSString *text = LSScheduleHeadline(start, end, active);
+        if (![headline.text isEqualToString:text]) {
+            [UIView transitionWithView:headline duration:0.25 options:UIViewAnimationOptionTransitionCrossDissolve | UIViewAnimationOptionAllowUserInteraction
+                            animations:^{ headline.text = text; } completion:nil];
+        }
         summary.accessibilityLabel = [self spokenWhat:what start:start end:end daily:daily active:active];
+        summary.accessibilityTraits = LSScheduleSummaryTraits(start, active);
         return signature;
     }
     for (UIView *view in slot.arrangedSubviews) [view removeFromSuperview];
@@ -426,6 +499,7 @@ static UIView *LSScheduleChipStrip(NSArray<UIButton *> *chips) {
     UIStackView *stack = LSStack(@[headline, LSStack(@[first, second], 0), repeat], LSSpaceM);
     stack.isAccessibilityElement = YES;
     stack.accessibilityLabel = [self spokenWhat:what start:start end:end daily:daily active:active];
+    stack.accessibilityTraits = LSScheduleSummaryTraits(start, active);
     return stack;
 }
 
@@ -560,14 +634,13 @@ static UIView *LSScheduleChipStrip(NSArray<UIButton *> *chips) {
 
     self.saveButton = LSButton(@"Schedule", @"clock.badge.checkmark", YES);
     [self.saveButton addTarget:self action:@selector(save) forControlEvents:UIControlEventTouchUpInside];
-    LSAddPressFeedback(self.saveButton);
 
     UIStackView *notes = LSStack(@[
         LSScheduleBullet(@"iphone", @"Starts on time while this app is open, or in the background with “Keep routes moving in the background” on."),
         LSScheduleBullet(@"clock.arrow.circlepath", @"Missed while closed? A place starts when you next open the app; a route over 15 minutes late is skipped."),
         LSScheduleBullet(@"power", @"Turning off ends whatever is applied at that time.")], LSSpaceM);
     UIStackView *info = LSStack(@[LSScheduleInset(LSSectionLabel(@"Good to know")), LSInsetPanel(notes)], LSSpaceS);
-    [sections addObjectsFromArray:@[preview, form, self.saveButton, info]];
+    [sections addObjectsFromArray:@[preview, form, info]];
 }
 
 - (UIView *)dateRow:(NSString *)title badge:(nullable UIView *)badge picker:(UIDatePicker *)picker chips:(NSArray<UIButton *> *)chips separator:(BOOL)separator {
@@ -696,7 +769,10 @@ static UIView *LSScheduleChipStrip(NSArray<UIButton *> *chips) {
         self.errorRow.hidden = !visible;
         self.errorRow.alpha = visible ? 1 : 0;
         [self.scroll layoutIfNeeded];
-    }, nil);
+    }, ^{
+        // The action is pinned, so the message may be off screen when it appears.
+        if (visible) [self.scroll scrollRectToVisible:CGRectInset([self.errorRow convertRect:self.errorRow.bounds toView:self.scroll], 0, -LSSpaceXL) animated:LSMapAnimationsEnabled()];
+    });
 }
 
 - (void)save {
