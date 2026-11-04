@@ -105,6 +105,10 @@
         content.text = name;
         NSString *coordinates = LSCoordinateText(coordinate);
         content.secondaryText = date ? [NSString stringWithFormat:@"%@\n%@", coordinates, LSRelativeDate(date)] : coordinates;
+        if (path.section == 0 && path.row < (NSInteger)self.savedPlaces.count) {
+            double radius = self.savedPlaces[path.row].radius;
+            if (isfinite(radius)) content.secondaryText = [content.secondaryText stringByAppendingFormat:@"\n%@", radius > 0 ? [NSString stringWithFormat:@"Wanders within %@ m", LSFormatDecimal(radius, 0)] : @"Doesn’t wander"];
+        }
         content.secondaryTextProperties.font = LSMonospacedFont(UIFontTextStyleFootnote);
         content.image = [UIImage systemImageNamed:path.section == 0 ? @"bookmark.circle.fill" : @"clock.arrow.circlepath"];
         content.imageProperties.tintColor = path.section == 0 ? LSAccentColor() : UIColor.systemGrayColor;
@@ -190,7 +194,7 @@
     UIMenu *edit = [UIMenu menuWithTitle:@"" image:nil identifier:nil options:UIMenuOptionsDisplayInline children:@[rename, copy]];
     UIMenu *order = [UIMenu menuWithTitle:@"Move" image:[UIImage systemImageNamed:@"arrow.up.arrow.down"] identifier:nil options:0 children:@[first, up, down]];
     UIMenu *danger = [UIMenu menuWithTitle:@"" image:nil identifier:nil options:UIMenuOptionsDisplayInline children:@[remove]];
-    return [UIMenu menuWithTitle:place.name children:@[primary, edit, order, danger]];
+    return [UIMenu menuWithTitle:place.name children:@[primary, edit, [self radiusMenuForBookmark:place], order, danger]];
 }
 - (UIContextMenuConfiguration *)savedMenu:(NSIndexPath *)path {
     BOOL saved = path.section == 0 && path.row < (NSInteger)self.savedPlaces.count;
@@ -257,6 +261,75 @@
     if (targetIndex != NSNotFound) [BookmarksManager.shared moveBookmarkWithID:sourceID toIndex:targetIndex];
     [self reloadSavedPlaces];
 }
+#pragma mark - Wander radius (#19)
+
+- (UIMenu *)radiusMenuForBookmark:(LSBookmark *)place {
+    __weak typeof(self) weakSelf = self;
+    double radius = place.radius;
+    PersistenceManager *store = PersistenceManager.shared;
+    NSString *defaultTitle = store.fluctuationEnabled ? [NSString stringWithFormat:@"Same as Settings (%@ m)", LSFormatDecimal(store.fluctuationRadius, 0)] : @"Same as Settings (off)";
+    UIAction *useDefault = [UIAction actionWithTitle:defaultTitle image:nil identifier:nil handler:^(__unused UIAction *action) { [weakSelf setRadius:NAN forPlace:place]; }];
+    useDefault.state = isfinite(radius) ? UIMenuElementStateOff : UIMenuElementStateOn;
+    UIAction *off = [UIAction actionWithTitle:@"Don’t wander here" image:nil identifier:nil handler:^(__unused UIAction *action) { [weakSelf setRadius:0 forPlace:place]; }];
+    off.state = isfinite(radius) && radius == 0 ? UIMenuElementStateOn : UIMenuElementStateOff;
+    NSMutableArray *items = [NSMutableArray arrayWithObjects:useDefault, off, nil];
+    BOOL matched = !isfinite(radius) || radius == 0;
+    for (NSNumber *meters in @[@10, @25, @50, @100, @250]) {
+        UIAction *action = [UIAction actionWithTitle:[NSString stringWithFormat:@"%@ m", meters] image:nil identifier:nil handler:^(__unused UIAction *item) { [weakSelf setRadius:meters.doubleValue forPlace:place]; }];
+        if (isfinite(radius) && fabs(radius - meters.doubleValue) < 0.5) { action.state = UIMenuElementStateOn; matched = YES; }
+        [items addObject:action];
+    }
+    UIAction *custom = [UIAction actionWithTitle:matched ? @"Custom…" : [NSString stringWithFormat:@"Custom (%@ m)…", LSFormatDecimal(radius, 0)] image:[UIImage systemImageNamed:@"slider.horizontal.3"] identifier:nil handler:^(__unused UIAction *action) {
+        [weakSelf enterRadiusForPlace:place];
+    }];
+    if (!matched) custom.state = UIMenuElementStateOn;
+    [items addObject:custom];
+    return [UIMenu menuWithTitle:@"Wander radius" image:[UIImage systemImageNamed:@"dot.radiowaves.left.and.right"] identifier:nil options:0 children:items];
+}
+
+- (void)enterRadiusForPlace:(LSBookmark *)place {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Wander radius" message:[NSString stringWithFormat:@"How far “%@” may drift, from 1 to 1,000 meters.", place.name] preferredStyle:UIAlertControllerStyleAlert];
+    double current = isfinite(place.radius) && place.radius > 0 ? place.radius : PersistenceManager.shared.fluctuationRadius;
+    [alert addTextFieldWithConfigurationHandler:^(UITextField *field) {
+        field.keyboardType = UIKeyboardTypeDecimalPad;
+        field.text = LSFormatDecimal(current, 0);
+        field.placeholder = @"meters";
+        field.accessibilityLabel = @"Radius in meters";
+    }];
+    __weak UIAlertController *weakAlert = alert;
+    __weak typeof(self) weakSelf = self;
+    UIAlertAction *save = [UIAlertAction actionWithTitle:@"Set radius" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
+        NSNumber *number = LSParseDecimal(weakAlert.textFields.firstObject.text, NSLocale.currentLocale);
+        if (number && number.doubleValue >= 1 && number.doubleValue <= 1000) [weakSelf setRadius:number.doubleValue forPlace:place];
+        else [weakSelf showMessage:@"Enter a radius from 1 to 1,000 meters." symbol:@"exclamationmark.triangle.fill"];
+    }];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:save];
+    alert.preferredAction = save;
+    [self presentViewController:alert animated:LSMapAnimationsEnabled() completion:nil];
+}
+
+- (void)setRadius:(double)radius forPlace:(LSBookmark *)place {
+    if (![BookmarksManager.shared setRadius:radius forBookmarkWithID:place.identifier]) {
+        [self showMessage:@"The radius could not be saved." symbol:@"exclamationmark.triangle.fill"];
+        return;
+    }
+    LSHapticSelection();
+    [self reloadSavedPlaces];
+    // Held right now: the new radius applies straight away.
+    LSSessionSnapshot *snapshot = LSSessionController.shared.snapshot;
+    if (snapshot.mode == LSSessionModeStatic && PersistenceManager.shared.hasStoredCoordinate) {
+        CLLocationCoordinate2D held = PersistenceManager.shared.spoofCoordinate;
+        CLLocation *a = [[CLLocation alloc] initWithLatitude:held.latitude longitude:held.longitude];
+        CLLocation *b = [[CLLocation alloc] initWithLatitude:place.coordinate.latitude longitude:place.coordinate.longitude];
+        if ([a distanceFromLocation:b] < 5) [LSSessionController.shared applyStaticCoordinate:held radiusOverride:radius];
+    }
+    if (self.tab == LSPickerTabLocation && self.hasSelection) [self renderSelectedLocation];
+    [self updateRadiusPreview];
+    NSString *message = !isfinite(radius) ? @"This place now follows the Settings radius." : (radius > 0 ? [NSString stringWithFormat:@"This place now wanders within %@ m.", LSFormatDecimal(radius, 0)] : @"This place no longer wanders.");
+    [self showMessage:message symbol:@"dot.radiowaves.left.and.right"];
+}
+
 - (void)saveSelectedPlace { if (self.hasSelection) [self namePlace:self.selectedName coordinate:self.selectedCoordinate identifier:nil]; }
 - (void)namePlace:(NSString *)name coordinate:(CLLocationCoordinate2D)coordinate identifier:(NSString *)identifier {
     [self namePlace:name coordinate:coordinate identifier:identifier allowDuplicate:NO];

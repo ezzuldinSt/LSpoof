@@ -27,11 +27,16 @@ FOUNDATION_EXPORT NSNotificationName const LSSessionDidChangeNotification;
 @interface LSSessionController : NSObject
 @property (class, nonatomic, readonly) LSSessionController *shared;
 @property (nonatomic, readonly) LSSessionSnapshot *snapshot;
-@property (nonatomic, readonly, nullable) MKRoute *retainedRoute;
+@property (nonatomic, readonly, nullable) LSRoute *retainedRoute;
 
 - (BOOL)applyStaticCoordinate:(CLLocationCoordinate2D)coordinate;
-- (BOOL)startRoute:(MKRoute *)route transportMode:(LSTransportMode)mode customSpeedKmh:(double)speed;
-- (BOOL)updateTransportMode:(LSTransportMode)mode customSpeedKmh:(double)speed;
+// radius: NAN uses the global wander setting, 0 turns wandering off here, otherwise meters.
+- (BOOL)applyStaticCoordinate:(CLLocationCoordinate2D)coordinate radiusOverride:(double)radius;
+- (BOOL)startRoute:(LSRoute *)route options:(LSPlaybackOptions *)options;
+// Applies to the playing route right away: speed, motion style, waits.
+- (BOOL)updatePlaybackOptions:(LSPlaybackOptions *)options;
+// One step faster (direction > 0) or slower; recorded pace steps its multiplier.
+- (BOOL)nudgeSpeed:(NSInteger)direction;
 - (BOOL)saveSettings:(LSSettings *)settings;
 - (void)pause;
 - (void)resume;

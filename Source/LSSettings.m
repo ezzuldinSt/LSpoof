@@ -12,6 +12,7 @@
     settings.rememberLocation = store.keepLastSpoof;
     settings.showRealLocation = store.showRealLocation;
     settings.showFloatingButton = store.showFloatingButton;
+    settings.continueInBackground = store.continueInBackground;
     return settings;
 }
 - (id)copyWithZone:(NSZone *)zone {
@@ -23,6 +24,7 @@
     copy.rememberLocation = self.rememberLocation;
     copy.showRealLocation = self.showRealLocation;
     copy.showFloatingButton = self.showFloatingButton;
+    copy.continueInBackground = self.continueInBackground;
     return copy;
 }
 - (BOOL)isValid {
@@ -44,5 +46,6 @@
     if (forget) [store clearLastSpoof];
     store.showRealLocation = self.showRealLocation;
     store.showFloatingButton = self.showFloatingButton;
+    store.continueInBackground = self.continueInBackground;
 }
 @end
