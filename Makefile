@@ -17,6 +17,14 @@ LocationSpoofer_FILES = \
 	Source/LSPlaceSearchController.m \
 	Source/RouteSimulator.m \
 	Source/RouteGeometry.c \
+	Source/RouteMotion.c \
+	Source/LSRoute.m \
+	Source/LSTrackCodec.c \
+	Source/LSTrackIO.m \
+	Source/LSMapLinks.m \
+	Source/LSBackup.m \
+	Source/LSScheduler.m \
+	Source/LSScheduleViewController.m \
 	Source/BookmarksManager.m \
 	Source/OverlayWindow.m \
 	Source/MapPickerViewController.m \
@@ -25,7 +33,7 @@ LocationSpoofer_FILES = \
 	Source/PersistenceManager.m
 
 LocationSpoofer_CFLAGS = -fobjc-arc -Wall -Wextra -ISource
-LocationSpoofer_FRAMEWORKS = Foundation UIKit CoreLocation MapKit
+LocationSpoofer_FRAMEWORKS = Foundation UIKit CoreLocation MapKit UniformTypeIdentifiers
 LocationSpoofer_LDFLAGS = -install_name @executable_path/Frameworks/LocationSpoofer.dylib
 
 include $(THEOS)/makefiles/library.mk

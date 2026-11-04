@@ -4,9 +4,12 @@
 #import "LSPlaceSearchController.h"
 #import "LSSettingsViewController.h"
 #import "LSCoordinateEntryController.h"
+#import "LSScheduler.h"
+#import "LSScheduleViewController.h"
 
 @implementation LSStartAnnotation @end
 @implementation LSDestinationAnnotation @end
+@implementation LSStopAnnotation @end
 @implementation LSMovingAnnotation @end
 @implementation LSRealAnnotation @end
 
@@ -41,11 +44,14 @@ static MKMapType ls_mapType = MKMapTypeStandard;
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(contentSizeChanged:) name:UIContentSizeCategoryDidChangeNotification object:nil];
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(sceneDeactivated:) name:UISceneWillDeactivateNotification object:nil];
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(sceneActivated:) name:UISceneDidActivateNotification object:nil];
+    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(scheduleChanged:) name:LSSchedulerDidChangeNotification object:nil];
+    [self updateScheduleBanner];
 }
 - (void)viewDidAppear:(BOOL)animated {
     [super viewDidAppear:animated];
     [self refreshSession];
     [self updateRealLocation];
+    [self showScheduleNotice];
 }
 - (void)viewDidDisappear:(BOOL)animated {
     [super viewDidDisappear:animated];
@@ -90,7 +96,10 @@ static MKMapType ls_mapType = MKMapTypeStandard;
     self.realRevision++;
     [self.realManager stopUpdatingLocation];
 }
-- (void)activated:(NSNotification *)note { (void)note; if (!self.closed && self.view.window) { [self refreshSession]; [self updateRealLocation]; } }
+- (void)activated:(NSNotification *)note {
+    (void)note;
+    if (!self.closed && self.view.window) { [self refreshSession]; [self updateRealLocation]; [self updateScheduleBanner]; [self showScheduleNotice]; }
+}
 - (void)sceneDeactivated:(NSNotification *)note { if (note.object == self.view.window.windowScene) [self backgrounded:note]; }
 - (void)sceneActivated:(NSNotification *)note { if (note.object == self.view.window.windowScene) [self activated:note]; }
 - (void)contentSizeChanged:(NSNotification *)note {
@@ -155,6 +164,8 @@ static MKMapType ls_mapType = MKMapTypeStandard;
     [self.view addSubview:self.scroll];
     self.contentStack = LSStack(@[], 14);
     [self.scroll addSubview:self.contentStack];
+    [self buildScheduleBanner];
+    [self.contentStack addArrangedSubview:self.scheduleBanner];
     UIButtonConfiguration *searchStyle = UIButtonConfiguration.grayButtonConfiguration;
     searchStyle.title = @"Search places or addresses";
     searchStyle.image = [UIImage systemImageNamed:@"magnifyingglass"];
@@ -244,7 +255,12 @@ static MKMapType ls_mapType = MKMapTypeStandard;
     self.playbackRow = [[UIStackView alloc] initWithArrangedSubviews:@[self.holdButton, self.offButton]];
     self.playbackRow.distribution = UIStackViewDistributionFillEqually;
     self.playbackRow.spacing = 10;
-    UIStackView *stack = LSStack(@[self.primaryButton, self.playbackRow], 10);
+    self.scheduleButton = LSIconButton(@"clock", @"Schedule");
+    self.scheduleButton.accessibilityHint = @"Start this location or route later, and turn it off at a set time.";
+    [self.scheduleButton addTarget:self action:@selector(openSchedule) forControlEvents:UIControlEventTouchUpInside];
+    UIStackView *primaryRow = LSRow(@[self.primaryButton, self.scheduleButton], 10);
+    primaryRow.alignment = UIStackViewAlignmentCenter;
+    UIStackView *stack = LSStack(@[primaryRow, self.playbackRow], 10);
     UIVisualEffectView *footer = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemChromeMaterial]];
     footer.translatesAutoresizingMaskIntoConstraints = NO;
     UIView *line = LSSeparator();
@@ -291,11 +307,18 @@ static MKMapType ls_mapType = MKMapTypeStandard;
     self.savePlaceButton = LSChipButton(@"Save", @"bookmark");
     self.savePlaceButton.accessibilityLabel = @"Save place";
     [self.savePlaceButton addTarget:self action:@selector(saveSelectedPlace) forControlEvents:UIControlEventTouchUpInside];
+    self.radiusChip = LSChipButton(@"Wander", @"dot.radiowaves.left.and.right");
+    self.radiusChip.showsMenuAsPrimaryAction = YES;
+    self.radiusChip.hidden = YES;
+    UIButton *link = LSChipButton(@"Link", @"link");
+    link.accessibilityLabel = @"Import a map link or route file";
+    link.showsMenuAsPrimaryAction = YES;
+    link.menu = [self importMenu];
     self.useRealButton = LSChipButton(@"My location", @"location.fill");
     self.useRealButton.accessibilityLabel = @"Use my real location";
     self.useRealButton.hidden = YES;
     [self.useRealButton addTarget:self action:@selector(useRealLocation) forControlEvents:UIControlEventTouchUpInside];
-    self.locationActions = LSRow(@[coordinates, self.savePlaceButton, self.useRealButton], 8);
+    self.locationActions = LSRow(@[coordinates, self.savePlaceButton, self.radiusChip, link, self.useRealButton], 8);
     self.locationActions.alignment = UIStackViewAlignmentFill;
     self.locationActions.distribution = UIStackViewDistributionFillProportionally;
     UIStackView *actions = LSStack(@[self.locationActions], 0);
@@ -362,6 +385,7 @@ static MKMapType ls_mapType = MKMapTypeStandard;
     for (MKPointAnnotation *pin in @[self.pin ?: NSNull.null, self.startPin ?: NSNull.null, self.endPin ?: NSNull.null, self.appliedPin ?: NSNull.null, self.realPin ?: NSNull.null]) {
         if ([pin isKindOfClass:MKPointAnnotation.class]) [self.mapView addAnnotation:pin];
     }
+    if (self.routeStops.count) [self.mapView addAnnotations:self.routeStops];
     if (self.routePolyline) [self.mapView addOverlay:self.routePolyline];
     if (self.radiusCircle) [self.mapView addOverlay:self.radiusCircle];
     if (savedRegion) [self.mapView setRegion:*savedRegion animated:NO];
@@ -444,13 +468,16 @@ static MKMapType ls_mapType = MKMapTypeStandard;
     save.image = [UIImage systemImageNamed:saved ? @"bookmark.fill" : @"bookmark"];
     self.savePlaceButton.configuration = save;
     self.savePlaceButton.accessibilityLabel = saved ? [NSString stringWithFormat:@"Saved as %@", saved.name] : @"Save place";
+    [self updateRadiusChip:saved];
     self.mapHintLabel.text = @"Preview only. Apply location when you’re ready.";
     [self updateRadiusPreview];
     [self updateFooter];
 }
 - (void)syncMapWorkspace {
     BOOL location = self.tab == LSPickerTabLocation, route = self.tab == LSPickerTabRoute;
-    for (MKPointAnnotation *pin in @[self.pin ?: NSNull.null, self.startPin ?: NSNull.null, self.endPin ?: NSNull.null]) {
+    NSMutableArray *pins = [NSMutableArray arrayWithArray:@[self.pin ?: NSNull.null, self.startPin ?: NSNull.null, self.endPin ?: NSNull.null]];
+    [pins addObjectsFromArray:self.routeStops ?: @[]];
+    for (MKPointAnnotation *pin in pins) {
         if (![pin isKindOfClass:MKPointAnnotation.class]) continue;
         BOOL visible = pin == self.pin ? location : route;
         if (visible && ![self.mapView.annotations containsObject:pin]) [self.mapView addAnnotation:pin];
@@ -474,7 +501,8 @@ static MKMapType ls_mapType = MKMapTypeStandard;
     self.scroll.hidden = saved;
     [self syncMapWorkspace];
     self.pin.title = @"Selected location";
-    self.mapHintLabel.text = route ? (self.endpoint == LSEndpointFrom ? @"Tap the map to set From, or tap From to search." : @"Tap the map to set To, or tap To to search.") : @"Tap the map to drop a pin. Touch and hold to save the spot.";
+    if (route) [self endpointChanged];
+    else self.mapHintLabel.text = @"Tap the map to drop a pin. Touch and hold to save the spot.";
     if (location && self.hasSelection) [self renderSelectedLocation];
     else if (location) self.coordinateCopyButton.enabled = NO;
     [self updateRouteUI];
@@ -577,6 +605,10 @@ static MKMapType ls_mapType = MKMapTypeStandard;
     self.playbackRow.hidden = mode == LSSessionModeOff;
     self.offButton.hidden = mode == LSSessionModeOff;
     self.savePlaceButton.enabled = self.hasSelection;
+    self.scheduleButton.hidden = self.tab == LSPickerTabSaved;
+    UIButtonConfiguration *clock = self.scheduleButton.configuration;
+    clock.image = [UIImage systemImageNamed:LSScheduler.shared.schedule ? @"clock.badge.checkmark.fill" : @"clock"];
+    self.scheduleButton.configuration = clock;
 }
 - (void)primaryAction {
     if (self.tab == LSPickerTabRoute) {
@@ -590,7 +622,9 @@ static MKMapType ls_mapType = MKMapTypeStandard;
     [self applyCoordinate:self.selectedCoordinate name:self.selectedName];
 }
 - (void)applyCoordinate:(CLLocationCoordinate2D)coordinate name:(NSString *)name {
-    if ([LSSessionController.shared applyStaticCoordinate:coordinate]) {
+    // A saved place can carry its own wander radius (#19).
+    LSBookmark *saved = [BookmarksManager.shared bookmarkNearCoordinate:coordinate];
+    if ([LSSessionController.shared applyStaticCoordinate:coordinate radiusOverride:saved ? saved.radius : NAN]) {
         [PersistenceManager.shared recordRecentCoordinate:coordinate name:name];
         [self showMessage:@"Location applied. Close the picker to return to your app." symbol:@"checkmark.circle.fill"];
         LSHapticSuccess();
@@ -630,6 +664,78 @@ static MKMapType ls_mapType = MKMapTypeStandard;
     [alert addAction:confirm];
     if (!destructive) alert.preferredAction = confirm;
     [self presentViewController:alert animated:LSMapAnimationsEnabled() completion:nil];
+}
+
+#pragma mark - Schedule
+
+- (void)buildScheduleBanner {
+    UIView *badge = LSIconBadge(@"clock.fill", UIColor.systemIndigoColor, 32);
+    self.scheduleLabel = LSLabel(@"", UIFontTextStyleSubheadline);
+    UIButton *change = LSChipButton(@"Change", nil);
+    change.accessibilityLabel = @"Change or cancel the schedule";
+    [change addTarget:self action:@selector(openSchedule) forControlEvents:UIControlEventTouchUpInside];
+    [change setContentCompressionResistancePriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+    UIStackView *row = LSRow(@[badge, self.scheduleLabel, change], 10);
+    row.alignment = UIStackViewAlignmentCenter;
+    self.scheduleBanner = LSInsetPanel(row);
+    self.scheduleBanner.hidden = YES;
+}
+- (void)updateScheduleBanner {
+    LSSchedule *schedule = LSScheduler.shared.schedule;
+    self.scheduleBanner.hidden = schedule == nil;
+    self.scheduleLabel.text = schedule.summary;
+    [self updateFooter];
+}
+- (void)scheduleChanged:(NSNotification *)note {
+    (void)note;
+    if (!self.closed) [self updateScheduleBanner];
+}
+- (void)showScheduleNotice {
+    NSString *notice = [LSScheduler.shared takeNotice];
+    if (notice) [self showMessage:notice symbol:@"clock.badge.exclamationmark.fill"];
+}
+- (void)openSchedule {
+    LSScheduleViewController *controller = [[LSScheduleViewController alloc] init];
+    if (self.tab == LSPickerTabRoute && self.fetchedRoute && !self.directions) {
+        LSRoute *route = self.fetchedRoute;
+        LSPlaybackOptions *options = [self draftOptions];
+        controller.subject = [NSString stringWithFormat:@"Play the route “%@”", route.name];
+        controller.schedule = ^BOOL(NSDate *start, NSDate *end, BOOL daily) {
+            return [LSScheduler.shared scheduleRoute:route options:options name:route.name start:start end:end repeatsDaily:daily];
+        };
+    } else if (self.tab == LSPickerTabLocation && self.hasSelection) {
+        CLLocationCoordinate2D coordinate = self.selectedCoordinate;
+        LSBookmark *saved = [BookmarksManager.shared bookmarkNearCoordinate:coordinate];
+        NSString *name = saved.name ?: self.selectedName;
+        double radius = saved ? saved.radius : NAN;
+        controller.subject = [NSString stringWithFormat:@"Hold “%@”", name];
+        controller.schedule = ^BOOL(NSDate *start, NSDate *end, BOOL daily) {
+            return [LSScheduler.shared scheduleLocation:coordinate name:name radiusOverride:radius start:start end:end repeatsDaily:daily];
+        };
+    }
+    __weak typeof(self) weakSelf = self;
+    controller.didFinish = ^(NSString *message) {
+        [weakSelf updateScheduleBanner];
+        [weakSelf showMessage:message symbol:@"clock.fill"];
+    };
+    [self presentEditor:controller];
+}
+- (void)presentShareItems:(NSArray *)items from:(UIView *)source {
+    UIActivityViewController *share = [[UIActivityViewController alloc] initWithActivityItems:items applicationActivities:nil];
+    UIView *anchor = source.window ? source : self.view;
+    share.popoverPresentationController.sourceView = anchor;
+    share.popoverPresentationController.sourceRect = anchor == source ? source.bounds : CGRectMake(CGRectGetMidX(self.view.bounds), CGRectGetMidY(self.view.bounds), 1, 1);
+    [self presentViewController:share animated:LSMapAnimationsEnabled() completion:nil];
+}
+- (void)updateRadiusChip:(LSBookmark *)saved {
+    self.radiusChip.hidden = saved == nil;
+    if (!saved) return;
+    NSString *title = !isfinite(saved.radius) ? @"Wander: default" : (saved.radius > 0 ? [NSString stringWithFormat:@"Wander %@ m", LSFormatDecimal(saved.radius, 0)] : @"No wander");
+    UIButtonConfiguration *config = self.radiusChip.configuration;
+    config.title = title;
+    self.radiusChip.configuration = config;
+    self.radiusChip.accessibilityLabel = [NSString stringWithFormat:@"Wander radius for %@: %@", saved.name, title];
+    self.radiusChip.menu = [self radiusMenuForBookmark:saved];
 }
 
 #pragma mark - Editors
@@ -688,6 +794,12 @@ static MKMapType ls_mapType = MKMapTypeStandard;
         typeof(self) self = weakSelf;
         [self updateRadiusPreview]; [self updateRealLocation]; [self refreshSession];
         [self showMessage:@"Settings saved." symbol:@"checkmark.circle.fill"];
+    };
+    settings.didRestore = ^(NSString *message) {
+        typeof(self) self = weakSelf;
+        [self reloadSavedPlaces]; [self updateRadiusPreview]; [self updateRealLocation]; [self refreshSession];
+        if (self.hasSelection && self.tab == LSPickerTabLocation) [self renderSelectedLocation];
+        [self showMessage:message symbol:@"arrow.counterclockwise.circle.fill"];
     };
     [self presentEditor:settings];
 }
@@ -777,12 +889,18 @@ static MKMapType ls_mapType = MKMapTypeStandard;
     view.canShowCallout = YES;
     view.animatesWhenAdded = LSMapAnimationsEnabled();
     view.displayPriority = MKFeatureDisplayPriorityRequired;
-    view.draggable = annotation == self.pin || annotation == self.startPin || annotation == self.endPin;
+    view.draggable = annotation == self.pin || annotation == self.startPin || annotation == self.endPin || [annotation isKindOfClass:LSStopAnnotation.class];
     view.markerTintColor = LSErrorColor();
     view.glyphText = nil;
     view.glyphImage = [UIImage systemImageNamed:@"mappin"];
     if ([annotation isKindOfClass:LSStartAnnotation.class]) { view.markerTintColor = LSSuccessColor(); view.glyphImage = [UIImage systemImageNamed:@"figure.walk"]; }
     if ([annotation isKindOfClass:LSDestinationAnnotation.class]) { view.markerTintColor = LSErrorColor(); view.glyphImage = [UIImage systemImageNamed:@"flag.checkered"]; }
+    if ([annotation isKindOfClass:LSStopAnnotation.class]) {
+        NSUInteger index = [self.routeStops indexOfObject:(LSStopAnnotation *)annotation];
+        view.markerTintColor = LSWarningColor();
+        view.glyphImage = nil;
+        view.glyphText = index == NSNotFound ? nil : [NSString stringWithFormat:@"%lu", (unsigned long)index + 1];
+    }
     if ([annotation isKindOfClass:LSMovingAnnotation.class]) {
         LSSessionMode mode = LSSessionController.shared.snapshot.mode;
         view.markerTintColor = LSSessionColor(mode);
@@ -800,6 +918,7 @@ static MKMapType ls_mapType = MKMapTypeStandard;
     if (view.annotation == self.startPin) [self assignEndpoint:LSEndpointFrom coordinate:view.annotation.coordinate name:@"Map point"];
     else if (view.annotation == self.endPin) [self assignEndpoint:LSEndpointTo coordinate:view.annotation.coordinate name:@"Map point"];
     else if (view.annotation == self.pin) [self setSelection:view.annotation.coordinate name:@"Dropped pin"];
+    else if ([view.annotation isKindOfClass:LSStopAnnotation.class]) [self moveStop:(LSStopAnnotation *)view.annotation to:view.annotation.coordinate name:@"Map point"];
     LSHapticSelection();
     [view setDragState:MKAnnotationViewDragStateNone animated:LSMapAnimationsEnabled()];
 }
@@ -819,8 +938,12 @@ static MKMapType ls_mapType = MKMapTypeStandard;
 - (void)updateRadiusPreview {
     if (self.radiusCircle) [self.mapView removeOverlay:self.radiusCircle];
     self.radiusCircle = nil;
-    if (self.tab == LSPickerTabLocation && self.hasSelection && PersistenceManager.shared.fluctuationEnabled) {
-        self.radiusCircle = [MKCircle circleWithCenterCoordinate:self.selectedCoordinate radius:PersistenceManager.shared.fluctuationRadius];
+    if (self.tab != LSPickerTabLocation || !self.hasSelection) return;
+    LSBookmark *saved = [BookmarksManager.shared bookmarkNearCoordinate:self.selectedCoordinate];
+    double radius = saved && isfinite(saved.radius) ? saved.radius
+                  : (PersistenceManager.shared.fluctuationEnabled ? PersistenceManager.shared.fluctuationRadius : 0);
+    if (radius > 0) {
+        self.radiusCircle = [MKCircle circleWithCenterCoordinate:self.selectedCoordinate radius:radius];
         [self.mapView addOverlay:self.radiusCircle];
     }
 }

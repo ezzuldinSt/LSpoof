@@ -2,6 +2,7 @@
 #import "PersistenceManager.h"
 #import "OverlayWindow.h"
 #import "SessionController.h"
+#import "LSScheduler.h"
 
 __attribute__((constructor(101)))
 static void LSDylibInit(void) {
@@ -11,5 +12,6 @@ static void LSDylibInit(void) {
 
     dispatch_async(dispatch_get_main_queue(), ^{
         [LSOverlayManager install];
+        [LSScheduler.shared activate];
     });
 }

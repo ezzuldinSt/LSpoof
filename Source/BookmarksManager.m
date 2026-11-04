@@ -15,6 +15,7 @@ static BOOL LSValidBookmarkCoordinate(CLLocationCoordinate2D coordinate) {
 @property (nonatomic, copy) NSString *name;
 @property (nonatomic) CLLocationCoordinate2D coordinate;
 @property (nonatomic, strong) NSDate *createdAt;
+@property (nonatomic) double radius;
 @end
 @implementation LSBookmark
 - (instancetype)initWithName:(NSString *)name coordinate:(CLLocationCoordinate2D)coordinate {
@@ -24,14 +25,17 @@ static BOOL LSValidBookmarkCoordinate(CLLocationCoordinate2D coordinate) {
         _name = [name copy];
         _coordinate = coordinate;
         _createdAt = NSDate.date;
+        _radius = NAN;
     }
     return self;
 }
 - (NSDictionary *)dictionaryRepresentation {
     NSISO8601DateFormatter *formatter = [[NSISO8601DateFormatter alloc] init];
-    return @{@"LSBMID":self.identifier, @"LSBMName":self.name,
+    NSMutableDictionary *dictionary = [@{@"LSBMID":self.identifier, @"LSBMName":self.name,
              @"LSBMLat":@(self.coordinate.latitude), @"LSBMLon":@(self.coordinate.longitude),
-             @"LSBMDate":[formatter stringFromDate:self.createdAt]};
+             @"LSBMDate":[formatter stringFromDate:self.createdAt]} mutableCopy];
+    if (isfinite(self.radius)) dictionary[@"LSBMRadius"] = @(self.radius);
+    return dictionary;
 }
 + (instancetype)bookmarkFromDictionary:(id)dictionary {
     if (![dictionary isKindOfClass:NSDictionary.class]) return nil;
@@ -47,6 +51,8 @@ static BOOL LSValidBookmarkCoordinate(CLLocationCoordinate2D coordinate) {
     // An unreadable date used to drop the whole place, and the load-time rewrite then
     // deleted it from storage. Keep the place; its date falls back to now.
     if (parsed) bookmark.createdAt = parsed;
+    id radius = dictionary[@"LSBMRadius"];
+    if ([radius isKindOfClass:NSNumber.class] && isfinite([radius doubleValue]) && [radius doubleValue] >= 0 && [radius doubleValue] <= 1000) bookmark.radius = [radius doubleValue];
     id identifier = dictionary[@"LSBMID"];
     if ([identifier isKindOfClass:NSString.class] && [identifier length] <= 64 && [[NSUUID alloc] initWithUUIDString:identifier]) bookmark.identifier = [[NSUUID alloc] initWithUUIDString:identifier].UUIDString;
     return bookmark;
@@ -128,6 +134,7 @@ static BOOL LSValidBookmarkCoordinate(CLLocationCoordinate2D coordinate) {
         LSBookmark *replacement = [[LSBookmark alloc] initWithName:validName coordinate:old.coordinate];
         replacement.identifier = old.identifier;
         replacement.createdAt = old.createdAt;
+        replacement.radius = old.radius;
         self.bookmarks[index] = replacement;
         [self persistLocked];
         return YES;
@@ -142,6 +149,49 @@ static BOOL LSValidBookmarkCoordinate(CLLocationCoordinate2D coordinate) {
         [self.bookmarks insertObject:bookmark atIndex:index];
         [self persistLocked];
         return YES;
+    }
+}
+- (BOOL)setRadius:(double)radius forBookmarkWithID:(NSString *)identifier {
+    if (isfinite(radius) && (radius < 0 || radius > 1000)) return NO;
+    @synchronized(self) {
+        NSUInteger index = [self indexForID:identifier];
+        if (index == NSNotFound) return NO;
+        LSBookmark *old = self.bookmarks[index];
+        LSBookmark *replacement = [[LSBookmark alloc] initWithName:old.name coordinate:old.coordinate];
+        replacement.identifier = old.identifier;
+        replacement.createdAt = old.createdAt;
+        replacement.radius = isfinite(radius) ? radius : NAN;
+        self.bookmarks[index] = replacement;
+        [self persistLocked];
+        return YES;
+    }
+}
+- (NSUInteger)importBookmarks:(NSArray<LSBookmark *> *)bookmarks replace:(BOOL)replace {
+    if (![bookmarks isKindOfClass:NSArray.class]) return 0;
+    @synchronized(self) {
+        NSMutableArray<LSBookmark *> *result = replace ? [NSMutableArray array] : [self.bookmarks mutableCopy];
+        NSMutableSet<NSString *> *ids = [NSMutableSet set];
+        for (LSBookmark *existing in result) [ids addObject:existing.identifier];
+        NSUInteger added = 0;
+        // A restore may bring back a list above the add limit; it is capped well above it.
+        NSUInteger limit = MAX(self.class.capacity, MIN((NSUInteger)500, bookmarks.count + (replace ? 0 : result.count)));
+        for (LSBookmark *candidate in bookmarks) {
+            if (![candidate isKindOfClass:LSBookmark.class] || result.count >= limit) continue;
+            CLLocation *target = [[CLLocation alloc] initWithLatitude:candidate.coordinate.latitude longitude:candidate.coordinate.longitude];
+            BOOL duplicate = NO;
+            for (LSBookmark *existing in result) {
+                CLLocation *other = [[CLLocation alloc] initWithLatitude:existing.coordinate.latitude longitude:existing.coordinate.longitude];
+                if ([existing.identifier isEqualToString:candidate.identifier] || [other distanceFromLocation:target] < 5.0) { duplicate = YES; break; }
+            }
+            if (duplicate) continue;
+            if ([ids containsObject:candidate.identifier]) candidate.identifier = NSUUID.UUID.UUIDString;
+            [ids addObject:candidate.identifier];
+            [result addObject:candidate];
+            added++;
+        }
+        self.bookmarks = result;
+        [self persistLocked];
+        return added;
     }
 }
 - (LSBookmark *)bookmarkNearCoordinate:(CLLocationCoordinate2D)coordinate {
