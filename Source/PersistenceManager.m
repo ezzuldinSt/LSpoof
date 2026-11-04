@@ -15,6 +15,11 @@ static NSString * const kKeyKeepLastSpoof = @"LSKeepLastSpoof";
 static NSString * const kKeyShowRealLocation = @"LSShowRealLocation";
 static NSString * const kKeyFloatingButton = @"LSShowFloatingButton";
 static NSString * const kKeyRecentLocations = @"LSRecentLocations";
+static NSString * const kKeySmoothMotion = @"LSSmoothMotion";
+static NSString * const kKeyAccelerationProfile = @"LSAccelerationProfile";
+static NSString * const kKeyStopDwell = @"LSStopDwell";
+static NSString * const kKeyContinueInBackground = @"LSContinueInBackground";
+static NSString * const kKeyActiveRadius = @"LSActiveRadius";
 static NSString * const kRecentLatitudeKey = @"LSRecentLat";
 static NSString * const kRecentLongitudeKey = @"LSRecentLon";
 static NSString * const kRecentNameKey = @"LSRecentName";
@@ -36,13 +41,19 @@ static const NSUInteger kLSMaxRecentLocations = 5;
 @property (nonatomic, assign) BOOL cachedKeepLastSpoof;
 @property (nonatomic, assign) BOOL cachedShowRealLocation;
 @property (nonatomic, assign) BOOL cachedFloatingButton;
+@property (nonatomic, assign) BOOL cachedSmoothMotion;
+@property (nonatomic, assign) NSInteger cachedAccelerationProfile;
+@property (nonatomic, assign) double cachedStopDwell;
+@property (nonatomic, assign) BOOL cachedContinueInBackground;
+@property (nonatomic, assign) double cachedActiveRadius;
 @property (nonatomic, strong) NSMutableArray<NSDictionary *> *cachedRecents;
 @property (nonatomic, assign) BOOL recentsLoaded;
 @end
 
 @implementation PersistenceManager
 
-@dynamic simulationWasActive, altitude, heading, fluctuationEnabled, fluctuationRadius, keepLastSpoof, showRealLocation, showFloatingButton;
+@dynamic simulationWasActive, altitude, heading, fluctuationEnabled, fluctuationRadius, keepLastSpoof, showRealLocation, showFloatingButton,
+    smoothMotion, accelerationProfile, stopDwell, continueInBackground, activeRadiusOverride;
 
 + (instancetype)shared {
     static PersistenceManager *instance = nil;
@@ -68,6 +79,8 @@ static const NSUInteger kLSMaxRecentLocations = 5;
         _cachedKeepLastSpoof = NO;
         _cachedShowRealLocation = NO;
         _cachedFloatingButton = YES;
+        _cachedAccelerationProfile = 1;
+        _cachedActiveRadius = NAN;
         _cachedRecents = [NSMutableArray array];
     }
     return self;
@@ -127,6 +140,14 @@ static const NSUInteger kLSMaxRecentLocations = 5;
     self.cachedKeepLastSpoof = [self storedBool:kKeyKeepLastSpoof fallback:NO];
     self.cachedShowRealLocation = [self storedBool:kKeyShowRealLocation fallback:NO];
     self.cachedFloatingButton = [self storedBool:kKeyFloatingButton fallback:YES];
+    self.cachedSmoothMotion = [self storedBool:kKeySmoothMotion fallback:NO];
+    double profile = [self storedNumber:kKeyAccelerationProfile fallback:1];
+    self.cachedAccelerationProfile = profile >= 0 && profile <= 2 ? (NSInteger)profile : 1;
+    double dwell = [self storedNumber:kKeyStopDwell fallback:0];
+    self.cachedStopDwell = dwell >= 0 && dwell <= 3600 ? dwell : 0;
+    self.cachedContinueInBackground = [self storedBool:kKeyContinueInBackground fallback:NO];
+    double radius = [self storedNumber:kKeyActiveRadius fallback:NAN];
+    self.cachedActiveRadius = radius >= 0 && radius <= 1000 ? radius : NAN;
     if (self.cachedAltitude < -500 || self.cachedAltitude > 10000) self.cachedAltitude = 0;
     if (!isfinite(self.cachedAltitude)) self.cachedAltitude = 0.0;
     if (!isfinite(self.cachedHeading)) self.cachedHeading = 0.0;
@@ -339,6 +360,87 @@ static const NSUInteger kLSMaxRecentLocations = 5;
     self.cachedFloatingButton = show;
     os_unfair_lock_unlock(&_lock);
     [self.defaults setBool:show forKey:kKeyFloatingButton];
+}
+
+- (BOOL)smoothMotion {
+    os_unfair_lock_lock(&_lock);
+    BOOL value = self.cachedSmoothMotion;
+    os_unfair_lock_unlock(&_lock);
+    return value;
+}
+- (void)setSmoothMotion:(BOOL)smoothMotion {
+    os_unfair_lock_lock(&_lock);
+    self.cachedSmoothMotion = smoothMotion;
+    os_unfair_lock_unlock(&_lock);
+    [self.defaults setBool:smoothMotion forKey:kKeySmoothMotion];
+}
+- (NSInteger)accelerationProfile {
+    os_unfair_lock_lock(&_lock);
+    NSInteger value = self.cachedAccelerationProfile;
+    os_unfair_lock_unlock(&_lock);
+    return value;
+}
+- (void)setAccelerationProfile:(NSInteger)accelerationProfile {
+    if (accelerationProfile < 0 || accelerationProfile > 2) return;
+    os_unfair_lock_lock(&_lock);
+    self.cachedAccelerationProfile = accelerationProfile;
+    os_unfair_lock_unlock(&_lock);
+    [self.defaults setInteger:accelerationProfile forKey:kKeyAccelerationProfile];
+}
+- (double)stopDwell {
+    os_unfair_lock_lock(&_lock);
+    double value = self.cachedStopDwell;
+    os_unfair_lock_unlock(&_lock);
+    return value;
+}
+- (void)setStopDwell:(double)stopDwell {
+    if (!isfinite(stopDwell) || stopDwell < 0 || stopDwell > 3600) return;
+    os_unfair_lock_lock(&_lock);
+    self.cachedStopDwell = stopDwell;
+    os_unfair_lock_unlock(&_lock);
+    [self.defaults setDouble:stopDwell forKey:kKeyStopDwell];
+}
+- (BOOL)continueInBackground {
+    os_unfair_lock_lock(&_lock);
+    BOOL value = self.cachedContinueInBackground;
+    os_unfair_lock_unlock(&_lock);
+    return value;
+}
+- (void)setContinueInBackground:(BOOL)continueInBackground {
+    os_unfair_lock_lock(&_lock);
+    self.cachedContinueInBackground = continueInBackground;
+    os_unfair_lock_unlock(&_lock);
+    [self.defaults setBool:continueInBackground forKey:kKeyContinueInBackground];
+}
+- (double)activeRadiusOverride {
+    os_unfair_lock_lock(&_lock);
+    double value = self.cachedActiveRadius;
+    os_unfair_lock_unlock(&_lock);
+    return value;
+}
+- (void)setActiveRadiusOverride:(double)radius {
+    BOOL valid = isfinite(radius) && radius >= 0 && radius <= 1000;
+    os_unfair_lock_lock(&_lock);
+    self.cachedActiveRadius = valid ? radius : NAN;
+    os_unfair_lock_unlock(&_lock);
+    if (valid) [self.defaults setDouble:radius forKey:kKeyActiveRadius];
+    else [self.defaults removeObjectForKey:kKeyActiveRadius];
+}
+
+- (void)replaceRecentLocations:(NSArray<NSDictionary *> *)entries {
+    if (![entries isKindOfClass:NSArray.class]) return;
+    os_unfair_lock_lock(&_lock);
+    [self.cachedRecents removeAllObjects];
+    self.recentsLoaded = YES;
+    os_unfair_lock_unlock(&_lock);
+    [self.defaults setObject:entries forKey:kKeyRecentLocations];
+    // Reload through the same validation as a launch would use.
+    os_unfair_lock_lock(&_lock);
+    self.recentsLoaded = NO;
+    [self reloadRecentsLocked];
+    NSArray *payload = [self.cachedRecents copy];
+    os_unfair_lock_unlock(&_lock);
+    [self.defaults setObject:payload forKey:kKeyRecentLocations];
 }
 
 - (BOOL)setSpoofCoordinate:(CLLocationCoordinate2D)coordinate enabled:(BOOL)enabled {

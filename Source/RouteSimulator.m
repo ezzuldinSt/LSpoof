@@ -1,23 +1,151 @@
 #import "RouteSimulator.h"
 #import "RouteGeometry.h"
+#import "RouteMotion.h"
 #import <os/lock.h>
 
-@implementation LSRoutePoint
+static const double kLSPresetSpeeds[] = {5, 15, 50};
+
+@implementation LSPlaybackOptions
+- (instancetype)init {
+    self = [super init];
+    if (self) {
+        _mode = LSTransportModeWalking;
+        _customSpeedKmh = 30.0;
+        _accelerationProfile = LSAccelerationNormal;
+        _paceMultiplier = 1.0;
+    }
+    return self;
+}
++ (instancetype)optionsWithSpeedKmh:(double)kmh {
+    LSPlaybackOptions *options = [[self alloc] init];
+    options.mode = LSTransportModeCustom;
+    for (NSInteger index = 0; index < 3; index++) {
+        if (fabs(kmh - kLSPresetSpeeds[index]) < 0.01) options.mode = (LSTransportMode)index;
+    }
+    options.customSpeedKmh = options.mode == LSTransportModeCustom ? kmh : 30.0;
+    return options;
+}
+- (id)copyWithZone:(NSZone *)zone {
+    LSPlaybackOptions *copy = [[[self class] allocWithZone:zone] init];
+    copy.mode = self.mode;
+    copy.customSpeedKmh = self.customSpeedKmh;
+    copy.smooth = self.smooth;
+    copy.accelerationProfile = self.accelerationProfile;
+    copy.stopDwell = self.stopDwell;
+    copy.recordedPace = self.recordedPace;
+    copy.paceMultiplier = self.paceMultiplier;
+    return copy;
+}
+- (double)speedKmh {
+    return self.mode == LSTransportModeCustom ? self.customSpeedKmh : kLSPresetSpeeds[MAX(0, MIN(2, self.mode))];
+}
+- (double)speedMetersPerSecond { return [LSRouteSimulator speedMetersPerSecondForMode:self.mode customSpeedKmh:self.customSpeedKmh]; }
+- (BOOL)isValid {
+    return self.mode >= LSTransportModeWalking && self.mode <= LSTransportModeCustom &&
+        (self.mode != LSTransportModeCustom || (isfinite(self.customSpeedKmh) && self.customSpeedKmh >= 1.0 && self.customSpeedKmh <= 500.0)) &&
+        self.accelerationProfile >= LSAccelerationGentle && self.accelerationProfile <= LSAccelerationSporty &&
+        isfinite(self.stopDwell) && self.stopDwell >= 0 && self.stopDwell <= 3600 &&
+        isfinite(self.paceMultiplier) && self.paceMultiplier >= 0.1 && self.paceMultiplier <= 20;
+}
+- (NSDictionary *)dictionaryRepresentation {
+    return @{ @"mode": @(self.mode), @"customSpeedKmh": @(self.customSpeedKmh), @"smooth": @(self.smooth),
+              @"acceleration": @(self.accelerationProfile), @"stopDwell": @(self.stopDwell),
+              @"recordedPace": @(self.recordedPace), @"paceMultiplier": @(self.paceMultiplier) };
+}
++ (instancetype)optionsFromDictionary:(id)dictionary {
+    if (![dictionary isKindOfClass:NSDictionary.class]) return nil;
+    NSDictionary *values = dictionary;
+    for (NSString *key in @[ @"mode", @"customSpeedKmh", @"smooth", @"acceleration", @"stopDwell", @"recordedPace", @"paceMultiplier" ]) {
+        if (![values[key] isKindOfClass:NSNumber.class]) return nil;
+    }
+    LSPlaybackOptions *options = [[self alloc] init];
+    options.mode = (LSTransportMode)[values[@"mode"] integerValue];
+    options.customSpeedKmh = [values[@"customSpeedKmh"] doubleValue];
+    options.smooth = [values[@"smooth"] boolValue];
+    options.accelerationProfile = (LSAccelerationProfile)[values[@"acceleration"] integerValue];
+    options.stopDwell = [values[@"stopDwell"] doubleValue];
+    options.recordedPace = [values[@"recordedPace"] boolValue];
+    options.paceMultiplier = [values[@"paceMultiplier"] doubleValue];
+    return options.isValid ? options : nil;
+}
 @end
+
+// The route in the arrays the motion model reads, plus turn radii.
+@interface LSMotionPlan : NSObject {
+@public
+    LSMotionRoute _motion;
+}
+@property (nonatomic, strong) LSRoute *route;
+@property (nonatomic, strong) NSMutableData *radii;
+@property (nonatomic, strong, nullable) NSData *speeds;
+@property (nonatomic, strong) NSMutableData *stopDistances;
+@property (nonatomic, strong) NSMutableData *stopDwells;
+@end
+@implementation LSMotionPlan
+- (instancetype)initWithRoute:(LSRoute *)route {
+    self = [super init];
+    if (!self) return nil;
+    NSUInteger count = route.pointCount;
+    _route = route;
+    NSMutableData *latitudes = [NSMutableData dataWithLength:sizeof(double) * count];
+    NSMutableData *longitudes = [NSMutableData dataWithLength:sizeof(double) * count];
+    double *lat = latitudes.mutableBytes, *lon = longitudes.mutableBytes;
+    for (NSUInteger index = 0; index < count; index++) { lat[index] = route.coordinates[index].latitude; lon[index] = route.coordinates[index].longitude; }
+    _radii = [NSMutableData dataWithLength:sizeof(double) * count];
+    LSRouteCornerRadii(lat, lon, route.cumulativeDistances, count, 15.0, _radii.mutableBytes);
+    _speeds = route.recordedSegmentSpeeds;
+    _stopDistances = [NSMutableData dataWithLength:sizeof(double) * route.stopDistances.count];
+    _stopDwells = [NSMutableData dataWithLength:sizeof(double) * route.stopDistances.count];
+    for (NSUInteger index = 0; index < route.stopDistances.count; index++) {
+        ((double *)_stopDistances.mutableBytes)[index] = route.stopDistances[index].doubleValue;
+        ((double *)_stopDwells.mutableBytes)[index] = route.stopDwells[index].doubleValue;
+    }
+    _motion = (LSMotionRoute){route.cumulativeDistances, _radii.bytes, _speeds.bytes, count,
+                              _stopDistances.bytes, _stopDwells.bytes, route.stopDistances.count};
+    return self;
+}
+@end
+
+static LSMotionParams LSParamsForOptions(LSPlaybackOptions *options, LSRoute *route) {
+    LSMotionParams params = {0};
+    params.cruiseSpeed = options.speedMetersPerSecond;
+    params.paceMultiplier = options.paceMultiplier > 0 ? options.paceMultiplier : 1.0;
+    params.useRecordedPace = options.recordedPace && route.hasTiming;
+    // A recording already contains its own speeding up and slowing down.
+    params.smooth = options.smooth && !params.useRecordedPace;
+    params.defaultDwell = options.stopDwell;
+    double kmh = options.speedKmh;
+    LSTransportMode physics = options.mode;
+    if (physics == LSTransportModeCustom) physics = kmh <= 7 ? LSTransportModeWalking : (kmh <= 25 ? LSTransportModeCycling : LSTransportModeDriving);
+    switch (physics) {
+        case LSTransportModeWalking: params.acceleration = 0.6; params.deceleration = 1.0; params.lateralAcceleration = 1.5; params.minimumCornerSpeed = 0.8; break;
+        case LSTransportModeCycling: params.acceleration = 0.9; params.deceleration = 2.0; params.lateralAcceleration = 2.0; params.minimumCornerSpeed = 2.0; break;
+        default: params.acceleration = 2.2; params.deceleration = 3.0; params.lateralAcceleration = 2.8; params.minimumCornerSpeed = 3.0; break;
+    }
+    double scale = options.accelerationProfile == LSAccelerationGentle ? 0.6 : (options.accelerationProfile == LSAccelerationSporty ? 1.6 : 1.0);
+    double lateral = options.accelerationProfile == LSAccelerationGentle ? 0.85 : (options.accelerationProfile == LSAccelerationSporty ? 1.2 : 1.0);
+    params.acceleration *= scale;
+    params.deceleration *= scale;
+    params.lateralAcceleration *= lateral;
+    params.substep = 0.1;
+    return params;
+}
 
 @interface LSRouteSimulator () {
     os_unfair_lock _coordLock;
+    LSMotionState _state;
 }
-@property (nonatomic, strong) NSArray<LSRoutePoint *> *routePoints;
-@property (nonatomic, assign) double totalDistance;
-@property (nonatomic, assign) double distanceCovered;
+@property (nonatomic, strong, nullable) LSRoute *route;
+@property (nonatomic, strong, nullable) LSMotionPlan *plan;
 @property (nonatomic, strong, nullable) NSTimer *tickTimer;
 @property (nonatomic, assign) CLLocationCoordinate2D currentCoordinate;
 @property (nonatomic, assign) CLLocationDirection currentHeading;
-@property (nonatomic, assign) NSUInteger currentSegmentIndex;
 @property (nonatomic, assign) BOOL isSimulating;
 @property (nonatomic, assign) BOOL isPaused;
 @property (nonatomic, assign) NSTimeInterval lastTickTime;
+@property (nonatomic, assign) double cachedRemaining;
+@property (nonatomic, assign) NSTimeInterval cachedRemainingAt;
+@property (nonatomic, assign) BOOL remainingDirty;
 @end
 
 @implementation LSRouteSimulator
@@ -38,12 +166,32 @@
     self = [super init];
     if (self) {
         _coordLock = OS_UNFAIR_LOCK_INIT;
-        _transportMode = LSTransportModeWalking;
-        _customSpeedKmh = 30.0;
+        _options = [[LSPlaybackOptions alloc] init];
         _currentCoordinate = kCLLocationCoordinate2DInvalid;
         _currentHeading = 0.0;
+        LSMotionReset(&_state);
     }
     return self;
+}
+
+- (void)setOptions:(LSPlaybackOptions *)options {
+    if (!options.isValid) return;
+    _options = [options copy];
+    self.remainingDirty = YES;
+}
+- (LSTransportMode)transportMode { return self.options.mode; }
+- (double)customSpeedKmh { return self.options.customSpeedKmh; }
+- (double)totalDistance { return self.route.distance; }
+- (double)distanceCovered { return self.route ? _state.covered : 0.0; }
+- (double)currentSpeed { return self.isSimulating && !self.isPaused ? _state.speed : 0.0; }
+- (BOOL)isWaitingAtStop { return self.isSimulating && _state.dwelling; }
+- (NSTimeInterval)waitRemaining { return _state.dwelling ? _state.dwellRemaining : 0.0; }
+- (NSUInteger)plannedStopsReached {
+    NSUInteger reached = 0;
+    for (NSUInteger index = 0; index < self.route.stopDistances.count; index++) {
+        if (self.route.stopDwells[index].doubleValue < 0 && self.route.stopDistances[index].doubleValue <= _state.covered + 1e-6) reached++;
+    }
+    return reached;
 }
 
 - (CLLocationCoordinate2D)currentCoordinate {
@@ -74,13 +222,11 @@
 
 // Messaging nil returned {0, 0}, a valid coordinate in the Gulf of Guinea.
 - (CLLocationCoordinate2D)startCoordinate {
-    LSRoutePoint *point = self.routePoints.firstObject;
-    return point ? point.coordinate : kCLLocationCoordinate2DInvalid;
+    return self.route.pointCount ? self.route.coordinates[0] : kCLLocationCoordinate2DInvalid;
 }
 
 - (CLLocationCoordinate2D)destinationCoordinate {
-    LSRoutePoint *point = self.routePoints.lastObject;
-    return point ? point.coordinate : kCLLocationCoordinate2DInvalid;
+    return self.route.pointCount ? self.route.coordinates[self.route.pointCount - 1] : kCLLocationCoordinate2DInvalid;
 }
 
 + (double)speedMetersPerSecondForMode:(LSTransportMode)mode customSpeedKmh:(double)customSpeedKmh {
@@ -111,74 +257,20 @@
     return 6.0;
 }
 
-- (BOOL)startWithRoute:(MKRoute *)route {
-    MKPolyline *polyline = route.polyline;
-    NSUInteger pointCount = polyline.pointCount;
-    if (!polyline || pointCount < 2) {
-        return NO;
-    }
-
-    CLLocationCoordinate2D *rawCoordinates = malloc(sizeof(CLLocationCoordinate2D) * pointCount);
-    if (!rawCoordinates) {
-        return NO;
-    }
-
-    [polyline getCoordinates:rawCoordinates range:NSMakeRange(0, pointCount)];
-
-    for (NSUInteger index = 0; index < pointCount; index++) {
-        if (!CLLocationCoordinate2DIsValid(rawCoordinates[index])) {
-            free(rawCoordinates);
-            return NO;
-        }
-    }
-
-    NSMutableArray<LSRoutePoint *> *points = [NSMutableArray arrayWithCapacity:pointCount];
-    double cumulative = 0.0;
-
-    LSRoutePoint *firstPoint = [[LSRoutePoint alloc] init];
-    firstPoint.coordinate = rawCoordinates[0];
-    firstPoint.cumulativeDistance = 0.0;
-    [points addObject:firstPoint];
-
-    for (NSUInteger index = 1; index < pointCount; index++) {
-        CLLocation *previous = [[CLLocation alloc] initWithLatitude:rawCoordinates[index - 1].latitude
-                                                          longitude:rawCoordinates[index - 1].longitude];
-        CLLocation *current = [[CLLocation alloc] initWithLatitude:rawCoordinates[index].latitude
-                                                       longitude:rawCoordinates[index].longitude];
-        double distance = [current distanceFromLocation:previous];
-        if (!isfinite(distance)) {
-            free(rawCoordinates);
-            return NO;
-        }
-        if (distance <= 0.0) continue;
-        cumulative += distance;
-
-        LSRoutePoint *point = [[LSRoutePoint alloc] init];
-        point.coordinate = rawCoordinates[index];
-        point.cumulativeDistance = cumulative;
-        [points addObject:point];
-    }
-
-    if (points.count < 2 || !isfinite(cumulative) || cumulative <= 0.0) {
-        free(rawCoordinates);
-        return NO;
-    }
-
+- (BOOL)startWithRoute:(LSRoute *)route {
+    if (![route isKindOfClass:LSRoute.class] || route.pointCount < 2 || !(route.distance > 0) || !isfinite(route.distance)) return NO;
+    LSMotionPlan *plan = [[LSMotionPlan alloc] initWithRoute:route];
+    if (!plan) return NO;
     [self stop];
-    self.routePoints = [points copy];
-    self.totalDistance = cumulative;
-    self.distanceCovered = 0.0;
-    self.currentCoordinate = firstPoint.coordinate;
-    self.currentSegmentIndex = 1;
-    if (points.count >= 2) {
-        self.currentHeading = [self headingFromCoordinate:((LSRoutePoint *)points[0]).coordinate
-                                               toCoordinate:((LSRoutePoint *)points[1]).coordinate];
-    }
+    self.route = route;
+    self.plan = plan;
+    LSMotionReset(&_state);
+    CLLocationDirection heading = 0;
+    self.currentCoordinate = [route coordinateAtDistance:0 heading:&heading];
+    if (isfinite(heading)) self.currentHeading = heading;
     self.isSimulating = YES;
     self.isPaused = NO;
-
-    free(rawCoordinates);
-
+    self.remainingDirty = YES;
     [self scheduleTickTimer];
     return YES;
 }
@@ -197,6 +289,9 @@
         return;
     }
     self.isPaused = NO;
+    // Playback was standing still; it starts moving again from rest.
+    _state.speed = 0.0;
+    self.remainingDirty = YES;
     [self scheduleTickTimer];
 }
 
@@ -205,8 +300,7 @@
     self.tickTimer = nil;
     self.isSimulating = NO;
     self.isPaused = NO;
-    self.distanceCovered = 0.0;
-    self.currentSegmentIndex = 0;
+    LSMotionReset(&_state);
     // Keep the validated definition for replay; session state controls activation.
 }
 
@@ -224,30 +318,23 @@
 }
 
 - (void)handleTick {
-    if (!self.isSimulating || self.isPaused || self.routePoints.count < 2) {
+    if (!self.isSimulating || self.isPaused || !self.plan) {
         return;
     }
-
-    double speed = [LSRouteSimulator speedMetersPerSecondForMode:self.transportMode
-                                                  customSpeedKmh:self.customSpeedKmh];
     NSTimeInterval now = NSProcessInfo.processInfo.systemUptime;
     // A stalled main thread or an unannounced suspension must not teleport the
     // location far along the route; movement resumes at normal speed instead.
     NSTimeInterval elapsed = MIN(1.0, MAX(0.0, now - self.lastTickTime));
     self.lastTickTime = now;
-    double advanced = LSRouteAdvanceDistance(self.distanceCovered, speed, elapsed, self.totalDistance);
-    if (!isfinite(advanced)) return;
-    self.distanceCovered = advanced;
+    LSMotionParams params = LSParamsForOptions(self.options, self.route);
+    LSMotionStep(&self.plan->_motion, &params, &_state, elapsed);
 
-    if (self.distanceCovered >= self.totalDistance) {
-        LSRoutePoint *lastPoint = self.routePoints.lastObject;
-        self.currentCoordinate = lastPoint.coordinate;
-        NSUInteger lastIndex = self.routePoints.count - 1;
-        if (lastIndex >= 1) {
-            LSRoutePoint *previousPoint = self.routePoints[lastIndex - 1];
-            self.currentHeading = [self headingFromCoordinate:previousPoint.coordinate
-                                                 toCoordinate:lastPoint.coordinate];
-        }
+    CLLocationDirection heading = self.currentHeading;
+    CLLocationCoordinate2D coordinate = [self.route coordinateAtDistance:_state.covered heading:&heading];
+    if (CLLocationCoordinate2DIsValid(coordinate)) self.currentCoordinate = coordinate;
+    if (isfinite(heading) && !_state.dwelling) self.currentHeading = heading;
+
+    if (_state.finished) {
         [self.tickTimer invalidate];
         self.tickTimer = nil;
         self.isSimulating = NO;
@@ -258,40 +345,114 @@
         }
         return;
     }
-
-    NSUInteger count = self.routePoints.count;
-    while (self.currentSegmentIndex < count &&
-           self.currentSegmentIndex + 1 < count &&
-           self.distanceCovered >= self.routePoints[self.currentSegmentIndex].cumulativeDistance) {
-        self.currentSegmentIndex++;
-    }
-    NSUInteger index = MIN(self.currentSegmentIndex, count - 1);
-    LSRoutePoint *segmentEnd = self.routePoints[index];
-    LSRoutePoint *segmentStart = index > 0 ? self.routePoints[index - 1] : segmentEnd;
-
-    double segmentLength = segmentEnd.cumulativeDistance - segmentStart.cumulativeDistance;
-    double segmentProgress = 0.0;
-    if (segmentLength > 0.0) {
-        segmentProgress = (self.distanceCovered - segmentStart.cumulativeDistance) / segmentLength;
-    }
-
-    LSRouteCoordinate interpolated = LSRouteInterpolate(
-        (LSRouteCoordinate){segmentStart.coordinate.latitude, segmentStart.coordinate.longitude},
-        (LSRouteCoordinate){segmentEnd.coordinate.latitude, segmentEnd.coordinate.longitude}, segmentProgress);
-    self.currentCoordinate = CLLocationCoordinate2DMake(interpolated.latitude, interpolated.longitude);
-    self.currentHeading = [self headingFromCoordinate:segmentStart.coordinate toCoordinate:segmentEnd.coordinate];
     [self notifyDelegateUpdate];
-}
-
-- (CLLocationDirection)headingFromCoordinate:(CLLocationCoordinate2D)from toCoordinate:(CLLocationCoordinate2D)to {
-    return LSRouteBearing((LSRouteCoordinate){from.latitude, from.longitude},
-                          (LSRouteCoordinate){to.latitude, to.longitude});
 }
 
 - (void)notifyDelegateUpdate {
     id<LSRouteSimulatorDelegate> delegate = self.delegate;
     if ([delegate respondsToSelector:@selector(routeSimulator:didUpdateCoordinate:heading:)]) {
         [delegate routeSimulator:self didUpdateCoordinate:self.currentCoordinate heading:self.currentHeading];
+    }
+}
+
+#pragma mark - Estimates
+
+static BOOL LSNeedsPlayback(LSMotionParams params, const LSMotionRoute *route) {
+    if (params.smooth || params.useRecordedPace) return YES;
+    for (size_t index = 0; index < route->stopCount; index++) if (route->stopDwell[index] < 0 && params.defaultDwell > 0) return YES;
+    return NO;
+}
+
+static double LSRemainingFrom(const LSMotionRoute *route, LSMotionParams params, LSMotionState state) {
+    if (state.finished) return 0.0;
+    if (!LSNeedsPlayback(params, route)) return (LSMotionTotal(route) - state.covered) / LSMotionCruise(route, &params, &state);
+    params.substep = 0.5;
+    double elapsed = 0.0;
+    double dt = 1.0;
+    unsigned steps = 0;
+    while (!state.finished) {
+        double used = LSMotionStep(route, &params, &state, dt);
+        elapsed += used;
+        // Very long trips fall back to coarser steps rather than stalling the caller.
+        if (++steps == 20000) { dt = 10.0; params.substep = 2.0; }
+        if (used <= 0.0 || elapsed > 30.0 * 86400.0) return NAN;
+    }
+    return elapsed;
+}
+
+- (NSTimeInterval)remainingTimeEstimate {
+    if (!self.isSimulating || !self.plan) return 0.0;
+    NSTimeInterval now = NSProcessInfo.processInfo.systemUptime;
+    if (!self.remainingDirty && now - self.cachedRemainingAt < 3.0) {
+        double passed = self.isPaused ? 0.0 : now - self.cachedRemainingAt;
+        return MAX(0.0, self.cachedRemaining - passed);
+    }
+    LSMotionParams params = LSParamsForOptions(self.options, self.route);
+    double remaining = LSRemainingFrom(&self.plan->_motion, params, _state);
+    self.cachedRemaining = remaining;
+    self.cachedRemainingAt = now;
+    self.remainingDirty = NO;
+    return remaining;
+}
+
++ (NSTimeInterval)estimatedDurationForRoute:(LSRoute *)route options:(LSPlaybackOptions *)options {
+    if (!route || !options.isValid) return NAN;
+    LSMotionPlan *plan = [[LSMotionPlan alloc] initWithRoute:route];
+    LSMotionState state;
+    LSMotionReset(&state);
+    return LSRemainingFrom(&plan->_motion, LSParamsForOptions(options, route), state);
+}
+
++ (double)speedKmhForRoute:(LSRoute *)route options:(LSPlaybackOptions *)options finishingIn:(NSTimeInterval)seconds {
+    if (!route || !isfinite(seconds) || seconds <= 0) return NAN;
+    LSMotionPlan *plan = [[LSMotionPlan alloc] initWithRoute:route];
+    LSPlaybackOptions *trial = [options copy];
+    trial.mode = LSTransportModeCustom;
+    trial.recordedPace = NO;
+    LSMotionState start;
+    LSMotionReset(&start);
+    double (^durationAt)(double) = ^double(double kmh) {
+        trial.customSpeedKmh = kmh;
+        return LSRemainingFrom(&plan->_motion, LSParamsForOptions(trial, route), start);
+    };
+    double fastest = durationAt(500.0);
+    if (!isfinite(fastest) || fastest > seconds * 1.01) return NAN;
+    double slowest = durationAt(1.0);
+    if (isfinite(slowest) && slowest < seconds * 0.99) return NAN;
+    double low = 1.0, high = 500.0;
+    for (int iteration = 0; iteration < 22; iteration++) {
+        double middle = sqrt(low * high);
+        double duration = durationAt(middle);
+        if (!isfinite(duration) || duration > seconds) low = middle; else high = middle;
+    }
+    return round(sqrt(low * high) * 10.0) / 10.0;
+}
+
++ (void)enumerateSamplesForRoute:(LSRoute *)route options:(LSPlaybackOptions *)options interval:(NSTimeInterval)interval
+                           block:(void (^)(NSTimeInterval, CLLocationCoordinate2D, double, double, CLLocationDirection))block {
+    if (!route || !block || !options.isValid) return;
+    LSMotionPlan *plan = [[LSMotionPlan alloc] initWithRoute:route];
+    LSMotionParams params = LSParamsForOptions(options, route);
+    if (!(interval > 0) || !isfinite(interval)) interval = 1.0;
+    NSTimeInterval estimate = LSRemainingFrom(&plan->_motion, params, (LSMotionState){.segment = 1});
+    // Long trips are sampled less often so the files stay a reasonable size.
+    if (isfinite(estimate) && estimate / interval > 100000) interval = ceil(estimate / 100000);
+    LSMotionState state;
+    LSMotionReset(&state);
+    NSTimeInterval time = 0;
+    CLLocationDirection heading = 0;
+    CLLocationCoordinate2D coordinate = [route coordinateAtDistance:0 heading:&heading];
+    block(0, coordinate, 0, 0, isfinite(heading) ? heading : 0);
+    unsigned guard = 0;
+    while (!state.finished && guard++ < 2000000) {
+        double used = LSMotionStep(&plan->_motion, &params, &state, interval);
+        if (used <= 0) break;
+        time += used;
+        CLLocationDirection next = heading;
+        coordinate = [route coordinateAtDistance:state.covered heading:&next];
+        if (isfinite(next) && !state.dwelling) heading = next;
+        double speed = state.finished ? 0.0 : state.speed;
+        block(time, coordinate, speed, state.covered, heading);
     }
 }
 

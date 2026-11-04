@@ -3,8 +3,10 @@
 #import "LSUI.h"
 #import "SessionController.h"
 #import "OverlayWindow.h"
+#import "LSBackup.h"
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
-@interface LSSettingsViewController () <UITextFieldDelegate, UIAdaptivePresentationControllerDelegate>
+@interface LSSettingsViewController () <UITextFieldDelegate, UIAdaptivePresentationControllerDelegate, UIDocumentPickerDelegate>
 @property (nonatomic, strong) LSSettings *draft;
 @property (nonatomic, strong) UIScrollView *scroll;
 @property (nonatomic, strong) UITextField *altitudeField;
@@ -18,6 +20,8 @@
 @property (nonatomic, strong) UISwitch *rememberSwitch;
 @property (nonatomic, strong) UISwitch *realSwitch;
 @property (nonatomic, strong) UISwitch *openerSwitch;
+@property (nonatomic, strong) UISwitch *backgroundSwitch;
+@property (nonatomic, strong) UIButton *clipboardRestoreButton;
 @property (nonatomic) CGSize previousScrollSize;
 @end
 
@@ -54,12 +58,14 @@
     self.rememberSwitch = [[UISwitch alloc] init];
     self.realSwitch = [[UISwitch alloc] init];
     self.openerSwitch = [[UISwitch alloc] init];
+    self.backgroundSwitch = [[UISwitch alloc] init];
+    self.backgroundSwitch.on = self.draft.continueInBackground;
     self.fluctuationSwitch.on = self.draft.fluctuationEnabled;
     self.rememberSwitch.on = self.draft.rememberLocation;
     self.realSwitch.on = self.draft.showRealLocation;
     self.openerSwitch.on = self.draft.showFloatingButton;
     [self.fluctuationSwitch addTarget:self action:@selector(fluctuationChanged) forControlEvents:UIControlEventValueChanged];
-    for (UISwitch *control in @[self.fluctuationSwitch, self.rememberSwitch, self.realSwitch, self.openerSwitch]) {
+    for (UISwitch *control in @[self.fluctuationSwitch, self.rememberSwitch, self.realSwitch, self.openerSwitch, self.backgroundSwitch]) {
         [control addTarget:self action:@selector(markEdited) forControlEvents:UIControlEventValueChanged];
     }
     self.radiusRow = LSFieldRow(@"Radius · 1–1,000 m", self.radiusField, self.radiusError);
@@ -76,15 +82,32 @@
         LSSeparator(),
         [self switchRow:@"Show real location on map" detail:@"Uses existing permission only. This does not change the location sent to the app." symbol:@"person.crop.circle" color:UIColor.systemGrayColor control:self.realSwitch],
         LSSeparator(),
-        [self switchRow:@"Show floating button" detail:@"A draggable button opens this picker. You can also hold three fingers on the screen for a moment." symbol:@"hand.tap.fill" color:LSAccentColor() control:self.openerSwitch]], 14);
+        [self switchRow:@"Show floating button" detail:@"A draggable button opens this picker; touch and hold it for quick route controls. You can also hold three fingers on the screen for a moment." symbol:@"hand.tap.fill" color:LSAccentColor() control:self.openerSwitch],
+        LSSeparator(),
+        [self switchRow:@"Keep routes moving in the background" detail:@"Routes keep playing after you leave the app, as long as the app already has background location access and iOS keeps it running. Otherwise a route pauses until you come back." symbol:@"figure.walk.motion" color:LSSuccessColor() control:self.backgroundSwitch]], 14);
+    UIButton *exportFile = LSButton(@"Export backup file", @"square.and.arrow.up", NO);
+    [exportFile addTarget:self action:@selector(exportBackup:) forControlEvents:UIControlEventTouchUpInside];
+    UIButton *copyBackup = LSButton(@"Copy backup", @"doc.on.doc", NO);
+    [copyBackup addTarget:self action:@selector(copyBackup) forControlEvents:UIControlEventTouchUpInside];
+    UIButton *restoreFile = LSButton(@"Restore from file", @"folder", NO);
+    [restoreFile addTarget:self action:@selector(restoreFromFile) forControlEvents:UIControlEventTouchUpInside];
+    self.clipboardRestoreButton = LSButton(@"Restore from clipboard", @"doc.on.clipboard", NO);
+    [self.clipboardRestoreButton addTarget:self action:@selector(restoreFromClipboard) forControlEvents:UIControlEventTouchUpInside];
+    UILabel *backupHint = LSLabel(@"A backup holds your settings, saved places with their wander radius, recent locations and route preferences. Keep it in Files or iCloud Drive so a reinstall, or another app with LSpoof, can pick up where you left off.", UIFontTextStyleFootnote);
+    backupHint.textColor = UIColor.secondaryLabelColor;
+    UIStackView *backupButtons = LSStack(@[LSRow(@[exportFile, copyBackup], 10), LSRow(@[restoreFile, self.clipboardRestoreButton], 10)], 10);
+    for (UIStackView *row in backupButtons.arrangedSubviews) row.distribution = UIStackViewDistributionFillEqually;
+    UIView *backup = LSInsetPanel(LSStack(@[backupHint, backupButtons], 14));
     UILabel *saveHint = LSLabel(@"Save updates the current session and these preferences. Cancel discards your edits.", UIFontTextStyleFootnote);
     saveHint.textColor = UIColor.secondaryLabelColor;
     UIButton *save = LSButton(@"Save settings", @"checkmark.circle.fill", YES);
     [save addTarget:self action:@selector(save) forControlEvents:UIControlEventTouchUpInside];
     UIStackView *stack = LSStack(@[LSSectionLabel(@"Location details"), LSInsetPanel(LSStack(@[sampleHint, sample], 14)),
-                                   LSSectionLabel(@"Preferences"), LSInsetPanel(preferences), saveHint, save], 8);
+                                   LSSectionLabel(@"Preferences"), LSInsetPanel(preferences),
+                                   LSSectionLabel(@"Backup"), backup, saveHint, save], 8);
     [stack setCustomSpacing:24 afterView:stack.arrangedSubviews[1]];
-    [stack setCustomSpacing:16 afterView:stack.arrangedSubviews[3]];
+    [stack setCustomSpacing:24 afterView:stack.arrangedSubviews[3]];
+    [stack setCustomSpacing:16 afterView:backup];
     [stack setCustomSpacing:16 afterView:saveHint];
     [self.scroll addSubview:stack];
     [NSLayoutConstraint activateConstraints:@[
@@ -111,6 +134,11 @@
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
     self.navigationController.presentationController.delegate = self;
+    [self updateClipboardButton];
+}
+- (void)updateClipboardButton {
+    // Reading the clipboard shows a paste banner; hasStrings does not.
+    self.clipboardRestoreButton.enabled = UIPasteboard.generalPasteboard.hasStrings;
 }
 - (void)markEdited { self.modalInPresentation = YES; }
 - (void)presentationControllerDidAttemptToDismiss:(UIPresentationController *)controller {
@@ -202,12 +230,113 @@
     self.draft.rememberLocation = self.rememberSwitch.on;
     self.draft.showRealLocation = self.realSwitch.on;
     self.draft.showFloatingButton = self.openerSwitch.on;
+    self.draft.continueInBackground = self.backgroundSwitch.on;
     if (![LSSessionController.shared saveSettings:self.draft]) return;
     [LSOverlayManager refreshOpeners];
     if (self.didSave) self.didSave();
     LSAnnounce(@"Settings saved");
     [self dismissViewControllerAnimated:LSMapAnimationsEnabled() completion:nil];
 }
+#pragma mark - Backup (#21)
+
+- (void)exportBackup:(UIButton *)sender {
+    NSData *data = [LSBackup exportData];
+    NSURL *folder = [NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:@"LSpoof Backup"] isDirectory:YES];
+    [NSFileManager.defaultManager createDirectoryAtURL:folder withIntermediateDirectories:YES attributes:nil error:NULL];
+    NSURL *file = [folder URLByAppendingPathComponent:[LSBackup suggestedFileName]];
+    if (!data.length || ![data writeToURL:file atomically:YES]) {
+        LSShowToast(self.view, @"The backup could not be written.", @"exclamationmark.triangle.fill");
+        LSHapticWarning();
+        return;
+    }
+    UIActivityViewController *share = [[UIActivityViewController alloc] initWithActivityItems:@[file] applicationActivities:nil];
+    share.popoverPresentationController.sourceView = sender;
+    share.popoverPresentationController.sourceRect = sender.bounds;
+    [self presentViewController:share animated:LSMapAnimationsEnabled() completion:nil];
+}
+
+- (void)copyBackup {
+    NSString *text = [[NSString alloc] initWithData:[LSBackup exportData] encoding:NSUTF8StringEncoding];
+    if (!text.length) return;
+    UIPasteboard.generalPasteboard.string = text;
+    LSHapticSuccess();
+    LSShowToast(self.view, @"Backup copied. Paste it into Notes or a message to keep it.", @"doc.on.doc.fill");
+}
+
+- (void)restoreFromFile {
+    UIDocumentPickerViewController *picker = [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:@[UTTypeJSON, UTTypePlainText, UTTypeData] asCopy:YES];
+    picker.delegate = self;
+    picker.allowsMultipleSelection = NO;
+    [self presentViewController:picker animated:LSMapAnimationsEnabled() completion:nil];
+}
+
+- (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
+    (void)controller;
+    NSURL *url = urls.firstObject;
+    if (!url) return;
+    BOOL scoped = [url startAccessingSecurityScopedResource];
+    NSNumber *size = nil;
+    [url getResourceValue:&size forKey:NSURLFileSizeKey error:NULL];
+    NSData *data = size.unsignedLongLongValue <= 2 * 1024 * 1024 ? [NSData dataWithContentsOfURL:url] : nil;
+    if (scoped) [url stopAccessingSecurityScopedResource];
+    if (!data) {
+        LSShowToast(self.view, size.unsignedLongLongValue > 2 * 1024 * 1024 ? @"That file is too large to be an LSpoof backup." : @"The file could not be read.", @"exclamationmark.triangle.fill");
+        LSHapticWarning();
+        return;
+    }
+    [self offerRestore:data];
+}
+
+- (void)restoreFromClipboard {
+    NSString *text = UIPasteboard.generalPasteboard.string;
+    if (![LSBackup textLooksLikeBackup:text]) {
+        LSShowToast(self.view, @"The clipboard doesn’t hold an LSpoof backup.", @"doc.on.clipboard");
+        LSHapticWarning();
+        return;
+    }
+    [self offerRestore:[text dataUsingEncoding:NSUTF8StringEncoding]];
+}
+
+- (void)offerRestore:(NSData *)data {
+    NSString *error = nil;
+    LSBackupSummary *summary = [LSBackup inspectData:data error:&error];
+    if (!summary) {
+        LSShowToast(self.view, error ?: @"This isn’t an LSpoof backup.", @"exclamationmark.triangle.fill");
+        LSHapticWarning();
+        return;
+    }
+    NSMutableArray *parts = [NSMutableArray array];
+    [parts addObject:[NSString stringWithFormat:@"%lu saved %@", (unsigned long)summary.placeCount, summary.placeCount == 1 ? @"place" : @"places"]];
+    [parts addObject:[NSString stringWithFormat:@"%lu recent %@", (unsigned long)summary.recentCount, summary.recentCount == 1 ? @"location" : @"locations"]];
+    if (summary.hasSettings) [parts addObject:@"settings"];
+    NSString *when = summary.exportedAt ? [NSString stringWithFormat:@" from %@", [NSDateFormatter localizedStringFromDate:summary.exportedAt dateStyle:NSDateFormatterMediumStyle timeStyle:NSDateFormatterShortStyle]] : @"";
+    NSString *message = [NSString stringWithFormat:@"This backup%@ has %@. Merge adds places you don’t have yet. Replace swaps your saved places and recents for the backup’s. Settings are restored either way.", when, [parts componentsJoinedByString:@", "]];
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Restore backup?" message:message preferredStyle:UIAlertControllerStyleAlert];
+    __weak typeof(self) weakSelf = self;
+    UIAlertAction *merge = [UIAlertAction actionWithTitle:@"Merge" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) { [weakSelf restore:data replace:NO]; }];
+    [alert addAction:merge];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Replace" style:UIAlertActionStyleDestructive handler:^(__unused UIAlertAction *action) { [weakSelf restore:data replace:YES]; }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    alert.preferredAction = merge;
+    [self presentViewController:alert animated:LSMapAnimationsEnabled() completion:nil];
+}
+
+- (void)restore:(NSData *)data replace:(BOOL)replace {
+    NSString *error = nil;
+    LSBackupSummary *result = [LSBackup restoreData:data replace:replace error:&error];
+    if (!result) {
+        LSShowToast(self.view, error ?: @"The backup could not be restored.", @"exclamationmark.triangle.fill");
+        LSHapticWarning();
+        return;
+    }
+    // The stored settings changed underneath this screen's edits, so it closes.
+    [LSOverlayManager refreshOpeners];
+    LSHapticSuccess();
+    NSString *message = [NSString stringWithFormat:@"Backup restored: %lu %@ added.", (unsigned long)result.placeCount, result.placeCount == 1 ? @"place" : @"places"];
+    void (^done)(NSString *) = self.didRestore;
+    [self dismissViewControllerAnimated:LSMapAnimationsEnabled() completion:^{ if (done) done(message); }];
+}
+
 - (void)cancel {
     if (self.modalInPresentation) { [self presentationControllerDidAttemptToDismiss:self.navigationController.presentationController]; return; }
     [self dismissViewControllerAnimated:LSMapAnimationsEnabled() completion:nil];

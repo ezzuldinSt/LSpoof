@@ -6,16 +6,73 @@
 #import "LSUI.h"
 #import <objc/runtime.h>
 
-// An opener window never becomes key and only its actual button receives touches.
+// An opener window never becomes key and only its actual button receives touches,
+// plus the quick-action menu UIKit shows in this window while it is open.
 @interface LSOpenerWindow : UIWindow
 @property (nonatomic, weak) UIButton *opener;
 @end
 @implementation LSOpenerWindow
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
     UIView *hit = [super hitTest:point withEvent:event];
-    return hit == self.opener || [hit isDescendantOfView:self.opener] ? hit : nil;
+    if (!hit) return nil;
+    if (hit == self.opener || [hit isDescendantOfView:self.opener]) return hit;
+    UIView *root = self.rootViewController.view;
+    // The open menu lives outside the root view; everything else passes through to the app.
+    if (root && hit != self && hit != root && ![hit isDescendantOfView:root]) return hit;
+    return nil;
 }
 @end
+
+// Long-press menu on the floating button: route controls without opening the picker (#20).
+static NSArray<UIMenuElement *> *LSOpenerQuickActions(void (^openPicker)(void)) {
+    LSSessionController *session = LSSessionController.shared;
+    LSSessionMode mode = session.snapshot.mode;
+    NSMutableArray<UIMenuElement *> *items = [NSMutableArray array];
+    UIAction *open = [UIAction actionWithTitle:@"Open LSpoof" image:[UIImage systemImageNamed:@"map"] identifier:nil handler:^(__unused UIAction *action) { if (openPicker) openPicker(); }];
+    [items addObject:open];
+    if (mode == LSSessionModeMoving || mode == LSSessionModePaused) {
+        LSRouteSimulator *engine = LSRouteSimulator.shared;
+        LSPlaybackOptions *options = engine.options;
+        NSString *speed = options.recordedPace && engine.route.hasTiming
+            ? [NSString stringWithFormat:@"Recorded pace ×%@", LSFormatDecimal(options.paceMultiplier, 2)]
+            : [NSString stringWithFormat:@"%@ km/h", LSFormatDecimal(options.speedKmh, 0)];
+        UIAction *pause = [UIAction actionWithTitle:mode == LSSessionModePaused ? @"Resume route" : @"Pause route"
+                                              image:[UIImage systemImageNamed:mode == LSSessionModePaused ? @"play.fill" : @"pause.fill"] identifier:nil
+                                            handler:^(__unused UIAction *action) {
+            if (LSSessionController.shared.snapshot.mode == LSSessionModePaused) [LSSessionController.shared resume];
+            else [LSSessionController.shared pause];
+        }];
+        UIAction *faster = [UIAction actionWithTitle:@"Faster" image:[UIImage systemImageNamed:@"plus.circle"] identifier:nil handler:^(__unused UIAction *action) {
+            if ([LSSessionController.shared nudgeSpeed:1]) LSHapticSelection(); else LSHapticWarning();
+        }];
+        UIAction *slower = [UIAction actionWithTitle:@"Slower" image:[UIImage systemImageNamed:@"minus.circle"] identifier:nil handler:^(__unused UIAction *action) {
+            if ([LSSessionController.shared nudgeSpeed:-1]) LSHapticSelection(); else LSHapticWarning();
+        }];
+        faster.attributes = UIMenuElementAttributesKeepsMenuPresented;
+        slower.attributes = UIMenuElementAttributesKeepsMenuPresented;
+        UIMenu *speedMenu = [UIMenu menuWithTitle:[NSString stringWithFormat:@"Speed: %@", speed] image:nil identifier:nil options:UIMenuOptionsDisplayInline children:@[faster, slower]];
+        UIAction *hold = [UIAction actionWithTitle:@"Stop and hold here" image:[UIImage systemImageNamed:@"stop.fill"] identifier:nil handler:^(__unused UIAction *action) {
+            [LSSessionController.shared stopAndHold];
+        }];
+        [items addObject:[UIMenu menuWithTitle:@"" image:nil identifier:nil options:UIMenuOptionsDisplayInline children:@[pause, hold]]];
+        [items addObject:speedMenu];
+    } else if (mode == LSSessionModeOff && PersistenceManager.shared.hasStoredCoordinate) {
+        CLLocationCoordinate2D last = PersistenceManager.shared.spoofCoordinate;
+        UIAction *apply = [UIAction actionWithTitle:@"Apply last location" image:[UIImage systemImageNamed:@"clock.arrow.circlepath"] identifier:nil handler:^(__unused UIAction *action) {
+            [LSSessionController.shared applyStaticCoordinate:last];
+        }];
+        apply.subtitle = LSCoordinateText(last);
+        [items addObject:apply];
+    }
+    if (mode != LSSessionModeOff) {
+        UIAction *off = [UIAction actionWithTitle:@"Turn off" image:[UIImage systemImageNamed:@"power"] identifier:nil handler:^(__unused UIAction *action) {
+            [LSSessionController.shared disable];
+        }];
+        off.attributes = UIMenuElementAttributesDestructive;
+        [items addObject:[UIMenu menuWithTitle:@"" image:nil identifier:nil options:UIMenuOptionsDisplayInline children:@[off]]];
+    }
+    return items;
+}
 
 // Floating opener: a round button that shows the session state, can be dragged
 // anywhere, snaps to the nearest side edge, and remembers where it was left.
@@ -52,7 +109,7 @@ static const CGFloat kLSOpenerSize = 56;
     button.layer.shadowOpacity = 0.28;
     button.layer.shadowRadius = 10;
     button.layer.shadowOffset = CGSizeMake(0, 4);
-    button.accessibilityHint = @"Opens the LSpoof picker. Drag to move. You can hide this button in Settings.";
+    button.accessibilityHint = @"Opens the LSpoof picker. Touch and hold for quick controls. Drag to move. You can hide this button in Settings.";
     button.largeContentTitle = @"LSpoof";
     button.showsLargeContentViewer = YES;
     [button addInteraction:[[UILargeContentViewerInteraction alloc] init]];
@@ -298,6 +355,14 @@ static void LSInstallEventHook(void) {
         LSOverlayState *state = weakState;
         if (state) [[LSOverlayManager shared] presentState:state];
     }] forControlEvents:UIControlEventTouchUpInside];
+    void (^openPicker)(void) = ^{
+        LSOverlayState *state = weakState;
+        if (state) [[LSOverlayManager shared] presentState:state];
+    };
+    button.menu = [UIMenu menuWithTitle:@"" children:@[[UIDeferredMenuElement elementWithUncachedProvider:^(void (^completion)(NSArray<UIMenuElement *> *)) {
+        completion(LSOpenerQuickActions(openPicker));
+    }]]];
+    button.showsMenuAsPrimaryAction = NO;
     window.opener = button;
     state.openerWindow = window;
     // Setting hidden does not change the host's key window or keyboard focus.

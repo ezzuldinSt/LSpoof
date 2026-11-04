@@ -1,5 +1,6 @@
 #import "LocationSpoofer.h"
 #import "SessionController.h"
+#import "PersistenceManager.h"
 #import "LSHooking.h"
 #import <objc/runtime.h>
 #import <os/lock.h>
@@ -40,51 +41,116 @@ typedef struct {
     double east;
 } LSDriftOffset;
 
-static LSDriftOffset LSRandomOffset(double radius) {
-    double angle = (double)arc4random_uniform(UINT32_MAX) / UINT32_MAX * 2.0 * M_PI;
-    double distance = sqrt((double)arc4random_uniform(UINT32_MAX) / UINT32_MAX) * radius;
-    return (LSDriftOffset){distance * cos(angle), distance * sin(angle)};
+static double LSUniform(void) {
+    return (double)arc4random() / 4294967296.0;
 }
 
-// A fresh random point on every read made the held location jump across the whole
-// radius many times per second (MapKit reads .location per frame). The offset now
-// drifts smoothly between random targets, like a real GPS fix wandering.
-static const NSTimeInterval kLSDriftInterval = 6.0;
+static double LSGaussian(void) {
+    double u = fmax(LSUniform(), 1e-12);
+    return sqrt(-2.0 * log(u)) * cos(2.0 * M_PI * LSUniform());
+}
+
+static LSDriftOffset LSClampOffset(LSDriftOffset offset, double limit) {
+    double length = hypot(offset.north, offset.east);
+    if (length <= limit || length <= 0.0) return offset;
+    return (LSDriftOffset){offset.north * limit / length, offset.east * limit / length};
+}
+
+// The held point used to glide to a uniformly random spot every 6 seconds, on the same
+// smoothstep curve each time, so the rhythm was easy to spot (#19). It now wanders in
+// legs of random length and duration, mostly short hops with an occasional move
+// across the circle, and a small quicker jitter rides on top.
+typedef struct {
+    LSDriftOffset from;
+    LSDriftOffset to;
+    NSTimeInterval start;
+    NSTimeInterval duration;
+    double ease;
+} LSDriftLeg;
+
+static LSDriftOffset LSWanderTarget(LSDriftOffset from, double radius) {
+    LSDriftOffset target;
+    if (LSUniform() < 0.65) {
+        double step = radius * (0.12 + 0.48 * LSUniform());
+        double angle = LSUniform() * 2.0 * M_PI;
+        target = (LSDriftOffset){from.north + step * cos(angle), from.east + step * sin(angle)};
+    } else {
+        double sigma = radius * 0.45;
+        target = (LSDriftOffset){LSGaussian() * sigma, LSGaussian() * sigma};
+    }
+    if (hypot(target.north, target.east) > radius) target = LSClampOffset(target, radius * (0.55 + 0.45 * LSUniform()));
+    return target;
+}
+
+static LSDriftOffset LSJitterTarget(double amplitude) {
+    return LSClampOffset((LSDriftOffset){LSGaussian() * amplitude * 0.5, LSGaussian() * amplitude * 0.5}, amplitude);
+}
+
+static void LSStartLeg(LSDriftLeg *leg, LSDriftOffset from, LSDriftOffset to, NSTimeInterval start, NSTimeInterval duration) {
+    leg->from = from;
+    leg->to = to;
+    leg->start = start;
+    leg->duration = duration;
+    leg->ease = 1.2 + 1.6 * LSUniform();
+}
+
+static NSTimeInterval LSWanderDuration(void) {
+    return fmin(18.0, 2.0 - log(1.0 - 0.999 * LSUniform()) * 4.5);
+}
+
+static NSTimeInterval LSJitterDuration(void) {
+    return 0.6 + 1.8 * LSUniform();
+}
+
+static LSDriftOffset LSLegOffset(const LSDriftLeg *leg, NSTimeInterval now) {
+    double t = fmax(0.0, fmin(1.0, (now - leg->start) / leg->duration));
+    double a = pow(t, leg->ease), b = pow(1.0 - t, leg->ease);
+    double eased = a + b > 0.0 ? a / (a + b) : t;
+    return (LSDriftOffset){leg->from.north + (leg->to.north - leg->from.north) * eased,
+                           leg->from.east + (leg->to.east - leg->from.east) * eased};
+}
+
 static os_unfair_lock ls_driftLock = OS_UNFAIR_LOCK_INIT;
 static struct {
     BOOL valid;
     CLLocationCoordinate2D base;
     double radius;
-    LSDriftOffset from;
-    LSDriftOffset to;
-    NSTimeInterval start;
+    LSDriftLeg wander;
+    LSDriftLeg jitter;
 } ls_drift;
 
 static LSDriftOffset LSCurrentDrift(CLLocationCoordinate2D base, double radius) {
     NSTimeInterval now = NSProcessInfo.processInfo.systemUptime;
+    double jitter = fmax(0.3, fmin(4.0, radius * 0.08));
     os_unfair_lock_lock(&ls_driftLock);
     if (!ls_drift.valid || ls_drift.radius != radius ||
         fabs(ls_drift.base.latitude - base.latitude) > 1e-9 || fabs(ls_drift.base.longitude - base.longitude) > 1e-9) {
         ls_drift.valid = YES;
         ls_drift.base = base;
         ls_drift.radius = radius;
-        ls_drift.from = LSRandomOffset(radius);
-        ls_drift.to = LSRandomOffset(radius);
-        ls_drift.start = now;
-    } else if (now - ls_drift.start >= kLSDriftInterval) {
-        BOOL stale = now - ls_drift.start >= 2.0 * kLSDriftInterval;
-        ls_drift.from = stale ? LSRandomOffset(radius) : ls_drift.to;
-        ls_drift.to = LSRandomOffset(radius);
-        ls_drift.start = now;
+        LSDriftOffset first = LSWanderTarget((LSDriftOffset){0, 0}, radius);
+        LSStartLeg(&ls_drift.wander, first, LSWanderTarget(first, radius), now, LSWanderDuration());
+        LSStartLeg(&ls_drift.jitter, (LSDriftOffset){0, 0}, LSJitterTarget(jitter), now, LSJitterDuration());
     }
-    double t = fmax(0.0, fmin(1.0, (now - ls_drift.start) / kLSDriftInterval));
-    t = t * t * (3.0 - 2.0 * t);
-    LSDriftOffset offset = {
-        ls_drift.from.north + (ls_drift.to.north - ls_drift.from.north) * t,
-        ls_drift.from.east + (ls_drift.to.east - ls_drift.from.east) * t
-    };
+    // After a long gap without reads the walk starts a fresh leg from where it was heading.
+    if (now - ls_drift.wander.start > ls_drift.wander.duration + 30.0) {
+        LSStartLeg(&ls_drift.wander, ls_drift.wander.to, LSWanderTarget(ls_drift.wander.to, radius), now, LSWanderDuration());
+    }
+    while (now - ls_drift.wander.start >= ls_drift.wander.duration) {
+        LSDriftLeg *leg = &ls_drift.wander;
+        LSStartLeg(leg, leg->to, LSWanderTarget(leg->to, radius), leg->start + leg->duration, LSWanderDuration());
+    }
+    if (now - ls_drift.jitter.start > ls_drift.jitter.duration + 10.0) {
+        LSStartLeg(&ls_drift.jitter, ls_drift.jitter.to, LSJitterTarget(jitter), now, LSJitterDuration());
+    }
+    while (now - ls_drift.jitter.start >= ls_drift.jitter.duration) {
+        LSDriftLeg *leg = &ls_drift.jitter;
+        LSStartLeg(leg, leg->to, LSJitterTarget(jitter), leg->start + leg->duration, LSJitterDuration());
+    }
+    LSDriftOffset wander = LSLegOffset(&ls_drift.wander, now);
+    LSDriftOffset shake = LSLegOffset(&ls_drift.jitter, now);
     os_unfair_lock_unlock(&ls_driftLock);
-    return offset;
+    return LSClampOffset((LSDriftOffset){wander.north + shake.north, wander.east + shake.east}, radius);
 }
 
 static CLLocationCoordinate2D LSApplyFluctuation(CLLocationCoordinate2D coordinate, double radius) {
@@ -267,7 +333,10 @@ static void LSSetManagerActive(CLLocationManager *manager, BOOL active) {
     [self pushSnapshot:snapshot force:NO];
 }
 - (void)pushSnapshot:(LSSessionSnapshot *)snapshot force:(BOOL)force {
-    if (UIApplication.sharedApplication.applicationState == UIApplicationStateBackground) return;
+    // In the background a route only keeps moving when the user asked for it, and then
+    // only managers the host itself set up for background updates are pushed.
+    BOOL background = UIApplication.sharedApplication.applicationState == UIApplicationStateBackground;
+    if (background && !PersistenceManager.shared.continueInBackground) return;
     NSArray<CLLocationManager *> *managers;
     @synchronized(ls_activeManagersLock) { managers = ls_activeManagers.allObjects; }
     SEL selector = @selector(locationManager:didUpdateLocations:);
@@ -277,6 +346,7 @@ static void LSSetManagerActive(CLLocationManager *manager, BOOL active) {
         if (!delegate || LSIsSystemClass([delegate class]) || ![delegate respondsToSelector:selector]) continue;
         CLAuthorizationStatus status = manager.authorizationStatus;
         if (status != kCLAuthorizationStatusAuthorizedAlways && status != kCLAuthorizationStatusAuthorizedWhenInUse) continue;
+        if (background && !manager.allowsBackgroundLocationUpdates) continue;
         CLLocation *sample = LSLocationForSnapshot(snapshot);
         if (!sample) return;
         CLLocation *previous = objc_getAssociatedObject(manager, &ls_pushedKey);
