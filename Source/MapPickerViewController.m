@@ -901,6 +901,8 @@ static MKMapType ls_mapType = MKMapTypeStandard;
         view.glyphImage = nil;
         view.glyphText = index == NSNotFound ? nil : [NSString stringWithFormat:@"%lu", (unsigned long)index + 1];
     }
+    if ([annotation isKindOfClass:LSStartAnnotation.class] || [annotation isKindOfClass:LSDestinationAnnotation.class] ||
+        [annotation isKindOfClass:LSStopAnnotation.class]) [self styleRouteAnnotationView:view];
     if ([annotation isKindOfClass:LSMovingAnnotation.class]) {
         LSSessionMode mode = LSSessionController.shared.snapshot.mode;
         view.markerTintColor = LSSessionColor(mode);
@@ -924,6 +926,8 @@ static MKMapType ls_mapType = MKMapTypeStandard;
 }
 - (MKOverlayRenderer *)mapView:(MKMapView *)map rendererForOverlay:(id<MKOverlay>)overlay {
     (void)map;
+    MKOverlayRenderer *routeRenderer = [self routeRendererForOverlay:overlay];
+    if (routeRenderer) return routeRenderer;
     if ([overlay isKindOfClass:MKCircle.class]) {
         MKCircleRenderer *renderer = [[MKCircleRenderer alloc] initWithCircle:(MKCircle *)overlay];
         renderer.strokeColor = LSAccentColor(); renderer.fillColor = [LSAccentColor() colorWithAlphaComponent:0.12]; renderer.lineWidth = 1.5;
