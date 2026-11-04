@@ -571,7 +571,7 @@ static LSTraitStack *LSRouteRow(NSArray<UIView *> *views, CGFloat spacing, UISta
 - (void)fire:(UIGestureRecognizer *)gesture;
 @end
 @implementation LSRouteGestureRelay
-// Pans, pinches and rotations move the map as they begin; a double-tap zoom once it ends.
+// Pans, pinches and rotations move the map as they begin; a double-tap or two-finger tap zoom once it ends.
 - (void)fire:(UIGestureRecognizer *)gesture {
     BOOL tap = [gesture isKindOfClass:UITapGestureRecognizer.class];
     if (gesture.state == (tap ? UIGestureRecognizerStateEnded : UIGestureRecognizerStateBegan) && self.moved) self.moved();
@@ -1988,7 +1988,8 @@ static LSRoute *LSRouteFromTrackFile(NSURL *url, LSTrack **trackOut, NSString **
         for (UIGestureRecognizer *gesture in view.gestureRecognizers) {
             BOOL moves = [gesture isKindOfClass:UIPanGestureRecognizer.class] || [gesture isKindOfClass:UIPinchGestureRecognizer.class] ||
                          [gesture isKindOfClass:UIRotationGestureRecognizer.class] ||
-                         ([gesture isKindOfClass:UITapGestureRecognizer.class] && ((UITapGestureRecognizer *)gesture).numberOfTapsRequired >= 2);
+                         ([gesture isKindOfClass:UITapGestureRecognizer.class] && (((UITapGestureRecognizer *)gesture).numberOfTapsRequired >= 2 ||
+                                                                                       ((UITapGestureRecognizer *)gesture).numberOfTouchesRequired >= 2));
             if (!moves || [watched containsObject:gesture]) continue;
             [gesture addTarget:relay action:@selector(fire:)];
             objc_setAssociatedObject(gesture, &ls_routeRelayKey, relay, OBJC_ASSOCIATION_RETAIN_NONATOMIC);

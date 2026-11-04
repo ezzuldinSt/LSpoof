@@ -1923,26 +1923,33 @@ static void LSSetButtonRadius(UIButton *button, CGFloat radius) {
 - (void)cancelScheduleWithUndo {
     if (self.closed) return;
     BOOL (^restore)(void) = [self restorerForCurrentSchedule];
-    BOOL activeRoute = LSScheduler.shared.schedule.isRoute && LSScheduler.shared.schedule.isActive;
+    LSSchedule *current = LSScheduler.shared.schedule;
+    BOOL active = current.isActive, activeRoute = active && current.isRoute;
     [LSScheduler.shared cancel];
     LSHapticSuccess();
     [self updateScheduleBanner];
     if (!restore) {
-        [self showMessage:activeRoute ? @"Schedule cancelled. The route keeps playing." : @"Schedule cancelled." symbol:@"clock.badge.xmark"];
+        NSString *message = activeRoute ? @"Schedule cancelled. The route keeps playing."
+                          : active ? @"Schedule cancelled. The location stays on." : @"Schedule cancelled.";
+        [self showMessage:message symbol:@"clock.badge.xmark"];
         return;
     }
     __weak typeof(self) weakSelf = self;
     LSShowActionToast(self.view, [self toastAnchorView], @"Schedule cancelled.", @"clock.badge.xmark", @"Undo", ^{
         typeof(self) self = weakSelf;
         // Something scheduled since wins over the old one.
-        if (!self || self.closed || LSScheduler.shared.schedule) return;
+        if (!self || self.closed) return;
+        if (LSScheduler.shared.schedule) {
+            [self showMessage:@"A newer schedule is already set." symbol:@"clock"];
+            return;
+        }
         if (restore()) { LSHapticSuccess(); [self updateScheduleBanner]; }
         else [self showMessage:@"The schedule could not be restored." symbol:@"exclamationmark.triangle.fill"];
     });
 }
 // Rebuilds the current schedule through the scheduler's public calls, from its saved form
-// (read only). A route that already started has no restorer: scheduling it again would
-// restart it from its first point.
+// (read only). A schedule that already started has no restorer: scheduling it again would
+// apply it a second time (a route from its first point, a location as a late start).
 - (BOOL (^)(void))restorerForCurrentSchedule {
     LSSchedule *schedule = LSScheduler.shared.schedule;
     NSDictionary *stored = [[[NSUserDefaults alloc] initWithSuiteName:kLSDefaultsSuite] dictionaryForKey:@"LSSchedule"];
@@ -1950,8 +1957,8 @@ static void LSSetButtonRadius(UIButton *button, CGFloat radius) {
     NSString *name = schedule.name;
     NSDate *start = schedule.startDate, *end = schedule.endDate;
     BOOL daily = schedule.repeatsDaily;
+    if (schedule.isActive) return nil;
     if (schedule.isRoute) {
-        if (schedule.isActive) return nil;
         LSRoute *route = [LSRoute routeFromDictionary:stored[@"route"] ?: @{}];
         LSPlaybackOptions *options = [LSPlaybackOptions optionsFromDictionary:stored[@"options"]];
         if (!route || !options) return nil;
