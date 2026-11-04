@@ -510,17 +510,23 @@ static NSString *LSOpenerStatus(BOOL spoken) {
 }
 // Arrival while tucked: the tab fills green and nudges out of the edge and back.
 - (void)peekForArrival {
-    if (LSMapAnimationsEnabled() && !self.dragging && !self.snapAnimator) {
-        UIView *container = self.container;
-        CGPoint home = container.center;
+    __weak typeof(self) weakSelf = self;
+    CGRect dock = [self dockRect];
+    if (LSMapAnimationsEnabled() && !self.dragging && !self.snapAnimator && [self usableDock:dock]) {
+        CGPoint home = CGPointMake([self xOnRight:self.right tucked:self.tucked dock:dock], self.container.center.y);
         CGFloat out = self.right ? -8 : 8;
         [UIView animateWithDuration:0.16 delay:0 options:UIViewAnimationOptionCurveEaseOut | UIViewAnimationOptionAllowUserInteraction animations:^{
-            container.center = CGPointMake(home.x + out, home.y);
+            weakSelf.container.center = CGPointMake(home.x + out, home.y);
         } completion:^(__unused BOOL finished) {
-            LSAnimateBouncy(^{ container.center = home; }, nil);
+            LSOpenerViewController *strongSelf = weakSelf;
+            // A drag or snap that began meanwhile owns the position now.
+            if (!strongSelf || strongSelf.dragging || strongSelf.snapAnimator) return;
+            CGRect now = [strongSelf dockRect];
+            if (![strongSelf usableDock:now]) return;
+            CGPoint rest = CGPointMake([strongSelf xOnRight:strongSelf.right tucked:strongSelf.tucked dock:now], strongSelf.container.center.y);
+            LSAnimateBouncy(^{ weakSelf.container.center = rest; }, nil);
         }];
     }
-    __weak typeof(self) weakSelf = self;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         LSOpenerViewController *strongSelf = weakSelf;
         if (!strongSelf || !strongSelf.arrivalPeek) return;
@@ -904,8 +910,13 @@ static NSString *LSOpenerStatus(BOOL spoken) {
     switch (pan.state) {
         case UIGestureRecognizerStateBegan: {
             [self dismissHint];
-            // Catching it mid-flight continues from where it is on screen.
+            // Catching it mid-flight continues from where it is on screen, including from a
+            // block animation such as the arrival peek, which stopSnap does not cover.
             [self stopSnap];
+            CALayer *layer = self.container.layer, *shown = layer.presentationLayer;
+            CGPoint position = shown ? shown.position : layer.position;
+            [layer removeAllAnimations];
+            self.container.center = position;
             self.dragging = YES;
             self.dragOrigin = self.container.center;
             [self.dimTimer invalidate];
@@ -1071,15 +1082,22 @@ static NSString *LSOpenerStatus(BOOL spoken) {
     [text appendAttributedString:[[NSAttributedString alloc] initWithString:[@"\n" stringByAppendingString:message] attributes:@{
         NSFontAttributeName: LSFont(UIFontTextStyleFootnote, UIFontWeightRegular, 22), NSForegroundColorAttributeName: UIColor.secondaryLabelColor}]];
     label.attributedText = text;
-    // The shared glass material, in a plain effect view so the bubble's shape (body and tail)
-    // comes only from its mask and its own outline.
-    UIVisualEffectView *hint = [[UIVisualEffectView alloc] initWithEffect:LSGlassView(LSRadiusM, NO).effect];
+    // Liquid Glass is not masked: there the bubble is a plain rounded glass shape. The blur
+    // material before it takes a mask, so it gets a body-and-tail shape pointing at the opener.
+    UIVisualEffectView *hint;
+    if (LSLiquidGlassAvailable()) {
+        hint = LSGlassView(LSRadiusM, NO);
+        hint.translatesAutoresizingMaskIntoConstraints = YES;
+    } else {
+        UIBlurEffectStyle style = LSIncreaseContrast() ? UIBlurEffectStyleSystemThickMaterial : UIBlurEffectStyleSystemMaterial;
+        hint = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:style]];
+        LSHintShapeView *mask = [[LSHintShapeView alloc] init];
+        ((CAShapeLayer *)mask.layer).fillColor = UIColor.blackColor.CGColor;
+        hint.maskView = mask;
+    }
     hint.userInteractionEnabled = NO;
     // The same words are in the button's hint; VoiceOver users are not shown this at all.
     hint.accessibilityElementsHidden = YES;
-    LSHintShapeView *mask = [[LSHintShapeView alloc] init];
-    ((CAShapeLayer *)mask.layer).fillColor = UIColor.blackColor.CGColor;
-    hint.maskView = mask;
     CAShapeLayer *outline = [CAShapeLayer layer];
     outline.fillColor = nil;
     [hint.contentView.layer addSublayer:outline];
@@ -1144,7 +1162,8 @@ static UIBezierPath *LSHintBubblePath(CGRect body, CGFloat r, BOOL tailOnRight, 
     if (!hint || !label) return;
     CGRect safe = [self safeRect];
     CGPoint center = self.container.center;
-    CGFloat gap = 16, tail = 6, padX = 14, padY = 10;
+    BOOL tailed = hint.maskView != nil;
+    CGFloat gap = 16, tail = tailed ? 6 : 0, padX = 14, padY = 10;
     // Beside the opener, on the side facing the screen, with the tail in the gap.
     CGFloat edge = self.right ? center.x - kLSOpenerSize / 2 - gap : center.x + kLSOpenerSize / 2 + gap;
     CGFloat available = self.right ? edge - CGRectGetMinX(safe) - 12 : CGRectGetMaxX(safe) - 12 - edge;
@@ -1161,17 +1180,23 @@ static UIBezierPath *LSHintBubblePath(CGRect body, CGFloat r, BOOL tailOnRight, 
     // The tail aims at the opener's centre, staying clear of the rounded corners.
     CGFloat low = radius + 6, high = height - radius - 6;
     CGFloat tailY = low <= high ? MAX(low, MIN(high, center.y - y)) : height / 2;
-    UIBezierPath *shape = LSHintBubblePath(body, radius, self.right, tailY, tail);
-    hint.maskView.frame = hint.bounds;
-    ((CAShapeLayer *)hint.maskView.layer).path = shape.CGPath;
-    // Half of the stroke falls outside the mask, so 2 pt reads as a 1 pt edge.
+    UIBezierPath *shape = tailed ? LSHintBubblePath(body, radius, self.right, tailY, tail)
+                                 : [UIBezierPath bezierPathWithRoundedRect:body cornerRadius:radius];
+    if (tailed) {
+        hint.maskView.frame = hint.bounds;
+        ((CAShapeLayer *)hint.maskView.layer).path = shape.CGPath;
+    } else {
+        hint.layer.cornerRadius = radius;
+    }
+    // The mask (or the glass view's clip) hides the outer half of the stroke: 3 pt under
+    // Increase Contrast shows 1.5 pt, like the tab's track. Liquid Glass has its own rim otherwise.
     BOOL contrast = LSIncreaseContrast();
     CGFloat scale = self.traitCollection.displayScale > 0 ? self.traitCollection.displayScale : 2;
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     self.hintOutline.frame = hint.bounds;
     self.hintOutline.path = shape.CGPath;
-    self.hintOutline.lineWidth = contrast ? 2 : 2 / scale;
+    self.hintOutline.lineWidth = contrast ? 3 : (tailed ? 2 / scale : 0);
     self.hintOutline.strokeColor = [(contrast ? UIColor.labelColor : UIColor.separatorColor) resolvedColorWithTraitCollection:self.traitCollection].CGColor;
     [CATransaction commit];
     label.frame = CGRectInset(body, padX, padY);
@@ -1184,8 +1209,11 @@ static UIBezierPath *LSHintBubblePath(CGRect body, CGFloat r, BOOL tailOnRight, 
     self.hint = nil;
     self.hintLabel = nil;
     self.hintOutline = nil;
+    // Mirrors the entrance: it slips back toward the opener as it fades.
+    CGAffineTransform away = LSMapAnimationsEnabled() ? CGAffineTransformMakeTranslation(self.right ? 12 : -12, 0) : CGAffineTransformIdentity;
     [UIView animateWithDuration:0.25 delay:0 options:UIViewAnimationOptionBeginFromCurrentState animations:^{
         hint.effect = nil;
+        hint.transform = away;
         label.alpha = 0;
     } completion:^(__unused BOOL finished) { [hint removeFromSuperview]; }];
     outline.opacity = 0;

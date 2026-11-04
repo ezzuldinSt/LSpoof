@@ -212,7 +212,7 @@ static UIView *LSScheduleChipStrip(NSArray<UIButton *> *chips) {
 }
 
 // Soft fade from clear to the page colour behind the pinned action, so content scrolling
-// under it dims instead of colliding with it.
+// under it dims instead of colliding with it. With Reduce Transparency it is a solid band.
 @interface LSScheduleFadeView : UIView
 @end
 @implementation LSScheduleFadeView
@@ -223,14 +223,17 @@ static UIView *LSScheduleChipStrip(NSArray<UIButton *> *chips) {
         self.userInteractionEnabled = NO;
         self.isAccessibilityElement = NO;
         [self updateColors];
+        [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(updateColors) name:UIAccessibilityReduceTransparencyStatusDidChangeNotification object:nil];
     }
     return self;
 }
 - (void)updateColors {
     UIColor *page = [UIColor.systemGroupedBackgroundColor resolvedColorWithTraitCollection:self.traitCollection];
+    BOOL solid = LSReduceTransparency();
     CAGradientLayer *gradient = (CAGradientLayer *)self.layer;
-    gradient.colors = @[(__bridge id)[page colorWithAlphaComponent:0].CGColor, (__bridge id)[page colorWithAlphaComponent:0.9].CGColor, (__bridge id)page.CGColor];
+    gradient.colors = @[(__bridge id)[page colorWithAlphaComponent:solid ? 1 : 0].CGColor, (__bridge id)[page colorWithAlphaComponent:solid ? 1 : 0.9].CGColor, (__bridge id)page.CGColor];
     gradient.locations = @[@0, @0.5, @1];
+    [self.superview setNeedsLayout]; // The page re-measures how much of the scroll the band covers.
 }
 - (void)traitCollectionDidChange:(UITraitCollection *)previous {
     [super traitCollectionDidChange:previous];
@@ -267,6 +270,8 @@ static UIAccessibilityTraits LSScheduleSummaryTraits(NSDate *start, BOOL active)
 @property (nonatomic, strong) UILabel *errorLabel;
 @property (nonatomic, strong) UIButton *saveButton;
 @property (nonatomic, strong, nullable) UIView *actionBar;
+@property (nonatomic, strong, nullable) UIView *fadeView;
+@property (nonatomic) BOOL actionBarShown;
 @property (nonatomic, strong, nullable) NSTimer *clock;
 @property (nonatomic) NSTimeInterval duration;
 @end
@@ -316,12 +321,19 @@ static UIAccessibilityTraits LSScheduleSummaryTraits(NSDate *start, BOOL active)
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(scheduleChanged:) name:LSSchedulerDidChangeNotification object:nil];
 }
 
-// The one primary action floats on glass above the bottom safe area, so it stays in reach
-// on small phones and at accessibility sizes however long the page gets.
+// The one primary action floats above the bottom safe area, so it stays in reach on small
+// phones and at accessibility sizes however long the page gets. With Liquid Glass the
+// prominent button is already glass and floats on its own (glass on glass refracts twice);
+// otherwise a frosted capsule rings it and casts the one shadow.
 - (void)buildActionBar {
     LSScheduleFadeView *fade = [[LSScheduleFadeView alloc] init];
-    UIView *bar = LSGlassCapsule(self.saveButton, LSSpaceS);
+    UIView *bar = self.saveButton;
+    if (!LSLiquidGlassAvailable()) {
+        LSSetButtonGlow(self.saveButton, NO);
+        bar = LSGlassCapsule(self.saveButton, LSSpaceS);
+    }
     self.actionBar = bar;
+    self.fadeView = fade;
     [self.view addSubview:fade];
     [self.view addSubview:bar];
     UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
@@ -336,12 +348,22 @@ static UIAccessibilityTraits LSScheduleSummaryTraits(NSDate *start, BOOL active)
         [fade.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
         [fade.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
         [fade.topAnchor constraintEqualToAnchor:bar.topAnchor constant:-LSSpaceXL]]];
+    // Rises into place on first appearance (see viewDidAppear:); shown at once without motion.
+    if (LSMapAnimationsEnabled()) {
+        bar.alpha = 0;
+        fade.alpha = 0;
+        bar.transform = CGAffineTransformMakeTranslation(0, 16);
+    }
 }
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
     if (!self.actionBar) return;
     // Lets the last card scroll clear of the pinned action; the safe area is added by UIKit.
-    CGFloat covered = MAX(0, CGRectGetHeight(self.view.bounds) - self.view.safeAreaInsets.bottom - CGRectGetMinY(self.actionBar.frame) + LSSpaceS);
+    // Measured from center and bounds so the entrance offset doesn't move the inset, and from
+    // the top of the band when Reduce Transparency makes it solid.
+    CGFloat barTop = self.actionBar.center.y - CGRectGetHeight(self.actionBar.bounds) / 2;
+    CGFloat clearance = LSReduceTransparency() ? LSSpaceXL : LSSpaceS;
+    CGFloat covered = MAX(0, CGRectGetHeight(self.view.bounds) - self.view.safeAreaInsets.bottom - barTop + clearance);
     if (fabs(self.scroll.contentInset.bottom - covered) < 0.5) return;
     UIEdgeInsets inset = self.scroll.contentInset;
     inset.bottom = covered;
@@ -358,6 +380,18 @@ static UIAccessibilityTraits LSScheduleSummaryTraits(NSDate *start, BOOL active)
     // Keeps "Starts in 10 min" and the earliest allowed start current while open.
     self.clock = [NSTimer scheduledTimerWithTimeInterval:30 repeats:YES block:^(__unused NSTimer *timer) { [weakSelf tick]; }];
     self.clock.tolerance = 5;
+}
+- (void)viewDidAppear:(BOOL)animated {
+    [super viewDidAppear:animated];
+    if (self.actionBarShown || !self.actionBar) return;
+    self.actionBarShown = YES;
+    if (self.actionBar.alpha > 0.99) return;
+    UIView *bar = self.actionBar, *fade = self.fadeView;
+    LSAnimate(^{
+        bar.alpha = 1;
+        fade.alpha = 1;
+        bar.transform = CGAffineTransformIdentity;
+    }, nil);
 }
 - (void)viewDidDisappear:(BOOL)animated {
     [super viewDidDisappear:animated];
