@@ -9,6 +9,7 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic) BOOL rememberLocation;
 @property (nonatomic) BOOL showRealLocation;
 @property (nonatomic) BOOL showFloatingButton;
+@property (nonatomic) BOOL continueInBackground;
 + (instancetype)storedSettings;
 - (BOOL)isValid;
 - (void)writeToStore;

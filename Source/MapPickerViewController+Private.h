@@ -2,17 +2,20 @@
 #import "SessionController.h"
 #import "BookmarksManager.h"
 #import "LSUI.h"
+#import "LSRoute.h"
 #import <MapKit/MapKit.h>
 NS_ASSUME_NONNULL_BEGIN
 
 typedef NS_ENUM(NSInteger, LSPickerTab) { LSPickerTabLocation, LSPickerTabRoute, LSPickerTabSaved };
-typedef NS_ENUM(NSInteger, LSEndpoint) { LSEndpointFrom, LSEndpointTo };
+// Matches the order of the "Map taps" segments.
+typedef NS_ENUM(NSInteger, LSEndpoint) { LSEndpointFrom, LSEndpointStop, LSEndpointTo };
 @interface LSStartAnnotation : MKPointAnnotation @end
 @interface LSDestinationAnnotation : MKPointAnnotation @end
+@interface LSStopAnnotation : MKPointAnnotation @end
 @interface LSMovingAnnotation : MKPointAnnotation @end
 @interface LSRealAnnotation : MKPointAnnotation @end
 
-@interface MapPickerViewController () <UITableViewDataSource, UITableViewDelegate>
+@interface MapPickerViewController () <UITableViewDataSource, UITableViewDelegate, UIDocumentPickerDelegate>
 @property (nonatomic) LSPickerTab tab;
 @property (nonatomic) LSEndpoint endpoint;
 @property (nonatomic) BOOL closed;
@@ -41,6 +44,10 @@ typedef NS_ENUM(NSInteger, LSEndpoint) { LSEndpointFrom, LSEndpointTo };
 @property (nonatomic, strong) UILabel *placeLabel;
 @property (nonatomic, strong) UILabel *coordinateLabel;
 @property (nonatomic, strong) UIButton *savePlaceButton;
+@property (nonatomic, strong) UIButton *radiusChip;
+@property (nonatomic, strong) UIButton *scheduleButton;
+@property (nonatomic, strong) UIView *scheduleBanner;
+@property (nonatomic, strong) UILabel *scheduleLabel;
 @property (nonatomic) CLLocationCoordinate2D selectedCoordinate;
 @property (nonatomic) BOOL hasSelection;
 @property (nonatomic, copy) NSString *selectedName;
@@ -77,12 +84,29 @@ typedef NS_ENUM(NSInteger, LSEndpoint) { LSEndpointFrom, LSEndpointTo };
 @property (nonatomic, strong) UIActivityIndicatorView *routeSpinner;
 @property (nonatomic, strong, nullable) LSStartAnnotation *startPin;
 @property (nonatomic, strong, nullable) LSDestinationAnnotation *endPin;
-@property (nonatomic, strong, nullable) MKRoute *fetchedRoute;
+// Planned stops between From and To, in order (up to 10).
+@property (nonatomic, strong) NSMutableArray<LSStopAnnotation *> *routeStops;
+@property (nonatomic, strong) UIStackView *stopsStack;
+@property (nonatomic, strong) UIButton *addStopButton;
+@property (nonatomic, strong, nullable) LSRoute *fetchedRoute;
 @property (nonatomic, strong, nullable) MKPolyline *routePolyline;
 @property (nonatomic, strong, nullable) MKDirections *directions;
+@property (nonatomic, strong, nullable) MKLocalSearch *linkSearch;
 @property (nonatomic) NSUInteger routeRevision;
 @property (nonatomic) double draftSpeedKmh;
+@property (nonatomic) BOOL draftRecordedPace;
+@property (nonatomic) double draftPaceMultiplier;
 @property (nonatomic) BOOL routeDraftChanged;
+@property (nonatomic, strong) UIButton *recordedChip;
+@property (nonatomic, strong) UIButton *motionButton;
+@property (nonatomic, strong) UIButton *waitButton;
+@property (nonatomic, strong) UIButton *finishButton;
+@property (nonatomic, strong) UIButton *shareButton;
+@property (nonatomic, strong) UIButton *importButton;
+@property (nonatomic, strong) UIStackView *liveSpeedRow;
+@property (nonatomic, strong) UILabel *liveSpeedLabel;
+@property (nonatomic, strong) UIButton *slowerButton;
+@property (nonatomic, strong) UIButton *fasterButton;
 
 @property (nonatomic, strong) UITableView *savedTable;
 @property (nonatomic, strong) UIView *savedToolbar;
@@ -105,6 +129,10 @@ typedef NS_ENUM(NSInteger, LSEndpoint) { LSEndpointFrom, LSEndpointTo };
 - (void)confirmAction:(NSString *)title message:(NSString *)message button:(NSString *)button destructive:(BOOL)destructive action:(dispatch_block_t)action;
 - (void)applyCoordinate:(CLLocationCoordinate2D)coordinate name:(NSString *)name;
 - (void)dismissPicker;
+- (void)presentEditor:(UIViewController *)editor;
+- (void)presentShareItems:(NSArray *)items from:(UIView *)source;
+- (void)updateScheduleBanner;
+- (void)openSchedule;
 @end
 
 @interface MapPickerViewController (LSRouteUI)
@@ -119,6 +147,13 @@ typedef NS_ENUM(NSInteger, LSEndpoint) { LSEndpointFrom, LSEndpointTo };
 - (void)startDraftRoute;
 - (void)chooseEndpoint:(UIButton *)sender;
 - (void)updatePlayback;
+- (void)importMapLinkText:(NSString *)text;
+- (void)endpointChanged;
+- (void)moveStop:(LSStopAnnotation *)stop to:(CLLocationCoordinate2D)coordinate name:(NSString *)name;
+- (UIMenu *)importMenu;
+- (void)openTrackFile;
+- (void)importTrackAtURL:(NSURL *)url;
+- (nullable LSPlaybackOptions *)draftOptions;
 @end
 
 @interface MapPickerViewController (LSBookmarksUI)
@@ -132,5 +167,7 @@ typedef NS_ENUM(NSInteger, LSEndpoint) { LSEndpointFrom, LSEndpointTo };
 - (nullable UIContextMenuConfiguration *)savedMenu:(NSIndexPath *)path;
 - (void)moveSavedPlace:(NSIndexPath *)source to:(NSIndexPath *)destination;
 - (nullable UISwipeActionsConfiguration *)savedSwipeActions:(NSIndexPath *)path leading:(BOOL)leading;
+// Wander radius choices for a saved place, as a submenu.
+- (UIMenu *)radiusMenuForBookmark:(LSBookmark *)place;
 @end
 NS_ASSUME_NONNULL_END

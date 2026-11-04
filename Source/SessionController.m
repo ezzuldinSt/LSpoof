@@ -23,7 +23,7 @@ NSNotificationName const LSSessionDidChangeNotification = @"LSSessionDidChange";
     BOOL _pausedForBackground;
     NSTimeInterval _lastCheckpoint;
 }
-@property (nonatomic, strong, nullable) MKRoute *retainedRoute;
+@property (nonatomic, strong, nullable) LSRoute *retainedRoute;
 @end
 
 @implementation LSSessionController
@@ -74,11 +74,13 @@ NSNotificationName const LSSessionDidChangeNotification = @"LSSessionDidChange";
     LSSessionSnapshot *snapshot = [[LSSessionSnapshot alloc] init];
     snapshot.mode = mode;
     snapshot.generation = _generation;
-    snapshot.fluctuationEnabled = mode == LSSessionModeStatic && store.fluctuationEnabled;
-    snapshot.fluctuationRadius = store.fluctuationRadius;
+    // A saved place can carry its own radius, or turn wandering off for itself.
+    double placeRadius = store.activeRadiusOverride;
+    BOOL wander = isfinite(placeRadius) ? placeRadius > 0 : store.fluctuationEnabled;
+    snapshot.fluctuationEnabled = mode == LSSessionModeStatic && wander;
+    snapshot.fluctuationRadius = isfinite(placeRadius) && placeRadius > 0 ? placeRadius : store.fluctuationRadius;
     if (mode != LSSessionModeOff && CLLocationCoordinate2DIsValid(coordinate)) {
-        double speed = mode == LSSessionModeMoving
-            ? [LSRouteSimulator speedMetersPerSecondForMode:simulator.transportMode customSpeedKmh:simulator.customSpeedKmh] : 0.0;
+        double speed = mode == LSSessionModeMoving ? simulator.currentSpeed : 0.0;
         double accuracy = mode == LSSessionModeMoving || mode == LSSessionModePaused
             ? [LSRouteSimulator horizontalAccuracyForMode:simulator.transportMode] : 6.0;
         snapshot.location = [[CLLocation alloc] initWithCoordinate:coordinate altitude:store.altitude
@@ -97,9 +99,14 @@ NSNotificationName const LSSessionDidChangeNotification = @"LSSessionDidChange";
 }
 
 - (BOOL)applyStaticCoordinate:(CLLocationCoordinate2D)coordinate {
+    return [self applyStaticCoordinate:coordinate radiusOverride:NAN];
+}
+
+- (BOOL)applyStaticCoordinate:(CLLocationCoordinate2D)coordinate radiusOverride:(double)radius {
     if (!CLLocationCoordinate2DIsValid(coordinate)) return NO;
     __block BOOL applied = NO;
     [self onMain:^{
+        [PersistenceManager shared].activeRadiusOverride = radius;
         BOOL wasOff = self.snapshot.mode == LSSessionModeOff;
         self->_pausedForBackground = NO;
         [[LSRouteSimulator shared] stop];
@@ -114,32 +121,25 @@ NSNotificationName const LSSessionDidChangeNotification = @"LSSessionDidChange";
     return applied;
 }
 
-- (BOOL)validTransportMode:(LSTransportMode)mode speed:(double)speed {
-    return mode >= LSTransportModeWalking && mode <= LSTransportModeCustom &&
-        (mode != LSTransportModeCustom || (isfinite(speed) && speed >= 1.0 && speed <= 500.0));
-}
-
-- (BOOL)startRoute:(MKRoute *)route transportMode:(LSTransportMode)mode customSpeedKmh:(double)speed {
-    if (![self validTransportMode:mode speed:speed]) return NO;
+- (BOOL)startRoute:(LSRoute *)route options:(LSPlaybackOptions *)options {
+    if (![options isKindOfClass:LSPlaybackOptions.class] || !options.isValid || ![route isKindOfClass:LSRoute.class]) return NO;
     __block BOOL started = NO;
     [self onMain:^{
         BOOL wasOff = self.snapshot.mode == LSSessionModeOff;
         LSRouteSimulator *simulator = [LSRouteSimulator shared];
-        LSTransportMode previousMode = simulator.transportMode;
-        double previousSpeed = simulator.customSpeedKmh;
-        simulator.transportMode = mode;
-        simulator.customSpeedKmh = mode == LSTransportModeCustom ? speed : 30.0;
+        LSPlaybackOptions *previous = simulator.options;
+        simulator.options = options;
         // The engine validates the complete replacement before stopping the old route.
         started = [simulator startWithRoute:route];
         if (!started) {
-            simulator.transportMode = previousMode;
-            simulator.customSpeedKmh = previousSpeed;
+            simulator.options = previous;
             return;
         }
         self.retainedRoute = route;
         self->_pausedForBackground = NO;
         self->_lastCheckpoint = NSProcessInfo.processInfo.systemUptime;
         PersistenceManager *store = [PersistenceManager shared];
+        store.activeRadiusOverride = NAN;
         [store setSpoofCoordinate:simulator.startCoordinate enabled:YES];
         store.simulationWasActive = YES;
         if (wasOff) self->_generation++;
@@ -148,18 +148,58 @@ NSNotificationName const LSSessionDidChangeNotification = @"LSSessionDidChange";
     return started;
 }
 
-- (BOOL)updateTransportMode:(LSTransportMode)mode customSpeedKmh:(double)speed {
-    if (![self validTransportMode:mode speed:speed]) return NO;
+- (BOOL)updatePlaybackOptions:(LSPlaybackOptions *)options {
+    if (![options isKindOfClass:LSPlaybackOptions.class] || !options.isValid) return NO;
     [self onMain:^{
         LSRouteSimulator *simulator = [LSRouteSimulator shared];
-        simulator.transportMode = mode;
-        simulator.customSpeedKmh = mode == LSTransportModeCustom ? speed : 30.0;
+        simulator.options = options;
         if (simulator.isSimulating) {
             [self publishMode:simulator.isPaused ? LSSessionModePaused : LSSessionModeMoving
                   coordinate:simulator.currentCoordinate heading:simulator.currentHeading];
         }
     }];
     return YES;
+}
+
+// Small steps at walking pace, bigger ones at driving speeds.
+static double LSNextSpeed(double kmh, NSInteger direction) {
+    static const double steps[] = {1, 2, 3, 4, 5, 6, 8, 10, 12, 15, 20, 25, 30, 35, 40, 45, 50, 60, 70, 80, 90, 100,
+                                   110, 120, 130, 150, 175, 200, 250, 300, 400, 500};
+    size_t count = sizeof(steps) / sizeof(steps[0]);
+    if (direction > 0) { for (size_t i = 0; i < count; i++) if (steps[i] > kmh + 0.01) return steps[i]; return 500; }
+    for (size_t i = count; i > 0; i--) if (steps[i - 1] < kmh - 0.01) return steps[i - 1];
+    return 1;
+}
+
+static double LSNextMultiplier(double multiplier, NSInteger direction) {
+    static const double steps[] = {0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4, 6, 8, 10};
+    size_t count = sizeof(steps) / sizeof(steps[0]);
+    if (direction > 0) { for (size_t i = 0; i < count; i++) if (steps[i] > multiplier + 0.001) return steps[i]; return 10; }
+    for (size_t i = count; i > 0; i--) if (steps[i - 1] < multiplier - 0.001) return steps[i - 1];
+    return 0.25;
+}
+
+- (BOOL)nudgeSpeed:(NSInteger)direction {
+    __block BOOL changed = NO;
+    [self onMain:^{
+        LSRouteSimulator *simulator = [LSRouteSimulator shared];
+        if (!simulator.isSimulating || direction == 0) return;
+        LSPlaybackOptions *options = [simulator.options copy];
+        if (options.recordedPace && simulator.route.hasTiming) {
+            double next = LSNextMultiplier(options.paceMultiplier, direction);
+            changed = fabs(next - options.paceMultiplier) > 0.001;
+            options.paceMultiplier = next;
+        } else {
+            double current = options.speedKmh;
+            LSPlaybackOptions *next = [LSPlaybackOptions optionsWithSpeedKmh:LSNextSpeed(current, direction)];
+            changed = fabs(next.speedKmh - current) > 0.01;
+            options.mode = next.mode;
+            options.customSpeedKmh = next.customSpeedKmh;
+            options.recordedPace = NO;
+        }
+        if (changed) [self updatePlaybackOptions:options];
+    }];
+    return changed;
 }
 
 - (void)checkpointSimulator {
@@ -207,7 +247,7 @@ NSNotificationName const LSSessionDidChangeNotification = @"LSSessionDidChange";
     [self onMain:^{
         CLLocation *location = self.snapshot.location;
         if (!location) return;
-        MKRoute *route = self.retainedRoute;
+        LSRoute *route = self.retainedRoute;
         [PersistenceManager shared].heading = location.course;
         [self applyStaticCoordinate:location.coordinate];
         self.retainedRoute = route;
@@ -218,6 +258,7 @@ NSNotificationName const LSSessionDidChangeNotification = @"LSSessionDidChange";
     [self onMain:^{
         self->_pausedForBackground = NO;
         [[LSRouteSimulator shared] stop];
+        [PersistenceManager shared].activeRadiusOverride = NAN;
         [[PersistenceManager shared] clearSpoof];
         self.retainedRoute = nil;
         self->_generation++;
@@ -243,6 +284,8 @@ NSNotificationName const LSSessionDidChangeNotification = @"LSSessionDidChange";
     [self onMain:^{
         LSRouteSimulator *simulator = [LSRouteSimulator shared];
         if (!simulator.isSimulating || simulator.isPaused) return;
+        // Only useful while iOS keeps the host running, e.g. a host with background location.
+        if ([PersistenceManager shared].continueInBackground) return;
         [self pause];
         // Remember that the pause was automatic so the route continues on return.
         self->_pausedForBackground = YES;
