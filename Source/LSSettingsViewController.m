@@ -25,6 +25,28 @@ static BOOL LSSettingsLargeText(UITraitCollection *traits) {
 
 #pragma mark - Plain-language readings of the values
 
+// Read-only figures group digits the local way ("1,000 m", "8,848 m"). Editable fields keep
+// LSFormatDecimal, which leaves grouping out so typed text reads back as entered.
+static NSString *LSSettingsDisplayNumber(double value, NSUInteger digits) {
+    static NSMutableDictionary<NSNumber *, NSNumberFormatter *> *formatters;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        formatters = [NSMutableDictionary dictionary];
+        [NSNotificationCenter.defaultCenter addObserverForName:NSCurrentLocaleDidChangeNotification object:nil queue:NSOperationQueue.mainQueue
+                                                    usingBlock:^(__unused NSNotification *note) { [formatters removeAllObjects]; }];
+    });
+    NSNumberFormatter *formatter = formatters[@(digits)];
+    if (!formatter) {
+        formatter = [[NSNumberFormatter alloc] init];
+        formatter.locale = NSLocale.currentLocale;
+        formatter.numberStyle = NSNumberFormatterDecimalStyle;
+        formatter.usesGroupingSeparator = YES;
+        formatter.maximumFractionDigits = digits;
+        formatters[@(digits)] = formatter;
+    }
+    return [formatter stringFromNumber:@(value)] ?: @"";
+}
+
 static NSString *LSSettingsAltitudeText(double meters) {
     if (fabs(meters) < 1) return @"At sea level";
     static const struct { double meters; const char *text; } marks[] = {
@@ -35,9 +57,9 @@ static NSString *LSSettingsAltitudeText(double meters) {
     for (size_t i = 0; i < sizeof(marks) / sizeof(marks[0]); i++) {
         if (fabs(meters - marks[i].meters) <= fabs(marks[i].meters) * 0.15) return @(marks[i].text);
     }
-    if (meters < 0) return [NSString stringWithFormat:@"%@ m below sea level", LSFormatDecimal(-meters, 0)];
+    if (meters < 0) return [NSString stringWithFormat:@"%@ m below sea level", LSSettingsDisplayNumber(-meters, 0)];
     if (meters < 50) return @"Near sea level, like most coastal cities";
-    return [NSString stringWithFormat:@"%@ m above sea level", LSFormatDecimal(meters, 0)];
+    return [NSString stringWithFormat:@"%@ m above sea level", LSSettingsDisplayNumber(meters, 0)];
 }
 static NSString *LSSettingsCourseText(double course) {
     NSArray<NSString *> *names = @[@"north", @"northeast", @"east", @"southeast", @"south", @"southwest", @"west", @"northwest"];
@@ -57,7 +79,7 @@ static NSString *LSSettingsWanderComparison(double radius) {
     return @"About a small town center";
 }
 static NSString *LSSettingsWanderText(double radius) {
-    return [NSString stringWithFormat:@"%@ · %@ m across", LSSettingsWanderComparison(radius), LSFormatDecimal(radius * 2, 1)];
+    return [NSString stringWithFormat:@"%@ · %@ m across", LSSettingsWanderComparison(radius), LSSettingsDisplayNumber(radius * 2, 1)];
 }
 // The slider runs on a square-root scale so 1 to 50 m, where most choices are, gets most of its travel.
 static float LSSettingsSliderValue(double meters) { return (float)sqrt(MAX(0, MIN(1, (meters - 1) / 999.0))); }
@@ -70,6 +92,11 @@ static double LSSettingsSliderMeters(float value) {
         if (fabs(value - LSSettingsSliderValue(kLSSettingsRadiusDetents[i])) < 0.006) return kLSSettingsRadiusDetents[i];
     }
     return meters;
+}
+// A drag on the preview moves in the steps its readout shows: 5 m below 100 m, 10 m above.
+static double LSSettingsDragMeters(double meters) {
+    double step = meters < 100 ? 5 : 10;
+    return MAX(1, MIN(1000, round(meters / step) * step));
 }
 
 #pragma mark - Building blocks
@@ -240,8 +267,7 @@ static LSSettingsReflowStack *LSSettingsFlow(NSArray<UIView *> *views, CGFloat s
 - (void)drag:(UIPanGestureRecognizer *)pan {
     UIGestureRecognizerState state = pan.state;
     if (state == UIGestureRecognizerStateBegan) {
-        _dragging = YES;
-        LSHapticImpact(UIImpactFeedbackStyleLight);
+        _dragging = YES; // The tap comes from the first step the value takes.
         [self setGrabbed:YES];
     }
     if (state == UIGestureRecognizerStateBegan || state == UIGestureRecognizerStateChanged) {
@@ -267,7 +293,7 @@ static LSSettingsReflowStack *LSSettingsFlow(NSArray<UIView *> *views, CGFloat s
 }
 // "40 m" in a small capsule just above the knob, kept inside the preview.
 - (void)placeReadout {
-    _readout.text = [NSString stringWithFormat:@"%@ m", LSFormatDecimal(_radius, 0)];
+    _readout.text = [NSString stringWithFormat:@"%@ m", LSSettingsDisplayNumber(_radius, 0)];
     CGSize size = _readout.intrinsicContentSize;
     CGPoint knob = [self knobPosition];
     CGFloat x = MAX(4, MIN(CGRectGetWidth(self.bounds) - size.width - 4, knob.x - size.width / 2));
@@ -673,11 +699,11 @@ static UIView *LSSettingsSection(NSString *header, UIView *card, NSString *foote
     __weak typeof(self) weakSelf = self;
     self.radiusSlider.describe = ^NSString *{
         NSNumber *radius = [weakSelf liveValue:weakSelf.radiusField];
-        return radius ? [NSString stringWithFormat:@"%@ meters, %@", LSFormatDecimal(radius.doubleValue, 1), LSSettingsWanderComparison(radius.doubleValue).lowercaseString] : @"Not set";
+        return radius ? [NSString stringWithFormat:@"%@ meters, %@", LSSettingsDisplayNumber(radius.doubleValue, 1), LSSettingsWanderComparison(radius.doubleValue).lowercaseString] : @"Not set";
     };
     [self.radiusSlider addTarget:self action:@selector(radiusSlid) forControlEvents:UIControlEventValueChanged];
     // Same rounding and detents as the slider.
-    self.wanderPreview.dragged = ^(double meters) { [weakSelf applyRadius:LSSettingsSliderMeters(LSSettingsSliderValue(meters))]; };
+    self.wanderPreview.dragged = ^(double meters) { [weakSelf applyRadius:LSSettingsDragMeters(meters) dragged:YES]; };
     [self.radiusSlider.heightAnchor constraintGreaterThanOrEqualToConstant:44].active = YES;
 
     UIStackView *content = LSStack(@[self.wanderPreview, line, self.radiusSlider, self.radiusErrorRow], LSSpaceM);
@@ -893,7 +919,7 @@ static UIView *LSSettingsSection(NSString *header, UIView *card, NSString *foote
         else self.compassArrow.transform = turn;
     }
     NSNumber *radius = [self liveValue:self.radiusField];
-    self.radiusValue.text = radius ? [NSString stringWithFormat:@"%@ m", LSFormatDecimal(radius.doubleValue, 1)] : @"–";
+    self.radiusValue.text = radius ? [NSString stringWithFormat:@"%@ m", LSSettingsDisplayNumber(radius.doubleValue, 1)] : @"–";
     self.radiusDetail.text = radius ? LSSettingsWanderText(radius.doubleValue) : @"From 1 to 1,000 m";
     if (radius) [self.wanderPreview setRadius:radius.doubleValue animated:animated];
     for (UITextField *field in @[self.altitudeField, self.courseField]) {
@@ -917,16 +943,21 @@ static UIView *LSSettingsSection(NSString *header, UIView *card, NSString *foote
     [self updateLiveDetailsAnimated:YES];
     [self updateEditedState];
 }
-- (void)radiusSlid { [self applyRadius:LSSettingsSliderMeters(self.radiusSlider.value)]; }
-// From the slider or a drag on the preview: a haptic tick on each preset, then field,
-// slider, readout and preview follow.
-- (void)applyRadius:(double)meters {
-    BOOL detent = NO;
-    for (size_t i = 0; i < sizeof(kLSSettingsRadiusDetents) / sizeof(double); i++) detent = detent || meters == kLSSettingsRadiusDetents[i];
-    if (detent && meters != self.lastDetent) LSHapticSelection();
-    self.lastDetent = meters;
+- (void)radiusSlid { [self applyRadius:LSSettingsSliderMeters(self.radiusSlider.value) dragged:NO]; }
+// From the slider, a selection tick on each preset; from a drag on the preview, a light tap
+// each time the shown value steps. Then field, slider, readout and preview follow.
+- (void)applyRadius:(double)meters dragged:(BOOL)dragged {
     NSString *text = LSFormatDecimal(meters, 0);
-    if ([text isEqualToString:self.radiusField.text]) return;
+    BOOL changed = ![text isEqualToString:self.radiusField.text];
+    if (dragged) {
+        if (changed) LSHapticImpact(UIImpactFeedbackStyleLight);
+    } else {
+        BOOL detent = NO;
+        for (size_t i = 0; i < sizeof(kLSSettingsRadiusDetents) / sizeof(double); i++) detent = detent || meters == kLSSettingsRadiusDetents[i];
+        if (detent && meters != self.lastDetent) LSHapticSelection();
+    }
+    self.lastDetent = meters;
+    if (!changed) return;
     self.radiusField.text = text;
     [self validateField:self.radiusField format:NO];
     if (!self.radiusSlider.isTracking) self.radiusSlider.value = LSSettingsSliderValue(meters);

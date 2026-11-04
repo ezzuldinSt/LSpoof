@@ -112,6 +112,21 @@ static void LSSetButtonRadius(UIButton *button, CGFloat radius) {
 }
 @end
 
+// Context menu for a view whose actions depend on state at the moment of the long press.
+@interface LSMenuInteractionHandler : NSObject <UIContextMenuInteractionDelegate>
+@property (nonatomic, copy) UIMenu *(^menuProvider)(void);
+@end
+@implementation LSMenuInteractionHandler
+- (UIContextMenuConfiguration *)contextMenuInteraction:(UIContextMenuInteraction *)interaction configurationForMenuAtLocation:(CGPoint)location {
+    (void)interaction; (void)location;
+    UIMenu *menu = self.menuProvider ? self.menuProvider() : nil;
+    if (!menu) return nil;
+    return [UIContextMenuConfiguration configurationWithIdentifier:nil previewProvider:nil actionProvider:^UIMenu *(__unused NSArray<UIMenuElement *> *suggested) {
+        return menu;
+    }];
+}
+@end
+
 // Thin capsule under the header that fills as a route plays. Each 4 Hz refresh glides the fill
 // linearly to the new value, so it moves continuously instead of stepping.
 @interface LSProgressCapsule : UIView
@@ -128,7 +143,10 @@ static void LSSetButtonRadius(UIButton *button, CGFloat radius) {
         self.translatesAutoresizingMaskIntoConstraints = NO;
         self.userInteractionEnabled = NO;
         self.isAccessibilityElement = NO;
-        self.backgroundColor = UIColor.tertiarySystemFillColor;
+        // The faint fill nearly vanishes over light glass; Increase Contrast gets a solid track.
+        self.backgroundColor = [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *traits) {
+            return traits.accessibilityContrast == UIAccessibilityContrastHigh ? UIColor.systemGray3Color : UIColor.tertiarySystemFillColor;
+        }];
         self.layer.masksToBounds = YES;
         _fill = [CALayer layer];
         _fill.anchorPoint = CGPointMake(0, 0.5);
@@ -400,6 +418,8 @@ static void LSSetButtonRadius(UIButton *button, CGFloat radius) {
 @property (nonatomic) NSInteger statusDetailKind;
 @property (nonatomic) BOOL footerShown;
 @property (nonatomic) BOOL scheduleDotShown;
+@property (nonatomic) NSInteger scheduleActiveState;
+@property (nonatomic, strong) LSMenuInteractionHandler *heldMenu;
 @property (nonatomic) CLLocationCoordinate2D geocodedCoordinate;
 @end
 
@@ -412,6 +432,7 @@ static void LSSetButtonRadius(UIButton *button, CGFloat radius) {
     self.statusMode = -1;
     self.defaultRenderers = [NSHashTable weakObjectsHashTable];
     self.puckColors = [NSMutableDictionary dictionary];
+    self.scheduleActiveState = -1;
     self.geocodedCoordinate = kCLLocationCoordinate2DInvalid;
     self.locationHintDone = [[[NSUserDefaults alloc] initWithSuiteName:kLSDefaultsSuite] boolForKey:kLSLocationHintKey];
     self.selectedCoordinate = kCLLocationCoordinate2DInvalid;
@@ -564,6 +585,19 @@ static void LSSetButtonRadius(UIButton *button, CGFloat radius) {
     self.appliedLabel.adjustsFontSizeToFitWidth = YES;
     self.appliedLabel.minimumScaleFactor = 0.75;
     self.appliedLabel.hidden = YES;
+    // Held coordinates in the header copy with a long press (VoiceOver: a custom action).
+    self.heldMenu = [[LSMenuInteractionHandler alloc] init];
+    __weak typeof(self) weakSelf = self;
+    self.heldMenu.menuProvider = ^UIMenu *{
+        typeof(self) self = weakSelf;
+        if (!self || self.statusDetailKind != 2) return nil;
+        UIAction *copy = [UIAction actionWithTitle:@"Copy coordinates" image:[UIImage systemImageNamed:@"doc.on.doc"] identifier:nil handler:^(__unused UIAction *action) {
+            [weakSelf copyHeldCoordinates];
+        }];
+        return [UIMenu menuWithTitle:@"" children:@[copy]];
+    };
+    self.appliedLabel.userInteractionEnabled = YES;
+    [self.appliedLabel addInteraction:[[UIContextMenuInteraction alloc] initWithDelegate:self.heldMenu]];
     self.statusProgress = [[LSProgressCapsule alloc] initWithFrame:CGRectZero];
     self.statusProgress.hidden = YES;
     self.statusStack = LSStack(@[chipRow, self.brandLabel, self.appliedLabel, self.statusProgress], 2);
@@ -1498,7 +1532,7 @@ static void LSSetButtonRadius(UIButton *button, CGFloat radius) {
         progress = total > 0 ? MIN(1, engine.distanceCovered / total) : 0;
         NSString *name = LSSessionController.shared.retainedRoute.name;
         title = name.length ? name : @"Route";
-        detail = [NSString stringWithFormat:@"%.0f%% done", floor(progress * 100)];
+        detail = [NSString stringWithFormat:@"%@ done", [self percentText:floor(progress * 100) / 100]];
         if (total > 0) detail = [detail stringByAppendingFormat:@" · %@ to go", [self distanceText:MAX(0, total - engine.distanceCovered)]];
         spoken = detail;
     }
@@ -1530,6 +1564,16 @@ static void LSSetButtonRadius(UIButton *button, CGFloat radius) {
     NSString *label = [NSString stringWithFormat:@"Status: %@. %@", LSSessionTitle(mode), title];
     if (![self.statusStack.accessibilityLabel isEqualToString:label]) self.statusStack.accessibilityLabel = label;
     if (![self.statusStack.accessibilityValue isEqualToString:spoken]) self.statusStack.accessibilityValue = spoken;
+}
+- (NSString *)percentText:(double)fraction {
+    static NSNumberFormatter *formatter;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        formatter = [[NSNumberFormatter alloc] init];
+        formatter.numberStyle = NSNumberFormatterPercentStyle;
+        formatter.maximumFractionDigits = 0;
+    });
+    return [formatter stringFromNumber:@(fraction)] ?: @"";
 }
 - (NSString *)distanceText:(CLLocationDistance)meters {
     static MKDistanceFormatter *formatter;
@@ -1566,6 +1610,11 @@ static void LSSetButtonRadius(UIButton *button, CGFloat radius) {
     [actions addObject:[[UIAccessibilityCustomAction alloc] initWithName:@"Show on map" actionHandler:^BOOL(__unused UIAccessibilityCustomAction *action) {
         return [weakSelf showAppliedOnMap];
     }]];
+    if (mode == LSSessionModeStatic) {
+        [actions addObject:[[UIAccessibilityCustomAction alloc] initWithName:@"Copy coordinates" actionHandler:^BOOL(__unused UIAccessibilityCustomAction *action) {
+            return [weakSelf copyHeldCoordinates];
+        }]];
+    }
     if (mode == LSSessionModeMoving || mode == LSSessionModePaused) {
         [actions addObject:[[UIAccessibilityCustomAction alloc] initWithName:mode == LSSessionModePaused ? @"Resume route" : @"Pause route" actionHandler:^BOOL(__unused UIAccessibilityCustomAction *action) {
             [weakSelf togglePause];
@@ -1581,6 +1630,14 @@ static void LSSetButtonRadius(UIButton *button, CGFloat radius) {
         return YES;
     }]];
     return actions;
+}
+- (BOOL)copyHeldCoordinates {
+    PersistenceManager *store = PersistenceManager.shared;
+    if (LSSessionController.shared.snapshot.mode != LSSessionModeStatic || !store.hasStoredCoordinate) return NO;
+    UIPasteboard.generalPasteboard.string = LSCoordinateText(store.spoofCoordinate);
+    LSHapticSuccess();
+    [self showMessage:@"Coordinates copied." symbol:@"doc.on.doc.fill"];
+    return YES;
 }
 - (BOOL)showAppliedOnMap {
     CLLocation *applied = LSSessionController.shared.snapshot.location;
@@ -1826,6 +1883,10 @@ static void LSSetButtonRadius(UIButton *button, CGFloat radius) {
     // Under Differentiate Without Color the symbol itself carries the state.
     BOOL glyph = UIAccessibilityShouldDifferentiateWithoutColor();
     [self setScheduleDotShown:scheduled && !glyph animated:self.view.window != nil];
+    // One pulse when the scheduled start actually happens (not when the picker opens on it).
+    NSInteger active = scheduled && schedule.isActive ? 1 : 0;
+    if (self.scheduleActiveState == 0 && active == 1) [self pulseScheduleDot];
+    self.scheduleActiveState = active;
     UIButtonConfiguration *clock = self.scheduleButton.configuration;
     UIImage *image = [UIImage systemImageNamed:!scheduled ? @"clock" : (glyph ? @"clock.badge.checkmark.fill" : @"clock.fill")];
     if (![clock.image isEqual:image]) {
@@ -1838,21 +1899,73 @@ static void LSSetButtonRadius(UIButton *button, CGFloat radius) {
     self.scheduleButton.menu = scheduled ? [self scheduleMenuWithSummary:summary] : nil;
     [self updateFooter];
 }
+- (void)pulseScheduleDot {
+    if (!self.view.window || !LSMapAnimationsEnabled()) return;
+    UIView *dot = self.scheduleBanner;
+    if (!self.scheduleDotShown) { LSBump(self.scheduleButton); return; }
+    LSAnimate(^{ dot.transform = CGAffineTransformMakeScale(1.35, 1.35); }, ^{
+        LSAnimateBouncy(^{ dot.transform = CGAffineTransformIdentity; }, nil);
+    });
+}
 - (UIMenu *)scheduleMenuWithSummary:(NSString *)summary {
     __weak typeof(self) weakSelf = self;
     UIAction *change = [UIAction actionWithTitle:@"Change schedule" image:[UIImage systemImageNamed:@"clock.arrow.circlepath"] identifier:nil handler:^(__unused UIAction *action) {
         [weakSelf openSchedule];
     }];
     UIAction *cancel = [UIAction actionWithTitle:@"Cancel schedule" image:[UIImage systemImageNamed:@"xmark.circle"] identifier:nil handler:^(__unused UIAction *action) {
-        typeof(self) self = weakSelf;
-        if (!self || self.closed) return;
-        [LSScheduler.shared cancel];
-        LSHapticSuccess();
-        [self updateScheduleBanner];
-        [self showMessage:@"Schedule cancelled." symbol:@"clock.badge.xmark"];
+        [weakSelf cancelScheduleWithUndo];
     }];
     cancel.attributes = UIMenuElementAttributesDestructive;
-    return [UIMenu menuWithTitle:summary ?: @"Schedule" children:@[change, cancel]];
+    // The destructive choice sits in its own group, apart from Change.
+    UIMenu *danger = [UIMenu menuWithTitle:@"" image:nil identifier:nil options:UIMenuOptionsDisplayInline children:@[cancel]];
+    return [UIMenu menuWithTitle:summary ?: @"Schedule" children:@[change, danger]];
+}
+- (void)cancelScheduleWithUndo {
+    if (self.closed) return;
+    BOOL (^restore)(void) = [self restorerForCurrentSchedule];
+    BOOL activeRoute = LSScheduler.shared.schedule.isRoute && LSScheduler.shared.schedule.isActive;
+    [LSScheduler.shared cancel];
+    LSHapticSuccess();
+    [self updateScheduleBanner];
+    if (!restore) {
+        [self showMessage:activeRoute ? @"Schedule cancelled. The route keeps playing." : @"Schedule cancelled." symbol:@"clock.badge.xmark"];
+        return;
+    }
+    __weak typeof(self) weakSelf = self;
+    LSShowActionToast(self.view, [self toastAnchorView], @"Schedule cancelled.", @"clock.badge.xmark", @"Undo", ^{
+        typeof(self) self = weakSelf;
+        // Something scheduled since wins over the old one.
+        if (!self || self.closed || LSScheduler.shared.schedule) return;
+        if (restore()) { LSHapticSuccess(); [self updateScheduleBanner]; }
+        else [self showMessage:@"The schedule could not be restored." symbol:@"exclamationmark.triangle.fill"];
+    });
+}
+// Rebuilds the current schedule through the scheduler's public calls, from its saved form
+// (read only). A route that already started has no restorer: scheduling it again would
+// restart it from its first point.
+- (BOOL (^)(void))restorerForCurrentSchedule {
+    LSSchedule *schedule = LSScheduler.shared.schedule;
+    NSDictionary *stored = [[[NSUserDefaults alloc] initWithSuiteName:kLSDefaultsSuite] dictionaryForKey:@"LSSchedule"];
+    if (!schedule || !stored) return nil;
+    NSString *name = schedule.name;
+    NSDate *start = schedule.startDate, *end = schedule.endDate;
+    BOOL daily = schedule.repeatsDaily;
+    if (schedule.isRoute) {
+        if (schedule.isActive) return nil;
+        LSRoute *route = [LSRoute routeFromDictionary:stored[@"route"] ?: @{}];
+        LSPlaybackOptions *options = [LSPlaybackOptions optionsFromDictionary:stored[@"options"]];
+        if (!route || !options) return nil;
+        return ^BOOL(void) {
+            return [LSScheduler.shared scheduleRoute:route options:options name:name start:start end:end repeatsDaily:daily];
+        };
+    }
+    id latitude = stored[@"lat"], longitude = stored[@"lon"];
+    if (![latitude isKindOfClass:NSNumber.class] || ![longitude isKindOfClass:NSNumber.class]) return nil;
+    CLLocationCoordinate2D coordinate = CLLocationCoordinate2DMake([latitude doubleValue], [longitude doubleValue]);
+    double radius = [stored[@"radius"] isKindOfClass:NSNumber.class] ? [stored[@"radius"] doubleValue] : NAN;
+    return ^BOOL(void) {
+        return [LSScheduler.shared scheduleLocation:coordinate name:name radiusOverride:radius start:start end:end repeatsDaily:daily];
+    };
 }
 - (void)differentiateWithoutColorChanged:(NSNotification *)note {
     (void)note;

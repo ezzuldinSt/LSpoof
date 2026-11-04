@@ -567,12 +567,14 @@ static LSTraitStack *LSRouteRow(NSArray<UIView *> *views, CGFloat spacing, UISta
 
 // Forwards a map gesture's start to the draw-in, without the recognizer pointing at the picker.
 @interface LSRouteGestureRelay : NSObject
-@property (nonatomic, copy, nullable) dispatch_block_t began;
+@property (nonatomic, copy, nullable) dispatch_block_t moved;
 - (void)fire:(UIGestureRecognizer *)gesture;
 @end
 @implementation LSRouteGestureRelay
+// Pans, pinches and rotations move the map as they begin; a double-tap zoom once it ends.
 - (void)fire:(UIGestureRecognizer *)gesture {
-    if (gesture.state == UIGestureRecognizerStateBegan && self.began) self.began();
+    BOOL tap = [gesture isKindOfClass:UITapGestureRecognizer.class];
+    if (gesture.state == (tap ? UIGestureRecognizerStateEnded : UIGestureRecognizerStateBegan) && self.moved) self.moved();
 }
 @end
 static char ls_routeRelayKey;
@@ -1143,15 +1145,12 @@ static LSRoute *LSRouteFromTrackFile(NSURL *url, LSTrack **trackOut, NSString **
     [edit setContentCompressionResistancePriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
     [edit addTarget:self action:@selector(openRouteEditor) forControlEvents:UIControlEventTouchUpInside];
     LSTraitStack *trip = LSRouteRow(@[self.routeTripLabel, edit], 10, UIStackViewAlignmentCenter, UIContentSizeCategoryAccessibilityMedium);
-    // One VoiceOver element: the trip, with Edit route as its action and its double tap.
+    // One VoiceOver element: the trip opens the editor; Pause or Resume is its action.
     trip.isAccessibilityElement = YES;
     trip.accessibilityTraits = UIAccessibilityTraitButton;
-    trip.accessibilityHint = @"Double tap to edit the route.";
+    trip.accessibilityHint = @"Shows From, the stops and To again.";
+    trip.accessibilityUserInputLabels = @[@"Edit route", @"Trip"];
     trip.activated = ^{ [weakSelf openRouteEditor]; };
-    trip.accessibilityCustomActions = @[[[UIAccessibilityCustomAction alloc] initWithName:@"Edit route" actionHandler:^BOOL(__unused UIAccessibilityCustomAction *action) {
-        [weakSelf openRouteEditor];
-        return YES;
-    }]];
     // The place symbols are drawn into the text, so rebuild it for new sizes and appearances.
     trip.traitsChanged = ^{ [weakSelf updateTripSummary]; };
     self.routeTripRow = trip;
@@ -1830,7 +1829,15 @@ static LSRoute *LSRouteFromTrackFile(NSURL *url, LSTrack **trackOut, NSString **
     [self routeWasBuilt];
     [self updateRouteUI];
     NSTimeInterval duration = [LSRouteSimulator estimatedDurationForRoute:route options:[self draftOptions]];
-    LSAnnounce([NSString stringWithFormat:@"Route ready. %@, about %@.", LSSpokenDistance(route.distance), LSTimeText(duration, YES)]);
+    // With VoiceOver, focus moves to the new route (its distance is read there), and the
+    // queued announcement adds the rest.
+    UIView *summary = !self.routeTripCard.hidden ? self.routeTripRow : (!self.routeStatsWrap.hidden ? self.routeStats.firstObject : nil);
+    if (UIAccessibilityIsVoiceOverRunning() && summary.window) {
+        UIAccessibilityPostNotification(UIAccessibilityLayoutChangedNotification, summary);
+        LSAnnounce([NSString stringWithFormat:@"Route ready, about %@.", LSTimeText(duration, YES)]);
+    } else {
+        LSAnnounce([NSString stringWithFormat:@"Route ready. %@, about %@.", LSSpokenDistance(route.distance), LSTimeText(duration, YES)]);
+    }
 }
 
 // The first route teaches the rest, so the path-versus-speed tip goes away.
@@ -1975,12 +1982,13 @@ static LSRoute *LSRouteFromTrackFile(NSURL *url, LSTrack **trackOut, NSString **
     }
     LSRouteGestureRelay *relay = [[LSRouteGestureRelay alloc] init];
     __weak typeof(self) weakSelf = self;
-    relay.began = ^{ [weakSelf mapMovedDuringDrawIn]; };
+    relay.moved = ^{ [weakSelf mapMovedDuringDrawIn]; };
     NSMutableArray<UIGestureRecognizer *> *watched = [NSMutableArray array];
     for (UIView *view in views) {
         for (UIGestureRecognizer *gesture in view.gestureRecognizers) {
             BOOL moves = [gesture isKindOfClass:UIPanGestureRecognizer.class] || [gesture isKindOfClass:UIPinchGestureRecognizer.class] ||
-                         [gesture isKindOfClass:UIRotationGestureRecognizer.class];
+                         [gesture isKindOfClass:UIRotationGestureRecognizer.class] ||
+                         ([gesture isKindOfClass:UITapGestureRecognizer.class] && ((UITapGestureRecognizer *)gesture).numberOfTapsRequired >= 2);
             if (!moves || [watched containsObject:gesture]) continue;
             [gesture addTarget:relay action:@selector(fire:)];
             objc_setAssociatedObject(gesture, &ls_routeRelayKey, relay, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -2000,9 +2008,12 @@ static LSRoute *LSRouteFromTrackFile(NSURL *url, LSTrack **trackOut, NSString **
 }
 
 - (void)mapMovedDuringDrawIn {
-    if (!self.routeTraceView) return;
-    [self.routeTraceView removeFromSuperview];
+    UIView *trace = self.routeTraceView;
+    if (!trace) return;
     self.routeTraceView = nil;
+    // A quick fade rather than a cut, short enough that the drift under the finger stays small.
+    [UIView animateWithDuration:0.12 delay:0 options:UIViewAnimationOptionBeginFromCurrentState animations:^{ trace.alpha = 0; }
+                     completion:^(__unused BOOL finished) { [trace removeFromSuperview]; }];
     [self finishRouteDrawIn:self.routeDrawRevision];
 }
 
@@ -3002,6 +3013,19 @@ static LSRoute *LSRouteFromTrackFile(NSURL *url, LSTrack **trackOut, NSString **
     });
 }
 
+// The trip row's one action follows the playback state; renamed only when that changes.
+- (void)setTripRowPauseAction:(nullable NSString *)name {
+    UIView *trip = self.routeTripRow;
+    NSArray<UIAccessibilityCustomAction *> *actions = trip.accessibilityCustomActions;
+    if (!name) { if (actions.count) trip.accessibilityCustomActions = nil; return; }
+    if ([actions.firstObject.name isEqualToString:name]) return;
+    __weak typeof(self) weakSelf = self;
+    trip.accessibilityCustomActions = @[[[UIAccessibilityCustomAction alloc] initWithName:name actionHandler:^BOOL(__unused UIAccessibilityCustomAction *action) {
+        [weakSelf instrumentPlayPause];
+        return YES;
+    }]];
+}
+
 - (void)closeRouteEditor {
     self.routeEditorOpen = NO;
     LSHapticSelection();
@@ -3054,7 +3078,15 @@ static LSRoute *LSRouteFromTrackFile(NSURL *url, LSTrack **trackOut, NSString **
             [text appendAttributedString:[[NSAttributedString alloc] initWithString:tail
                 attributes:@{NSFontAttributeName: font, NSForegroundColorAttributeName: UIColor.secondaryLabelColor}]];
         }
-        label.attributedText = text;
+        // Reaching a stop changes "next: Stop N"; that change cross-dissolves (not motion).
+        BOOL nextChanged = self.routeTripNext && ![self.routeTripNext isEqualToString:next ?: @""];
+        if (nextChanged && label.window) {
+            [UIView transitionWithView:label duration:0.2 options:UIViewAnimationOptionTransitionCrossDissolve | UIViewAnimationOptionAllowUserInteraction
+                            animations:^{ label.attributedText = text; } completion:nil];
+        } else {
+            label.attributedText = text;
+        }
+        self.routeTripNext = next ?: @"";
     }
     NSMutableString *spoken = [NSMutableString stringWithFormat:@"Route from %@ to %@", from, to];
     if (stops) [spoken appendFormat:@", via %@", count];
@@ -3097,6 +3129,7 @@ static LSRoute *LSRouteFromTrackFile(NSURL *url, LSTrack **trackOut, NSString **
     NSMutableArray<NSString *> *spoken = [NSMutableArray array];
     NSString *detail = @"";
     if (complete) {
+        [self setTripRowPauseAction:nil];
         [gauge.stateChip setTitle:@"Arrived" symbol:@"flag.checkered" color:LSSuccessColor() active:NO];
         [gauge.timeLeft setValue:LSDistance(total) caption:@"travelled" spoken:LSSpokenDistance(total)];
         LSSetText(gauge.doneLabel, @"Whole route done");
@@ -3135,6 +3168,7 @@ static LSRoute *LSRouteFromTrackFile(NSURL *url, LSTrack **trackOut, NSString **
         gauge.fasterButton.accessibilityValue = fastest ? @"Fastest speed" : nil;
         gauge.slowerButton.accessibilityValue = slowest ? @"Slowest speed" : nil;
         [gauge setPaused:paused];
+        [self setTripRowPauseAction:paused ? @"Resume route" : @"Pause route"];
     }
     gauge.speedNow.hidden = complete;
     gauge.etaLabel.hidden = complete || paused;

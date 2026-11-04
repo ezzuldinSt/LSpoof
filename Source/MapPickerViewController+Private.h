@@ -222,6 +222,7 @@ typedef NS_ENUM(NSInteger, LSEndpoint) { LSEndpointFrom, LSEndpointStop, LSEndpo
 @property (nonatomic, strong) UILabel *routeTripLabel;
 @property (nonatomic, strong) UIView *routeTripRow;
 @property (nonatomic, copy, nullable) NSString *routeTripKey;
+@property (nonatomic, copy, nullable) NSString *routeTripNext;
 @property (nonatomic, strong) UIView *routeEditHeader;
 @property (nonatomic) BOOL routeEditorOpen;
 // Map: an outline under the route, the travelled part dimmed, and the draw-in once built.

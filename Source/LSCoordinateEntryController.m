@@ -931,6 +931,7 @@ static UIView *LSEntryHeader(NSString *text) {
 - (void)viewDidAppear:(BOOL)animated {
     [super viewDidAppear:animated];
     if (self.needsMapRefresh) [self applyPreviewToMap];
+    [self takeKeyFocusIfIdle];
 }
 - (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
     [super traitCollectionDidChange:previousTraitCollection];
@@ -1094,6 +1095,8 @@ static UIView *LSEntryHeader(NSString *text) {
     dispatch_async(dispatch_get_main_queue(), ^{ [self revealField:field animated:LSMapAnimationsEnabled()]; });
 }
 - (void)textFieldDidEndEditing:(UITextField *)field {
+    // After the next field (if any) has taken over, so focus is never stolen from it.
+    dispatch_async(dispatch_get_main_queue(), ^{ [self takeKeyFocusIfIdle]; });
     if (field == self.smartField) { [self processSmartText:LSSmartTriggerCommit]; return; }
     if (!LSTrimmed(field.text).length) {
         // Leaving an empty field is not a mistake yet; Use this spot reports it.
@@ -1612,7 +1615,7 @@ static UIView *LSEntryHeader(NSString *text) {
 // The new value fades in, so a drag or nudge visibly rewrites the fields.
 - (void)crossFadeField:(UITextField *)field toText:(NSString *)text {
     if ([field.text isEqualToString:text]) return;
-    if (!field.window) { field.text = text; return; }
+    if (!field.window || field.isFirstResponder) { field.text = text; return; } // Never fade text being edited.
     [UIView transitionWithView:field duration:0.15 options:UIViewAnimationOptionTransitionCrossDissolve | UIViewAnimationOptionAllowUserInteraction
                     animations:^{ field.text = text; } completion:nil];
 }
@@ -1648,7 +1651,7 @@ static UIView *LSEntryHeader(NSString *text) {
     if (!self.hasPreview) return NO;
     NSString *text = LSHemisphereText(self.previewCoordinate);
     UIPasteboard.generalPasteboard.string = text; // Writing never triggers the paste prompt.
-    LSHapticSelection();
+    LSHapticSuccess();
     LSShowToastAbove(self.view, self.footer, [NSString stringWithFormat:@"Copied %@", text], @"doc.on.doc");
     // The button itself confirms the copy for a moment.
     NSUInteger token = ++self.clipboardFlashToken;
@@ -1789,10 +1792,15 @@ static UIView *LSEntryHeader(NSString *text) {
     };
     void (^turn)(void) = ^{ self.readoutIcon.transform = CGAffineTransformMakeRotation(rotation); };
     if (!self.readoutIcon.window) { image(); turn(); return; }
-    if (!changed) self.readoutIcon.tintColor = tint;
-    else if (dissolve) [UIView transitionWithView:self.readoutIcon duration:0.2 options:UIViewAnimationOptionTransitionCrossDissolve | UIViewAnimationOptionAllowUserInteraction animations:image completion:nil];
+    if (!changed) {
+        // Only the same arrow taking a new bearing turns; a new symbol arrives already upright.
+        self.readoutIcon.tintColor = tint;
+        if (turned) LSAnimate(turn, nil);
+        return;
+    }
+    turn();
+    if (dissolve) [UIView transitionWithView:self.readoutIcon duration:0.2 options:UIViewAnimationOptionTransitionCrossDissolve | UIViewAnimationOptionAllowUserInteraction animations:image completion:nil];
     else image();
-    if (turned) LSAnimate(turn, nil);
 }
 - (void)scheduleGeocode {
     [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(reverseGeocodePreview) object:nil];
@@ -1887,9 +1895,35 @@ static UIView *LSEntryHeader(NSString *text) {
     else [self dismissViewControllerAnimated:LSMapAnimationsEnabled() completion:nil];
 }
 - (BOOL)accessibilityPerformEscape { [self cancel]; return YES; }
+- (BOOL)canBecomeFirstResponder { return YES; }
+- (BOOL)isEditingField {
+    return self.smartField.isFirstResponder || self.latitudeField.isFirstResponder || self.longitudeField.isFirstResponder;
+}
+// With no field editing, the screen itself takes hardware-keyboard commands.
+- (void)takeKeyFocusIfIdle {
+    if (self.finished || !self.view.window || self.isEditingField || self.isFirstResponder) return;
+    [self becomeFirstResponder];
+}
 - (NSArray<UIKeyCommand *> *)keyCommands {
     UIKeyCommand *use = [UIKeyCommand keyCommandWithInput:@"\r" modifierFlags:UIKeyModifierCommand action:@selector(choose)];
     use.discoverabilityTitle = @"Use this spot";
-    return @[[UIKeyCommand keyCommandWithInput:UIKeyInputEscape modifierFlags:0 action:@selector(cancel)], use];
+    NSMutableArray<UIKeyCommand *> *commands = [NSMutableArray arrayWithObjects:[UIKeyCommand keyCommandWithInput:UIKeyInputEscape modifierFlags:0 action:@selector(cancel)], use, nil];
+    // Option + arrow nudges the spot like the VoiceOver actions; arrows stay with text while editing.
+    if (self.hasPreview && !self.finished && !self.isEditingField) {
+        NSString *step = [LSShortDistanceFormatter() stringFromDistance:10];
+        NSArray<NSArray<NSString *> *> *moves = @[@[UIKeyInputUpArrow, @"north"], @[UIKeyInputDownArrow, @"south"], @[UIKeyInputRightArrow, @"east"], @[UIKeyInputLeftArrow, @"west"]];
+        for (NSArray<NSString *> *move in moves) {
+            UIKeyCommand *nudge = [UIKeyCommand keyCommandWithInput:move[0] modifierFlags:UIKeyModifierAlternate action:@selector(nudgeFromKeyCommand:)];
+            nudge.discoverabilityTitle = [NSString stringWithFormat:@"Move %@ %@", step, move[1]];
+            [commands addObject:nudge];
+        }
+    }
+    return commands;
+}
+- (void)nudgeFromKeyCommand:(UIKeyCommand *)command {
+    NSString *input = command.input;
+    double north = [input isEqualToString:UIKeyInputUpArrow] ? 10 : [input isEqualToString:UIKeyInputDownArrow] ? -10 : 0;
+    double east = [input isEqualToString:UIKeyInputRightArrow] ? 10 : [input isEqualToString:UIKeyInputLeftArrow] ? -10 : 0;
+    if (north || east) [self nudgeNorth:north east:east];
 }
 @end
