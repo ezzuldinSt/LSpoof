@@ -1329,3 +1329,13 @@ static void LSSetChipTitle(UIButton *chip, NSString *title) {
     self.liveSpeedLabel.accessibilityLabel = [NSString stringWithFormat:@"Playback speed %@", self.liveSpeedLabel.text];
 }
 @end
+
+@implementation MapPickerViewController (LSRouteMapStyle)
+- (MKOverlayRenderer *)routeRendererForOverlay:(id<MKOverlay>)overlay {
+    (void)overlay;
+    return nil;
+}
+- (void)styleRouteAnnotationView:(MKMarkerAnnotationView *)view {
+    (void)view;
+}
+@end

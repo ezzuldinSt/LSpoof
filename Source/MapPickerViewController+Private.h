@@ -176,6 +176,12 @@ typedef NS_ENUM(NSInteger, LSEndpoint) { LSEndpointFrom, LSEndpointStop, LSEndpo
 @end
 @interface MapPickerViewController () // Route planner and playback (MapPickerViewController+Route.m)
 @end
+@interface MapPickerViewController (LSRouteMapStyle)
+// Called by the map delegate in MapPickerViewController.m. Return nil to use the default renderer.
+- (nullable MKOverlayRenderer *)routeRendererForOverlay:(id<MKOverlay>)overlay;
+// Called after the default styling of a From, stop or To marker.
+- (void)styleRouteAnnotationView:(MKMarkerAnnotationView *)view;
+@end
 @interface MapPickerViewController () // Saved places (MapPickerViewController+Bookmarks.m)
 @end
 NS_ASSUME_NONNULL_END
