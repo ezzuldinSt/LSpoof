@@ -53,12 +53,6 @@ static NSString *LSScheduleHeadline(NSDate *start, NSDate *end, BOOL active) {
     if (ahead < 12 * 3600) return [NSString stringWithFormat:@"Starts in %@", LSScheduleDuration(ahead, NSDateComponentsFormatterUnitsStyleShort)];
     return [NSString stringWithFormat:@"Starts %@ at %@", LSScheduleDay(start, YES), LSScheduleTime(start)];
 }
-static UIFont *LSScheduleRoundedFont(UIFontTextStyle style, CGFloat size, UIFontWeight weight, CGFloat maximum) {
-    UIFont *base = [UIFont systemFontOfSize:size weight:weight];
-    UIFontDescriptor *rounded = [base.fontDescriptor fontDescriptorWithDesign:UIFontDescriptorSystemDesignRounded];
-    if (rounded) base = [UIFont fontWithDescriptor:rounded size:size];
-    return [[UIFontMetrics metricsForTextStyle:style] scaledFontForFont:base maximumPointSize:maximum];
-}
 
 #pragma mark - Building blocks
 
@@ -223,6 +217,12 @@ static UIView *LSScheduleChipStrip(NSArray<UIButton *> *chips) {
 @interface LSScheduleViewController ()
 @property (nonatomic, strong) UIScrollView *scroll;
 @property (nonatomic, strong) UIStackView *currentSection;
+@property (nonatomic, strong, nullable) LSStatusChip *currentChip;
+@property (nonatomic) NSInteger chipState; // 0 unset, 1 waiting, 2 on
+@property (nonatomic, strong) UIStackView *currentSlot;
+@property (nonatomic, strong) UIButton *cancelButton;
+@property (nonatomic, copy, nullable) NSString *currentSignature;
+@property (nonatomic, copy, nullable) NSString *previewSignature;
 @property (nonatomic, strong) UILabel *previewHeader;
 @property (nonatomic, strong) UIStackView *previewSlot;
 @property (nonatomic, strong) UIView *emptyView;
@@ -236,7 +236,6 @@ static UIView *LSScheduleChipStrip(NSArray<UIButton *> *chips) {
 @property (nonatomic, strong) UIButton *saveButton;
 @property (nonatomic, strong, nullable) NSTimer *clock;
 @property (nonatomic) NSTimeInterval duration;
-@property (nonatomic) BOOL subjectIsRoute;
 @end
 
 @implementation LSScheduleViewController
@@ -247,8 +246,8 @@ static UIView *LSScheduleChipStrip(NSArray<UIButton *> *chips) {
     self.view.backgroundColor = UIColor.systemGroupedBackgroundColor;
     self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemClose target:self action:@selector(close)];
     self.duration = 3600;
-    // The picker words route subjects as "Play the route …" and places as "Hold …".
-    self.subjectIsRoute = [self.subject hasPrefix:@"Play"];
+    // Fallback for callers that don't set the flag: the picker words routes "Play the route …".
+    if (!self.subjectIsRoute && [self.subject hasPrefix:@"Play the route"]) self.subjectIsRoute = YES;
     self.scroll = [[UIScrollView alloc] init];
     self.scroll.translatesAutoresizingMaskIntoConstraints = NO;
     self.scroll.alwaysBounceVertical = YES;
@@ -299,8 +298,13 @@ static UIView *LSScheduleChipStrip(NSArray<UIButton *> *chips) {
 - (void)traitCollectionDidChange:(UITraitCollection *)previous {
     [super traitCollectionDidChange:previous];
     // Timeline dots are placed from font metrics and hold resolved colors.
-    if (![previous.preferredContentSizeCategory isEqualToString:self.traitCollection.preferredContentSizeCategory] ||
-        previous.userInterfaceStyle != self.traitCollection.userInterfaceStyle) [self reloadContent];
+    UITraitCollection *traits = self.traitCollection;
+    if (![previous.preferredContentSizeCategory isEqualToString:traits.preferredContentSizeCategory] ||
+        previous.userInterfaceStyle != traits.userInterfaceStyle || previous.accessibilityContrast != traits.accessibilityContrast) {
+        self.currentSignature = nil;
+        self.previewSignature = nil;
+        [self reloadContent];
+    }
 }
 - (void)scheduleChanged:(NSNotification *)note {
     (void)note;
@@ -322,37 +326,30 @@ static UIView *LSScheduleChipStrip(NSArray<UIButton *> *chips) {
     [self renderCurrent:current];
     self.emptyView.hidden = current != nil || self.subject.length > 0;
     if (!self.subject.length) return;
-    NSString *header = current ? @"Replace with" : @"New schedule";
-    self.previewHeader.text = header.uppercaseString;
-    self.previewHeader.accessibilityLabel = header;
+    self.previewHeader.text = current ? @"Replace with" : @"New schedule";
     NSString *title = current ? @"Replace schedule" : @"Schedule";
     UIButtonConfiguration *config = self.saveButton.configuration;
     config.title = title;
     self.saveButton.configuration = config;
     self.saveButton.accessibilityLabel = title;
-    self.navigationItem.rightBarButtonItem.title = current ? @"Replace" : @"Schedule";
     [self refreshPreview];
 }
 
-- (void)renderCurrent:(nullable LSSchedule *)current {
-    for (UIView *view in self.currentSection.arrangedSubviews) [view removeFromSuperview];
-    self.currentSection.hidden = current == nil;
-    if (!current) return;
-    LSStatusChip *chip = [[LSStatusChip alloc] init];
-    [chip setTitle:current.isActive ? @"On now" : @"Waiting to start" color:current.isActive ? LSSuccessColor() : UIColor.systemIndigoColor active:current.isActive];
-    UIStackView *chipLine = LSStack(@[chip], 0);
+// Built once and updated in place, so the 30 s refresh never moves VoiceOver focus or
+// restarts the status pulse.
+- (void)buildCurrentSection {
+    self.currentChip = [[LSStatusChip alloc] init];
+    UIStackView *chipLine = LSStack(@[self.currentChip], 0);
     chipLine.alignment = UIStackViewAlignmentLeading;
-    NSString *what = current.isRoute ? [NSString stringWithFormat:@"Play the route “%@”", current.name] : [NSString stringWithFormat:@"Hold “%@”", current.name];
-    UIView *summary = [self summaryWhat:what start:current.startDate end:current.endDate daily:current.repeatsDaily active:current.isActive draft:NO];
-    UIButton *cancel = LSButton(@"Cancel schedule", @"xmark.circle", NO);
-    UIButtonConfiguration *style = cancel.configuration;
+    self.currentSlot = LSStack(@[], 0);
+    self.cancelButton = LSButton(@"Cancel schedule", @"xmark.circle", NO);
+    UIButtonConfiguration *style = self.cancelButton.configuration;
     style.baseForegroundColor = LSErrorColor();
     style.baseBackgroundColor = LSErrorColor(); // Tinted style: a soft red pill, not red on blue.
-    cancel.configuration = style;
-    cancel.accessibilityHint = current.isActive ? @"Stops the schedule. What is on now stays on." : @"Asks before removing the schedule.";
-    [cancel addTarget:self action:@selector(confirmCancel:) forControlEvents:UIControlEventTouchUpInside];
-    LSAddPressFeedback(cancel);
-    UIStackView *body = LSStack(@[chipLine, summary, cancel], LSSpaceL);
+    self.cancelButton.configuration = style;
+    [self.cancelButton addTarget:self action:@selector(confirmCancel:) forControlEvents:UIControlEventTouchUpInside];
+    LSAddPressFeedback(self.cancelButton);
+    UIStackView *body = LSStack(@[chipLine, self.currentSlot, self.cancelButton], LSSpaceL);
     [self.currentSection addArrangedSubview:LSScheduleInset(LSSectionLabel(@"Current schedule"))];
     [self.currentSection addArrangedSubview:LSInsetPanel(body)];
     if (!self.subject.length) {
@@ -360,35 +357,75 @@ static UIView *LSScheduleChipStrip(NSArray<UIButton *> *chips) {
     }
 }
 
-// Big headline, then an agenda: when it starts and what happens, when it turns off, and
-// whether it repeats. Read by VoiceOver as one sentence.
-- (UIView *)summaryWhat:(NSString *)what start:(NSDate *)start end:(nullable NSDate *)end daily:(BOOL)daily active:(BOOL)active draft:(BOOL)draft {
-    UILabel *headline = LSLabel(LSScheduleHeadline(start, end, active), UIFontTextStyleTitle1);
-    headline.font = LSScheduleRoundedFont(UIFontTextStyleTitle1, 28, UIFontWeightBold, 48);
-    headline.isAccessibilityElement = NO;
+- (void)renderCurrent:(nullable LSSchedule *)current {
+    self.currentSection.hidden = current == nil;
+    if (!current) { self.currentSignature = nil; return; }
+    if (!self.currentChip) [self buildCurrentSection];
+    NSInteger state = current.isActive ? 2 : 1;
+    if (state != self.chipState) {
+        self.chipState = state;
+        [self.currentChip setTitle:current.isActive ? @"On now" : @"Waiting to start" color:current.isActive ? LSSuccessColor() : UIColor.systemIndigoColor active:current.isActive];
+        self.cancelButton.accessibilityHint = current.isActive ? @"Stops the schedule. What is on now stays on." : @"Asks before removing the schedule.";
+    }
+    NSString *what = current.isRoute ? [NSString stringWithFormat:@"Play the route “%@”", current.name] : [NSString stringWithFormat:@"Hold “%@”", current.name];
+    self.currentSignature = [self fillSlot:self.currentSlot signature:self.currentSignature what:what route:current.isRoute
+                                     start:current.startDate end:current.endDate daily:current.repeatsDaily active:current.isActive draft:NO];
+}
+
+// Rebuilds an agenda only when what it shows changes; otherwise the countdown headline and
+// the spoken summary are updated in place. Returns the new signature to keep.
+- (NSString *)fillSlot:(UIStackView *)slot signature:(nullable NSString *)previous what:(NSString *)what route:(BOOL)route
+                 start:(NSDate *)start end:(nullable NSDate *)end daily:(BOOL)daily active:(BOOL)active draft:(BOOL)draft {
     BOOL now = !active && start.timeIntervalSinceNow < 60;
-    NSString *startAux = active ? @"Started" : (now ? (draft ? @"As soon as you schedule it" : @"Starting") : LSScheduleDay(start, NO));
-    UIView *first = [self eventTime:now ? @"Now" : LSScheduleTime(start) aux:startAux text:what
-                              color:active ? LSSuccessColor() : LSAccentColor() filled:YES connects:YES];
+    NSString *signature = [NSString stringWithFormat:@"%@|%d|%.0f|%.0f|%d|%d|%d|%@|%@", what, route, start.timeIntervalSinceReferenceDate,
+                           end ? end.timeIntervalSinceReferenceDate : -1.0, daily, active, now, LSScheduleDay(start, NO), end ? LSScheduleDay(end, NO) : @""];
+    UIStackView *summary = (UIStackView *)slot.arrangedSubviews.firstObject;
+    UILabel *headline = (UILabel *)summary.arrangedSubviews.firstObject;
+    if ([signature isEqualToString:previous] && [summary isKindOfClass:UIStackView.class] && [headline isKindOfClass:UILabel.class]) {
+        headline.text = LSScheduleHeadline(start, end, active);
+        summary.accessibilityLabel = [self spokenWhat:what start:start end:end daily:daily active:active];
+        return signature;
+    }
+    for (UIView *view in slot.arrangedSubviews) [view removeFromSuperview];
+    [slot addArrangedSubview:[self summaryWhat:what route:route start:start end:end daily:daily active:active draft:draft]];
+    return signature;
+}
+
+- (NSString *)spokenWhat:(NSString *)what start:(NSDate *)start end:(nullable NSDate *)end daily:(BOOL)daily active:(BOOL)active {
+    BOOL now = !active && start.timeIntervalSinceNow < 60;
     NSMutableString *spoken = [NSMutableString stringWithFormat:@"%@. ", LSScheduleHeadline(start, end, active)];
     if (active) [spoken appendFormat:@"%@ started %@ at %@. ", what, LSScheduleDay(start, YES), LSScheduleTime(start)];
     else if (now) [spoken appendFormat:@"%@ right away. ", what];
     else [spoken appendFormat:@"%@ %@ at %@. ", what, LSScheduleDay(start, YES), LSScheduleTime(start)];
+    if (end) [spoken appendFormat:@"Turns off %@ at %@, after %@. ", LSScheduleDay(end, YES), LSScheduleTime(end), LSScheduleDuration([end timeIntervalSinceDate:start], NSDateComponentsFormatterUnitsStyleFull)];
+    else [spoken appendString:@"Stays on until you turn it off. "];
+    [spoken appendString:daily ? @"Repeats every day." : @"Runs once."];
+    return spoken;
+}
+
+// Big headline, then an agenda: when it starts and what happens, when it turns off, and
+// whether it repeats. Read by VoiceOver as one sentence.
+- (UIView *)summaryWhat:(NSString *)what route:(BOOL)route start:(NSDate *)start end:(nullable NSDate *)end daily:(BOOL)daily active:(BOOL)active draft:(BOOL)draft {
+    UILabel *headline = LSLabel(LSScheduleHeadline(start, end, active), UIFontTextStyleTitle1);
+    // Rounded with steady digit widths, so the countdown never jitters as it changes.
+    headline.font = LSNumberFont(UIFontTextStyleTitle1, UIFontWeightBold, 48);
+    headline.isAccessibilityElement = NO;
+    BOOL now = !active && start.timeIntervalSinceNow < 60;
+    NSString *startAux = active ? @"Started" : (now ? (draft ? @"As soon as you schedule it" : @"Starting") : LSScheduleDay(start, NO));
+    UIView *first = [self eventTime:now ? @"Now" : LSScheduleTime(start) aux:startAux text:what
+                              color:active ? LSSuccessColor() : (route ? LSRouteColor() : LSAccentColor()) filled:YES connects:YES];
     UIView *second;
     if (end) {
         NSString *after = [NSString stringWithFormat:@"after %@", LSScheduleDuration([end timeIntervalSinceDate:start], NSDateComponentsFormatterUnitsStyleShort)];
         NSString *aux = [NSCalendar.currentCalendar isDate:end inSameDayAsDate:start] ? after : [NSString stringWithFormat:@"%@ · %@", LSScheduleDay(end, NO), after];
         second = [self eventTime:LSScheduleTime(end) aux:aux text:@"Turn off · your real location comes back" color:UIColor.secondaryLabelColor filled:NO connects:NO];
-        [spoken appendFormat:@"Turns off %@ at %@, after %@. ", LSScheduleDay(end, YES), LSScheduleTime(end), LSScheduleDuration([end timeIntervalSinceDate:start], NSDateComponentsFormatterUnitsStyleFull)];
     } else {
         second = [self eventTime:nil aux:nil text:@"Stays on until you turn it off" color:UIColor.tertiaryLabelColor filled:NO connects:NO];
-        [spoken appendString:@"Stays on until you turn it off. "];
     }
-    [spoken appendString:daily ? @"Repeats every day." : @"Runs once."];
     UIView *repeat = LSScheduleBullet(daily ? @"repeat" : @"1.circle", daily ? @"Repeats every day at these times" : @"Runs once");
     UIStackView *stack = LSStack(@[headline, LSStack(@[first, second], 0), repeat], LSSpaceM);
     stack.isAccessibilityElement = YES;
-    stack.accessibilityLabel = spoken;
+    stack.accessibilityLabel = [self spokenWhat:what start:start end:end daily:daily active:active];
     return stack;
 }
 
@@ -447,9 +484,9 @@ static UIView *LSScheduleChipStrip(NSArray<UIButton *> *chips) {
 
 - (void)refreshPreview {
     if (!self.previewSlot) return;
-    for (UIView *view in self.previewSlot.arrangedSubviews) [view removeFromSuperview];
     NSDate *end = self.endSwitch.on ? self.endPicker.date : nil;
-    [self.previewSlot addArrangedSubview:[self summaryWhat:self.subject start:self.startPicker.date end:end daily:self.dailySwitch.on active:NO draft:YES]];
+    self.previewSignature = [self fillSlot:self.previewSlot signature:self.previewSignature what:self.subject route:self.subjectIsRoute
+                                     start:self.startPicker.date end:end daily:self.dailySwitch.on active:NO draft:YES];
 }
 
 #pragma mark Form
@@ -524,8 +561,6 @@ static UIView *LSScheduleChipStrip(NSArray<UIButton *> *chips) {
     self.saveButton = LSButton(@"Schedule", @"clock.badge.checkmark", YES);
     [self.saveButton addTarget:self action:@selector(save) forControlEvents:UIControlEventTouchUpInside];
     LSAddPressFeedback(self.saveButton);
-    UIBarButtonItem *saveItem = [[UIBarButtonItem alloc] initWithTitle:@"Schedule" style:UIBarButtonItemStyleDone target:self action:@selector(save)];
-    self.navigationItem.rightBarButtonItem = saveItem;
 
     UIStackView *notes = LSStack(@[
         LSScheduleBullet(@"iphone", @"Starts on time while this app is open, or in the background with “Keep routes moving in the background” on."),

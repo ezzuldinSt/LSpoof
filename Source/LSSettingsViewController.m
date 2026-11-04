@@ -22,12 +22,6 @@ static BOOL LSSettingsLargeText(UITraitCollection *traits) {
     if (!category.length || [category isEqualToString:UIContentSizeCategoryUnspecified]) category = UIApplication.sharedApplication.preferredContentSizeCategory;
     return UIContentSizeCategoryIsAccessibilityCategory(category);
 }
-// Accent for text on cards; the fill accent is too dark to read on a dark card.
-static UIColor *LSSettingsAccentText(void) {
-    return [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *traits) {
-        return traits.userInterfaceStyle == UIUserInterfaceStyleDark ? [UIColor colorWithRed:0.42 green:0.69 blue:1.0 alpha:1.0] : LSAccentColor();
-    }];
-}
 static NSString *LSSettingsNumber(double value, NSUInteger digits) {
     NSNumberFormatter *formatter = [[NSNumberFormatter alloc] init];
     formatter.numberStyle = NSNumberFormatterDecimalStyle;
@@ -172,6 +166,8 @@ static LSSettingsReflowStack *LSSettingsFlow(NSArray<UIView *> *views, CGFloat s
 // A small street grid (streets about 100 m apart) with the wander circle at the same scale,
 // the chosen spot in the middle and a dot drifting the way the reported position does.
 @interface LSSettingsWanderPreview : UIView
+// Called while the ring is dragged, with the radius under the finger in meters.
+@property (nonatomic, copy, nullable) void (^dragged)(double meters);
 - (void)setRadius:(double)radius animated:(BOOL)animated;
 @end
 @implementation LSSettingsWanderPreview {
@@ -186,9 +182,10 @@ static LSSettingsReflowStack *LSSettingsFlow(NSArray<UIView *> *views, CGFloat s
         self.layer.cornerRadius = LSRadiusS;
         self.layer.cornerCurve = kCACornerCurveContinuous;
         self.clipsToBounds = YES;
-        self.isAccessibilityElement = NO;
-        self.userInteractionEnabled = NO;
+        self.isAccessibilityElement = NO; // The radius slider is the accessible control.
         _radius = 25;
+        [self addGestureRecognizer:[[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(drag:)]];
+        [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(restartDrift) name:UIAccessibilityReduceMotionStatusDidChangeNotification object:nil];
         _streets = [CAShapeLayer layer];
         _streets.fillColor = nil;
         _circle = [CAShapeLayer layer];
@@ -212,6 +209,27 @@ static LSSettingsReflowStack *LSSettingsFlow(NSArray<UIView *> *views, CGFloat s
     CGFloat largest = MAX(12, CGRectGetHeight(self.bounds) / 2 - 8);
     // Log scale: 1 m is a small ring, 1,000 m fills the height.
     return 7 + (largest - 7) * (CGFloat)(log10(MAX(1, MIN(1000, _radius))) / 3.0);
+}
+// Inverse of circlePoints: distance from the centre back to meters on the same log scale.
+- (double)metersAtDistance:(CGFloat)distance {
+    CGFloat largest = MAX(12, CGRectGetHeight(self.bounds) / 2 - 8);
+    double t = (distance - 7) / MAX(1.0, largest - 7);
+    return pow(10, 3 * MAX(0, MIN(1, t)));
+}
+- (CGFloat)distanceOf:(UIGestureRecognizer *)gesture {
+    CGPoint point = [gesture locationInView:self];
+    return (CGFloat)hypot(point.x - CGRectGetMidX(self.bounds), point.y - CGRectGetMidY(self.bounds));
+}
+// Grab the ring, or swipe sideways anywhere on the preview; a vertical swipe that starts
+// away from the ring still scrolls the page.
+- (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gesture {
+    if (![gesture isKindOfClass:UIPanGestureRecognizer.class]) return [super gestureRecognizerShouldBegin:gesture];
+    CGPoint velocity = [(UIPanGestureRecognizer *)gesture velocityInView:self];
+    return fabs([self distanceOf:gesture] - [self circlePoints]) < 24 || fabs(velocity.x) > fabs(velocity.y);
+}
+- (void)drag:(UIPanGestureRecognizer *)pan {
+    if (pan.state != UIGestureRecognizerStateBegan && pan.state != UIGestureRecognizerStateChanged) return;
+    if (self.dragged) self.dragged([self metersAtDistance:[self distanceOf:pan]]);
 }
 - (void)updateColors {
     UITraitCollection *traits = self.traitCollection;
@@ -312,7 +330,10 @@ static LSSettingsReflowStack *LSSettingsFlow(NSArray<UIView *> *views, CGFloat s
     drift.removedOnCompletion = NO;
     [_dot addAnimation:drift forKey:@"drift"];
 }
-- (void)dealloc { [NSObject cancelPreviousPerformRequestsWithTarget:self]; }
+- (void)dealloc {
+    [NSObject cancelPreviousPerformRequestsWithTarget:self];
+    [NSNotificationCenter.defaultCenter removeObserver:self];
+}
 @end
 
 static UILabel *LSSettingsTitle(NSString *text) {
@@ -435,6 +456,7 @@ static UIView *LSSettingsSection(NSString *header, UIView *card, NSString *foote
 @property (nonatomic, strong) UILabel *editedLabel;
 @property (nonatomic, strong) UIView *titleStack;
 @property (nonatomic) BOOL edited;
+@property (nonatomic) BOOL saving;
 @property (nonatomic) CGSize previousScrollSize;
 @end
 
@@ -505,6 +527,7 @@ static UIView *LSSettingsSection(NSString *header, UIView *card, NSString *foote
     self.altitudeField = LSNumberField(@"Altitude in meters");
     self.courseField = LSNumberField(@"Course in degrees");
     self.radiusField = LSNumberField(@"Exact wander radius in meters");
+    for (UITextField *field in @[self.altitudeField, self.courseField, self.radiusField]) field.accessibilityLabel = [self labelForField:field];
     self.altitudeField.placeholder = @"0";
     self.courseField.placeholder = @"0";
     self.radiusField.placeholder = @"25";
@@ -545,6 +568,11 @@ static UIView *LSSettingsSection(NSString *header, UIView *card, NSString *foote
     if (field == self.altitudeField) return LSFormatDecimal(self.original.altitude, 2);
     if (field == self.courseField) return LSFormatDecimal(self.original.course, 1);
     return LSFormatDecimal(self.original.fluctuationRadius, 1);
+}
+- (NSString *)labelForField:(UITextField *)field {
+    if (field == self.altitudeField) return @"Altitude in meters";
+    if (field == self.courseField) return @"Course in degrees";
+    return @"Exact wander radius in meters";
 }
 - (NSString *)hintForField:(UITextField *)field {
     if (field == self.altitudeField) return @"From −500 to 10,000 meters, sent with held spots and routes.";
@@ -593,6 +621,8 @@ static UIView *LSSettingsSection(NSString *header, UIView *card, NSString *foote
         return radius ? [NSString stringWithFormat:@"%@ meters, %@", LSSettingsNumber(radius.doubleValue, 1), LSSettingsWanderComparison(radius.doubleValue).lowercaseString] : @"Not set";
     };
     [self.radiusSlider addTarget:self action:@selector(radiusSlid) forControlEvents:UIControlEventValueChanged];
+    // Same rounding and detents as the slider.
+    self.wanderPreview.dragged = ^(double meters) { [weakSelf applyRadius:LSSettingsSliderMeters(LSSettingsSliderValue(meters))]; };
     [self.radiusSlider.heightAnchor constraintGreaterThanOrEqualToConstant:44].active = YES;
 
     UIStackView *content = LSStack(@[self.wanderPreview, line, self.radiusSlider, self.radiusErrorRow], LSSpaceM);
@@ -602,7 +632,7 @@ static UIView *LSSettingsSection(NSString *header, UIView *card, NSString *foote
     self.radiusRow.hidden = !self.fluctuationSwitch.on;
     self.radiusRow.alpha = self.fluctuationSwitch.on ? 1 : 0;
     return LSSettingsSection(@"Wander", LSSettingsCard(@[toggle, self.radiusRow]),
-                             @"Outdoors a phone is usually accurate to 5–20 m, so a small radius looks most natural. Streets in the preview are about 100 m apart. Saved places can set their own radius.");
+                             @"Drag the circle to resize it; its streets are about 100 m apart. Outdoors a phone is usually accurate to 5–20 m, so a small radius looks most natural. Saved places can set their own radius.");
 }
 - (UIView *)screenSection {
     UIView *real = [self switchRow:@"Real location on map" detail:@"A separate marker; the app still sees the spoof"
@@ -698,7 +728,7 @@ static UIView *LSSettingsSection(NSString *header, UIView *card, NSString *foote
 - (LSSettingsActionRow *)actionRow:(NSString *)title symbol:(NSString *)symbol color:(UIColor *)color hint:(NSString *)hint action:(SEL)action separator:(BOOL)separator {
     LSSettingsActionRow *row = [[LSSettingsActionRow alloc] init];
     UILabel *name = LSSettingsTitle(title);
-    name.textColor = LSSettingsAccentText();
+    name.textColor = LSAccentTextColor();
     LSSettingsReflowStack *content = LSSettingsFlow(@[LSIconBadge(symbol, color, kLSSettingsBadge), name], LSSpaceM, UIStackViewAlignmentTop, YES);
     content.userInteractionEnabled = NO;
     LSSettingsRow(row, content, separator, kLSSettingsInset);
@@ -725,15 +755,6 @@ static UIView *LSSettingsSection(NSString *header, UIView *card, NSString *foote
     [super viewWillAppear:animated];
     self.navigationController.presentationController.delegate = self;
     [self updateClipboardButton];
-}
-- (void)traitCollectionDidChange:(UITraitCollection *)previous {
-    [super traitCollectionDidChange:previous];
-    // Error borders hold a resolved color.
-    if (previous.userInterfaceStyle != self.traitCollection.userInterfaceStyle) {
-        for (UITextField *field in @[self.altitudeField, self.courseField, self.radiusField]) {
-            field.layer.borderColor = [LSErrorColor() resolvedColorWithTraitCollection:self.traitCollection].CGColor;
-        }
-    }
 }
 - (void)updateClipboardButton {
     // Reading the clipboard shows a paste banner; hasStrings does not.
@@ -794,11 +815,13 @@ static UIView *LSSettingsSection(NSString *header, UIView *card, NSString *foote
 - (UILabel *)errorForField:(UITextField *)field { return (UILabel *)[self errorRowForField:field].arrangedSubviews.lastObject; }
 - (void)showError:(BOOL)visible forField:(UITextField *)field {
     UILabel *error = [self errorForField:field];
-    field.layer.borderWidth = visible ? 1.5 : 0;
-    field.layer.borderColor = [LSErrorColor() resolvedColorWithTraitCollection:self.traitCollection].CGColor;
-    field.accessibilityHint = visible ? error.text : [self hintForField:field];
+    LSSetFieldInvalid(field, visible); // The field owns its focus and error rings.
+    // In the label, not only the hint: hints can be turned off.
+    field.accessibilityLabel = visible ? [NSString stringWithFormat:@"%@, invalid. %@", [self labelForField:field], error.text] : [self labelForField:field];
+    field.accessibilityHint = [self hintForField:field];
     UIView *row = [self errorRowForField:field];
     if (row.hidden == !visible) return;
+    if (visible && !self.saving) LSAnnounce(error.text); // Save announces its own.
     LSAnimate(^{
         row.hidden = !visible;
         row.alpha = visible ? 1 : 0;
@@ -840,8 +863,10 @@ static UIView *LSSettingsSection(NSString *header, UIView *card, NSString *foote
     [self updateLiveDetailsAnimated:YES];
     [self updateEditedState];
 }
-- (void)radiusSlid {
-    double meters = LSSettingsSliderMeters(self.radiusSlider.value);
+- (void)radiusSlid { [self applyRadius:LSSettingsSliderMeters(self.radiusSlider.value)]; }
+// From the slider or a drag on the preview: a haptic tick on each preset, then field,
+// slider, readout and preview follow.
+- (void)applyRadius:(double)meters {
     BOOL detent = NO;
     for (size_t i = 0; i < sizeof(kLSSettingsRadiusDetents) / sizeof(double); i++) detent = detent || meters == kLSSettingsRadiusDetents[i];
     if (detent && meters != self.lastDetent) LSHapticSelection();
@@ -850,6 +875,7 @@ static UIView *LSSettingsSection(NSString *header, UIView *card, NSString *foote
     if ([text isEqualToString:self.radiusField.text]) return;
     self.radiusField.text = text;
     [self validateField:self.radiusField format:NO];
+    if (!self.radiusSlider.isTracking) self.radiusSlider.value = LSSettingsSliderValue(meters);
     [self updateLiveDetailsAnimated:NO];
     [self updateEditedState];
 }
@@ -905,6 +931,11 @@ static UIView *LSSettingsSection(NSString *header, UIView *card, NSString *foote
     return YES;
 }
 - (void)save {
+    self.saving = YES;
+    [self saveNow];
+    self.saving = NO;
+}
+- (void)saveNow {
     [self.view endEditing:YES];
     if (!self.edited) { [self dismissViewControllerAnimated:LSMapAnimationsEnabled() completion:nil]; return; }
     BOOL altitude = [self validateField:self.altitudeField format:NO];
