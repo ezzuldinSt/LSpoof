@@ -170,4 +170,106 @@ typedef NS_ENUM(NSInteger, LSEndpoint) { LSEndpointFrom, LSEndpointStop, LSEndpo
 // Wander radius choices for a saved place, as a submenu.
 - (UIMenu *)radiusMenuForBookmark:(LSBookmark *)place;
 @end
+// Per-area additions. Each screen owner adds its own properties and declarations in its
+// own block so concurrent work on the picker does not collide.
+@interface MapPickerViewController () // Shell, header, Location tab and footer (MapPickerViewController.m)
+// The map runs edge to edge under a floating glass header, place card, control cluster and
+// footer. This guide (owned by mapContainer, kept across map retries) is the part of the map
+// nothing covers; pin map overlays inside it.
+@property (nonatomic, strong) UILayoutGuide *mapVisibleGuide;
+// How far the floating surfaces reach into mapView's bounds on each edge.
+- (UIEdgeInsets)mapObscuredInsets;
+// Fit a rect or a spot into the uncovered part of the map (setVisibleMapRect and setRegion fit
+// the whole view, part of which is under the header). Respects Reduce Motion.
+- (void)focusMapOnRect:(MKMapRect)rect animated:(BOOL)animated;
+- (void)focusMapOnCoordinate:(CLLocationCoordinate2D)coordinate meters:(double)meters animated:(BOOL)animated;
+// Switch workspace the way tapping the tab does: drops pending choosers and route lookups,
+// keeps the segmented control in sync, rebuilds the workspace and moves VoiceOver focus to it.
+// Call it instead of setting `tab` directly; set the selection after it returns.
+- (void)showTab:(LSPickerTab)tab animated:(BOOL)animated;
+// The floating footer glass, for LSShowToastAbove / LSShowActionToast so a toast sits just
+// above it; nil while the footer is hidden (the toast then sits above the safe area).
+- (nullable UIView *)toastAnchorView;
+@end
+@class LSRouteRailView, LSRouteInstrumentView, LSRouteStatView;
+@interface MapPickerViewController () // Route planner and playback (MapPickerViewController+Route.m)
+// Planner card: From, stops and To on one connected rail, and the chips for what a map tap sets
+// (endpointSegment stays the model the shell writes; it is not on screen).
+@property (nonatomic, strong) LSRouteRailView *routeFromRail;
+@property (nonatomic, strong) LSRouteRailView *routeToRail;
+@property (nonatomic, strong) LSRouteRailView *routeAddRail;
+@property (nonatomic, copy) NSArray<UIButton *> *routeTargetChips;
+@property (nonatomic) BOOL routeHighlightQueued;
+// Status card: empty, busy, error and ready states.
+@property (nonatomic, strong) UIView *routeEmptyState;
+@property (nonatomic, strong) UIView *routeFeedbackWrap;
+@property (nonatomic, strong) UIImageView *routeFeedbackIcon;
+@property (nonatomic) NSInteger routeFeedbackTone;
+@property (nonatomic) BOOL routeFeedbackIsHint;
+@property (nonatomic) BOOL routeSuggestsOtherPath;
+@property (nonatomic, strong) UIButton *routeRecoveryButton;
+@property (nonatomic, strong) UIView *routeStatsWrap;
+@property (nonatomic, copy) NSArray<LSRouteStatView *> *routeStats;
+@property (nonatomic, strong) UIView *routeToolsWrap;
+@property (nonatomic, strong, nullable) UIView *routeTip;
+@property (nonatomic) NSUInteger routeExportRevision;
+// Link and file imports: a token per import, so a superseded one can clear its busy status.
+@property (nonatomic) NSUInteger routeImportToken;
+@property (nonatomic) BOOL routeImportActive;
+// While the drafted route plays, the planner folds into a one-line trip summary.
+@property (nonatomic, strong) UIView *routeEndpointsCard;
+@property (nonatomic, strong) UIView *routeTripCard;
+@property (nonatomic, strong) UILabel *routeTripLabel;
+@property (nonatomic, strong) UIView *routeTripRow;
+@property (nonatomic, copy, nullable) NSString *routeTripKey;
+@property (nonatomic, copy, nullable) NSString *routeTripNext;
+@property (nonatomic, strong) UIView *routeEditHeader;
+@property (nonatomic) BOOL routeEditorOpen;
+// Map: an outline under the route, the travelled part dimmed, and the draw-in once built.
+@property (nonatomic, strong, nullable) MKPolyline *routeCasing;
+@property (nonatomic, weak, nullable) MKPolylineRenderer *routeLineRenderer;
+@property (nonatomic, weak, nullable) MKPolylineRenderer *routeCasingRenderer;
+@property (nonatomic) double routeTraveledShown;
+@property (nonatomic) NSTimeInterval routeTraveledAt;
+@property (nonatomic) NSUInteger routeDrawRevision;
+@property (nonatomic) BOOL routeDrawInPending;
+@property (nonatomic, weak, nullable) UIView *routeTraceView;
+@property (nonatomic, copy, nullable) NSArray<MKAnnotationView *> *routeHiddenMarkers;
+@property (nonatomic, copy, nullable) NSArray<NSNumber *> *routeHiddenMarkerAlphas;
+@property (nonatomic, copy, nullable) NSArray<UIGestureRecognizer *> *routeDrawGestures;
+// Playback instrument and the spoken milestones (halfway, each stop, arrival).
+@property (nonatomic, strong) LSRouteInstrumentView *routeInstrument;
+@property (nonatomic, weak, nullable) LSRoute *milestoneRoute;
+@property (nonatomic) double milestoneCovered;
+@property (nonatomic) NSUInteger milestoneStops;
+@property (nonatomic) BOOL milestoneHalfway;
+@property (nonatomic) BOOL milestoneArrived;
+@end
+@interface MapPickerViewController (LSRouteMapStyle)
+// Called by the map delegate in MapPickerViewController.m. Return nil to use the default renderer.
+- (nullable MKOverlayRenderer *)routeRendererForOverlay:(id<MKOverlay>)overlay;
+// Called after the default styling of a From, stop or To marker.
+- (void)styleRouteAnnotationView:(MKMarkerAnnotationView *)view;
+@end
+@interface MapPickerViewController () // Saved places (MapPickerViewController+Bookmarks.m)
+// Every saved place; savedPlaces and recents hold only the rows the filter lets through.
+@property (nonatomic, strong, nullable) NSArray<LSBookmark *> *allSavedPlaces;
+@property (nonatomic) NSUInteger allRecentCount;
+// Identity of each visible row per section, so changes animate instead of reloading.
+@property (nonatomic, copy, nullable) NSArray<NSArray<NSString *> *> *savedRowKeys;
+@property (nonatomic, strong, nullable) NSArray<UITableViewHeaderFooterView *> *savedSectionHeaders;
+@property (nonatomic, strong, nullable) UIButton *savedClearButton;
+@property (nonatomic, strong, nullable) UISearchTextField *savedFilterField;
+@property (nonatomic, strong, nullable) UIView *savedEmptyHolder;
+@property (nonatomic, copy, nullable) NSString *savedEmptyVariant;
+@property (nonatomic, strong, nullable) UIView *savedTip;
+@property (nonatomic, strong, nullable) UIView *savedToastAnchor;
+@property (nonatomic, copy, nullable) NSString *savedPulseKey;
+// Bumped on every filter edit, so only the last one, once typing pauses, is announced.
+@property (nonatomic) NSUInteger savedFilterRevision;
+// What the session holds: the Applied badge and the distances shown on rows.
+@property (nonatomic) NSInteger savedSessionMode;
+@property (nonatomic) CLLocationCoordinate2D savedHeldCoordinate;
+@property (nonatomic) CLLocationCoordinate2D savedReferenceCoordinate;
+@end
 NS_ASSUME_NONNULL_END
