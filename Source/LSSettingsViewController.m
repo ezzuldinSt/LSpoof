@@ -531,6 +531,7 @@ static UIView *LSSettingsSection(NSString *header, UIView *card, NSString *foote
 @property (nonatomic, strong) LSSettingsWanderPreview *wanderPreview;
 @property (nonatomic, strong) LSSettingsRadiusSlider *radiusSlider;
 @property (nonatomic) double lastDetent;
+@property (nonatomic) CFTimeInterval lastDragTick;
 @property (nonatomic, strong) UIView *radiusRow;
 @property (nonatomic, strong) UISwitch *fluctuationSwitch, *rememberSwitch, *realSwitch, *openerSwitch, *backgroundSwitch;
 @property (nonatomic, strong) LSSettingsActionRow *clipboardRestoreRow;
@@ -944,13 +945,18 @@ static UIView *LSSettingsSection(NSString *header, UIView *card, NSString *foote
     [self updateEditedState];
 }
 - (void)radiusSlid { [self applyRadius:LSSettingsSliderMeters(self.radiusSlider.value) dragged:NO]; }
-// From the slider, a selection tick on each preset; from a drag on the preview, a light tap
-// each time the shown value steps. Then field, slider, readout and preview follow.
+// From the slider, a selection tick on each preset; from a drag on the preview, a selection
+// tick as the shown value steps, at most every 60 ms: on the log ring a fast drag crosses
+// several steps per point and would otherwise buzz. Then field, slider, readout and preview follow.
 - (void)applyRadius:(double)meters dragged:(BOOL)dragged {
     NSString *text = LSFormatDecimal(meters, 0);
     BOOL changed = ![text isEqualToString:self.radiusField.text];
     if (dragged) {
-        if (changed) LSHapticImpact(UIImpactFeedbackStyleLight);
+        CFTimeInterval now = CACurrentMediaTime();
+        if (changed && now - self.lastDragTick >= 0.06) {
+            LSHapticSelection();
+            self.lastDragTick = now;
+        }
     } else {
         BOOL detent = NO;
         for (size_t i = 0; i < sizeof(kLSSettingsRadiusDetents) / sizeof(double); i++) detent = detent || meters == kLSSettingsRadiusDetents[i];

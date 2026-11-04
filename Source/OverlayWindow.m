@@ -915,9 +915,10 @@ static NSString *LSOpenerStatus(BOOL spoken) {
             [self stopSnap];
             CALayer *layer = self.container.layer, *shown = layer.presentationLayer;
             CGPoint position = shown ? shown.position : layer.position;
+            // Marked first, so a peek completion delivered by the removal sees the drag.
+            self.dragging = YES;
             [layer removeAllAnimations];
             self.container.center = position;
-            self.dragging = YES;
             self.dragOrigin = self.container.center;
             [self.dimTimer invalidate];
             self.dimTimer = nil;
