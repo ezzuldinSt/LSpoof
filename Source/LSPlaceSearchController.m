@@ -7,8 +7,9 @@
 
 #pragma mark - Palette and categories
 
-// Colour families for result badges. Each keeps its white glyph near 3:1 or better and
-// Increase Contrast darkens it further. The category is always spelled out in the row too.
+// Colour families for result badges and category chips. Light variants keep white text and
+// glyphs at 4.5:1 or better and Increase Contrast darkens them further; dark variants are a
+// little brighter for glyphs on dark surfaces. The category is always spelled out in text too.
 typedef NS_ENUM(NSInteger, LSTone) {
     LSToneFood, LSToneStay, LSToneTravel, LSToneNature, LSToneCulture, LSToneShop,
     LSToneHealth, LSToneService, LSToneLeisure, LSTonePlace, LSToneNeutral, LSToneWarning
@@ -23,20 +24,20 @@ static UIColor *LSBadgeTone(CGFloat red, CGFloat green, CGFloat blue) {
 
 static UIColor *LSToneColor(LSTone tone) {
     switch (tone) {
-        case LSToneFood: return LSBadgeTone(0.85, 0.40, 0.05);
+        case LSToneFood: return LSBadgeTone(0.78, 0.32, 0.0);
         case LSToneStay: return LSBadgeTone(0.47, 0.33, 0.84);
         case LSToneTravel: return LSBadgeTone(0.25, 0.42, 0.88);
-        case LSToneNature: return LSBadgeTone(0.16, 0.56, 0.27);
-        case LSToneCulture: return LSBadgeTone(0.84, 0.22, 0.47);
-        case LSToneShop: return LSBadgeTone(0.75, 0.50, 0.0);
-        case LSToneHealth: return LSBadgeTone(0.86, 0.20, 0.22);
+        case LSToneNature: return LSBadgeTone(0.13, 0.50, 0.24);
+        case LSToneCulture: return LSBadgeTone(0.80, 0.20, 0.45);
+        case LSToneShop: return LSBadgeTone(0.64, 0.40, 0.0);
+        case LSToneHealth: return LSBadgeTone(0.84, 0.18, 0.20);
         case LSToneService: return LSBadgeTone(0.40, 0.45, 0.53);
-        case LSToneLeisure: return LSBadgeTone(0.0, 0.55, 0.60);
+        case LSToneLeisure: return LSBadgeTone(0.0, 0.48, 0.53);
         case LSTonePlace: return LSAccentColor();
-        case LSToneNeutral: return LSBadgeTone(0.50, 0.52, 0.56);
-        case LSToneWarning: return LSBadgeTone(0.80, 0.45, 0.0);
+        case LSToneNeutral: return LSBadgeTone(0.42, 0.44, 0.48);
+        case LSToneWarning: return LSBadgeTone(0.70, 0.36, 0.0);
     }
-    return LSBadgeTone(0.50, 0.52, 0.56);
+    return LSBadgeTone(0.42, 0.44, 0.48);
 }
 
 // Symbol, display name and colour family for a MapKit point-of-interest category.
@@ -163,22 +164,6 @@ static NSString *LSDistanceText(CLLocationDistance meters, BOOL spoken) {
         full.unitStyle = MKDistanceFormatterUnitStyleFull;
     });
     return [(spoken ? full : brief) stringFromDistance:meters];
-}
-
-// Degrees, minutes and seconds such as 48°51'29.6"N 2°17'40.2"E, the form Google Maps gives
-// dropped pins. Wrapping the text in a geo: link reuses the map link reader's degree parser.
-static BOOL LSParseDegreesText(NSString *text, CLLocationCoordinate2D *coordinate) {
-    if (text.length > 80 || [text rangeOfString:@"°"].location == NSNotFound) return NO;
-    NSMutableCharacterSet *allowed = [NSCharacterSet.URLQueryAllowedCharacterSet mutableCopy];
-    [allowed removeCharactersInString:@"&+=#?"];
-    NSString *encoded = [text stringByAddingPercentEncodingWithAllowedCharacters:allowed];
-    if (!encoded.length) return NO;
-    LSMapLinkPlace *place = [LSMapLinks parseString:[@"geo:0,0?q=" stringByAppendingString:encoded]].places.firstObject;
-    if (!place.hasCoordinate) return NO;
-    CLLocationCoordinate2D parsed = CLLocationCoordinate2DMake(place.latitude, place.longitude);
-    if (!CLLocationCoordinate2DIsValid(parsed)) return NO;
-    if (coordinate) *coordinate = parsed;
-    return YES;
 }
 
 static NSAttributedString *LSStyledText(NSString *text, NSArray<NSValue *> *highlights, NSRange monospaced,
@@ -332,7 +317,7 @@ typedef NS_ENUM(NSInteger, LSRowKind) {
     CGFloat size = round(MIN(52, [[UIFontMetrics metricsForTextStyle:UIFontTextStyleBody] scaledValueForValue:32 compatibleWithTraitCollection:traits]));
     self.badgeWidth.constant = size;
     self.badge.layer.cornerRadius = size / 2;
-    self.tone = LSToneColor(row.tone);
+    self.tone = LSFillColor(LSToneColor(row.tone));
     self.badge.backgroundColor = self.tone;
     self.glyph.image = [UIImage systemImageNamed:row.symbol] ?: [UIImage systemImageNamed:@"mappin"];
     self.glyph.preferredSymbolConfiguration = [UIImageSymbolConfiguration configurationWithPointSize:round(size * 0.46) weight:UIImageSymbolWeightSemibold];
@@ -358,6 +343,11 @@ typedef NS_ENUM(NSInteger, LSRowKind) {
     self.accessibilityHint = row.busy ? nil : row.hint;
     self.accessibilityTraits = UIAccessibilityTraitButton;
 }
+- (void)prepareForReuse {
+    [super prepareForReuse];
+    self.alpha = 1;
+    self.transform = CGAffineTransformIdentity;
+}
 // Cell highlighting clears subview backgrounds; the badge keeps its colour.
 - (void)setHighlighted:(BOOL)highlighted animated:(BOOL)animated {
     [super setHighlighted:highlighted animated:animated];
@@ -372,6 +362,7 @@ typedef NS_ENUM(NSInteger, LSRowKind) {
 // Hosts a progress line or an empty state on a clear background.
 @interface LSSearchMessageCell : UITableViewCell
 @property (nonatomic, strong) UIView *hosted;
+@property (nonatomic, copy) NSString *hostedKey;
 @end
 @implementation LSSearchMessageCell
 - (instancetype)initWithStyle:(UITableViewCellStyle)style reuseIdentifier:(NSString *)reuseIdentifier {
@@ -463,6 +454,9 @@ typedef NS_OPTIONS(NSUInteger, LSSearchOptions) {
 @property (nonatomic, strong) NSArray<UIButton *> *chips;
 @property (nonatomic) BOOL wantsChips;
 @property (nonatomic) CGFloat chipsInset;
+@property (nonatomic) CGFloat headerWidth;
+@property (nonatomic, copy) UIContentSizeCategory headerCategory;
+@property (nonatomic) NSUInteger placesSectionIndex;
 @property (nonatomic, strong) MKLocalSearchCompleter *completer;
 @property (nonatomic, strong) MKLocalSearch *search;
 @property (nonatomic, strong) CLGeocoder *geocoder;
@@ -500,7 +494,7 @@ typedef NS_OPTIONS(NSUInteger, LSSearchOptions) {
     if (self) {
         _initialCoordinate = kCLLocationCoordinate2DInvalid;
         _completions = @[]; _places = @[]; _saved = @[]; _recents = @[]; _sections = @[];
-        _query = @""; _category = -1; _announcedRevision = NSUIntegerMax;
+        _query = @""; _category = -1; _announcedRevision = NSUIntegerMax; _placesSectionIndex = NSNotFound;
     }
     return self;
 }
@@ -650,7 +644,7 @@ typedef NS_OPTIONS(NSUInteger, LSSearchOptions) {
 }
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
-    if (self.wantsChips) LSSizeTableHeader(self.table, self.chipsHeader);
+    [self sizeChipsHeader:NO];
     // Chips start where the cards start but scroll from edge to edge.
     CGFloat leading = self.table.layoutMargins.left;
     if (fabs(leading - self.chipsInset) > 0.5) {
@@ -664,6 +658,9 @@ typedef NS_OPTIONS(NSUInteger, LSSearchOptions) {
     if (![previous.preferredContentSizeCategory isEqualToString:self.traitCollection.preferredContentSizeCategory]) {
         [self.table reloadData];
         [self.view setNeedsLayout];
+        // Chips restyle their titles on their own pass; measure again once that has run.
+        __weak typeof(self) weakSelf = self;
+        dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf sizeChipsHeader:YES]; });
     }
 }
 - (void)dealloc {
@@ -683,7 +680,7 @@ typedef NS_OPTIONS(NSUInteger, LSSearchOptions) {
         UIButton *chip = LSChipButton(definitions[index][0], definitions[index][1]);
         chip.tag = (NSInteger)index;
         [chip addTarget:self action:@selector(chipTapped:) forControlEvents:UIControlEventTouchUpInside];
-        LSAddPressFeedback(chip);
+        [self tintChip:chip tone:(LSTone)[definitions[index][4] integerValue]];
         [chips addObject:chip];
     }
     self.chips = chips;
@@ -697,6 +694,8 @@ typedef NS_OPTIONS(NSUInteger, LSSearchOptions) {
     [scroll addSubview:row];
     self.chipsScroll = scroll;
     UIView *holder = [[UIView alloc] init];
+    holder.accessibilityContainerType = UIAccessibilityContainerTypeSemanticGroup;
+    holder.accessibilityLabel = @"Categories";
     [holder addSubview:scroll];
     NSLayoutConstraint *bottom = [scroll.bottomAnchor constraintEqualToAnchor:holder.bottomAnchor constant:-LSSpaceXS];
     bottom.priority = 999;
@@ -717,9 +716,40 @@ typedef NS_OPTIONS(NSUInteger, LSSearchOptions) {
 - (void)setChipsVisible:(BOOL)visible {
     if (visible == self.wantsChips) return;
     self.wantsChips = visible;
-    if (visible) LSSizeTableHeader(self.table, self.chipsHeader);
+    if (visible) [self sizeChipsHeader:YES];
     else self.table.tableHeaderView = self.plainHeader;
     [self.view setNeedsLayout];
+}
+
+// Measuring the header is a full layout pass, so it only runs when its inputs change.
+- (void)sizeChipsHeader:(BOOL)force {
+    CGFloat width = self.table.bounds.size.width;
+    UIContentSizeCategory category = self.traitCollection.preferredContentSizeCategory;
+    if (!self.wantsChips || width <= 0) return;
+    BOOL current = self.table.tableHeaderView == self.chipsHeader && fabs(width - self.headerWidth) < 0.5 &&
+        [category isEqualToString:self.headerCategory];
+    if (current && !force) return;
+    LSSizeTableHeader(self.table, self.chipsHeader);
+    self.headerWidth = width;
+    self.headerCategory = category;
+}
+
+// Category colour, matching the result badges: a tone symbol on idle chips and a tone fill once
+// selected. The fill runs after the shared chip styling, so every configuration update keeps it.
+- (void)tintChip:(UIButton *)chip tone:(LSTone)tone {
+    UIColor *glyph = LSToneColor(tone);
+    LSSetChipIconColor(chip, glyph);
+    UIButtonConfigurationUpdateHandler shared = chip.configurationUpdateHandler;
+    UIColor *fill = LSFillColor(glyph);
+    __weak typeof(self) weakSelf = self;
+    chip.configurationUpdateHandler = ^(UIButton *button) {
+        if (shared) shared(button);
+        typeof(self) self = weakSelf;
+        if (!button.enabled || !self || button.tag != self.category) return;
+        UIButtonConfiguration *config = button.configuration;
+        config.baseBackgroundColor = fill;
+        button.configuration = config;
+    };
 }
 
 - (void)updateChips {
@@ -728,10 +758,7 @@ typedef NS_OPTIONS(NSUInteger, LSSearchOptions) {
         NSArray *definition = definitions[(NSUInteger)chip.tag];
         BOOL selected = chip.tag == self.category;
         LSSetChipSelected(chip, selected);
-        UIButtonConfiguration *config = chip.configuration;
-        UIColor *tone = LSToneColor([definition[4] integerValue]);
-        config.imageColorTransformer = selected ? nil : ^UIColor *(__unused UIColor *color) { return tone; };
-        chip.configuration = config;
+        [chip setNeedsUpdateConfiguration];
         chip.accessibilityHint = selected ? @"Clears this category." :
             [NSString stringWithFormat:@"Lists %@ %@.", [definition[0] lowercaseString], [self nearText]];
     }
@@ -808,8 +835,8 @@ typedef NS_OPTIONS(NSUInteger, LSSearchOptions) {
         return;
     }
     CLLocationCoordinate2D pasted;
-    if (LSParseCoordinatePair(query, &pasted) || LSParseDegreesText(query, &pasted)) {
-        // A pasted pair is offered directly instead of being searched as text.
+    if (LSParseCoordinatePair(query, &pasted)) {
+        // A pasted pair, decimal or degrees-minutes-seconds, is offered directly instead of being searched as text.
         self.completions = @[];
         self.phase = LSSearchPhaseSmart;
         self.smartRow = [self useRow:pasted name:@"Entered coordinates" title:[NSString stringWithFormat:@"Use %@", LSCoordinateText(pasted)]
@@ -1118,7 +1145,7 @@ typedef NS_OPTIONS(NSUInteger, LSSearchOptions) {
     [self rebuild];
     if (!valid.count) { LSAnnounce([self noResultsTitle]); return; }
     NSString *where = self.category >= 0 ? [@" " stringByAppendingString:[self nearText]] : @"";
-    LSAnnounce([NSString stringWithFormat:@"%lu %@%@", (unsigned long)valid.count, valid.count == 1 ? @"result" : @"results", where]);
+    [self focusFirstResultSaying:[NSString stringWithFormat:@"%lu %@%@", (unsigned long)valid.count, valid.count == 1 ? @"result" : @"results", where]];
 }
 
 - (NSString *)searchingText {
@@ -1253,12 +1280,13 @@ typedef NS_OPTIONS(NSUInteger, LSSearchOptions) {
     row.titleHighlights = completion.titleHighlightRanges ?: @[];
     row.detail = completion.subtitle;
     row.detailHighlights = completion.subtitleHighlightRanges ?: @[];
-    // Query suggestions ("Coffee", "Search Nearby") open a list rather than one place.
-    BOOL query = !completion.subtitle.length || [completion.subtitle isEqualToString:@"Search Nearby"];
+    // Without a subtitle it reads as a search. Either way the lookup decides: one place is used
+    // at once and several are listed, which works the same in every language.
+    BOOL query = !completion.subtitle.length;
     row.symbol = query ? @"magnifyingglass" : @"mappin";
     row.tone = query ? LSToneNeutral : LSTonePlace;
     row.busy = completion == self.resolving;
-    row.hint = query ? @"Lists matching places." : @"Uses this place.";
+    row.hint = query ? @"Lists matching places." : @"Looks up this suggestion.";
     return row;
 }
 
@@ -1271,7 +1299,7 @@ typedef NS_OPTIONS(NSUInteger, LSSearchOptions) {
 }
 
 - (LSSearchRow *)coordinatesRow {
-    LSSearchRow *row = [LSSearchRow rowWithKind:LSRowCoordinates title:@"Enter Coordinates"];
+    LSSearchRow *row = [LSSearchRow rowWithKind:LSRowCoordinates title:@"Enter coordinates"];
     row.detail = @"Type a latitude and longitude";
     row.symbol = @"number";
     row.tone = LSToneNeutral;
@@ -1301,7 +1329,7 @@ typedef NS_OPTIONS(NSUInteger, LSSearchOptions) {
     for (NSDictionary *shortcut in self.saved) [saved addObject:[self rowForShortcut:shortcut match:NSMakeRange(NSNotFound, 0)]];
     for (NSDictionary *shortcut in self.recents) [recent addObject:[self rowForShortcut:shortcut match:NSMakeRange(NSNotFound, 0)]];
     NSString *note = LSRegionUsable(self.searchRegion) ? @"Distances are measured from the center of the map." : nil;
-    if (saved.count) [sections addObject:[LSSearchSection sectionWithTitle:@"Saved Places" rows:saved footer:recent.count ? nil : note]];
+    if (saved.count) [sections addObject:[LSSearchSection sectionWithTitle:@"Saved places" rows:saved footer:recent.count ? nil : note]];
     if (recent.count) [sections addObject:[LSSearchSection sectionWithTitle:@"Recent" rows:recent footer:note]];
     if (!saved.count && !recent.count) {
         [sections addObject:[self emptySection:@"map" title:@"Find any place"
@@ -1320,7 +1348,7 @@ typedef NS_OPTIONS(NSUInteger, LSSearchOptions) {
         [rows addObject:[self rowForShortcut:shortcut match:match]];
         if (rows.count == 3) break;
     }
-    if (rows.count) [sections addObject:[LSSearchSection sectionWithTitle:@"Saved and Recent" rows:rows footer:nil]];
+    if (rows.count) [sections addObject:[LSSearchSection sectionWithTitle:@"Saved and recent" rows:rows footer:nil]];
 }
 
 - (LSSearchSection *)suggestionSection {
@@ -1352,6 +1380,7 @@ typedef NS_OPTIONS(NSUInteger, LSSearchOptions) {
     if (idle) [self addShortcutSections:sections];
     else if (self.category < 0 && phase != LSSearchPhaseSmart && phase != LSSearchPhaseTooLong) [self addLocalMatches:sections];
     BOOL listed = sections.count > 0;
+    NSUInteger placesIndex = NSNotFound;
     switch (phase) {
         case LSSearchPhaseIdle:
         case LSSearchPhaseSmart:
@@ -1382,6 +1411,7 @@ typedef NS_OPTIONS(NSUInteger, LSSearchOptions) {
             break;
         case LSSearchPhaseResults:
             if (self.places.count) {
+                placesIndex = sections.count;
                 [sections addObject:[self placesSection]];
             } else {
                 [sections addObject:[self emptySection:@"mappin.slash" title:[self noResultsTitle] message:[self noResultsMessage] action:nil selector:NULL]];
@@ -1390,7 +1420,7 @@ typedef NS_OPTIONS(NSUInteger, LSSearchOptions) {
             break;
         case LSSearchPhaseFailed:
             [sections addObject:[self emptySection:@"wifi.exclamationmark" title:@"Search isn’t available" message:self.failure ?: @""
-                                            action:@"Try Again" selector:@selector(retrySearch)]];
+                                            action:@"Try again" selector:@selector(retrySearch)]];
             offerCoordinates = YES;
             break;
         case LSSearchPhasePaused:
@@ -1398,16 +1428,85 @@ typedef NS_OPTIONS(NSUInteger, LSSearchOptions) {
             break;
     }
     if (offerCoordinates) [sections addObject:[LSSearchSection sectionWithTitle:nil rows:@[[self coordinatesRow]] footer:nil]];
+    self.placesSectionIndex = placesIndex;
+    [self applySections:sections phase:phase];
+}
+
+// Section titles, footers and row kinds. Two lists with the same shape differ only in text.
+static NSArray<NSString *> *LSSectionShape(NSArray<LSSearchSection *> *sections) {
+    NSMutableArray<NSString *> *shape = [NSMutableArray arrayWithCapacity:sections.count];
+    for (LSSearchSection *section in sections) {
+        NSMutableString *kinds = [NSMutableString string];
+        for (LSSearchRow *row in section.rows) [kinds appendFormat:@"%ld,", (long)row.kind];
+        [shape addObject:[NSString stringWithFormat:@"%@|%@|%@", section.title ?: @"", section.footer ?: @"", kinds]];
+    }
+    return shape;
+}
+
+- (void)applySections:(NSArray<LSSearchSection *> *)sections phase:(LSSearchPhase)phase {
+    BOOL onScreen = self.table.window != nil;
+    BOOL sameShape = onScreen && [LSSectionShape(self.sections) isEqualToArray:LSSectionShape(sections)];
+    BOOL reveal = onScreen && phase == LSSearchPhaseResults && self.renderedPhase != LSSearchPhaseResults && LSMapAnimationsEnabled();
+    BOOL fade = onScreen && LSPhaseGroup(phase) != LSPhaseGroup(self.renderedPhase);
     self.sections = sections;
-    BOOL fade = LSPhaseGroup(phase) != LSPhaseGroup(self.renderedPhase) && self.table.window != nil;
     self.renderedPhase = phase;
-    if (fade) {
+    if (sameShape) {
+        // Updating rows in place keeps VoiceOver focus and running spinners where they are.
+        [self refreshVisibleRows];
+    } else if (reveal) {
+        [self.table reloadData];
+        [self revealResults];
+    } else if (fade) {
         [UIView transitionWithView:self.table duration:0.2
                            options:UIViewAnimationOptionTransitionCrossDissolve | UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionBeginFromCurrentState
                         animations:^{ [self.table reloadData]; } completion:nil];
     } else {
         [self.table reloadData];
     }
+}
+
+- (void)refreshVisibleRows {
+    for (NSIndexPath *path in self.table.indexPathsForVisibleRows) {
+        UITableViewCell *cell = [self.table cellForRowAtIndexPath:path];
+        LSSearchRow *row = [self rowAtIndexPath:path];
+        if (cell && row) [self configureCell:cell row:row];
+    }
+    // Rows whose text changed length settle to their new height without animating.
+    [UIView performWithoutAnimation:^{ [self.table performBatchUpdates:nil completion:nil]; }];
+}
+
+// The first time results arrive they rise 8 pt and fade in, one after another.
+- (void)revealResults {
+    if (self.placesSectionIndex == NSNotFound) return;
+    [self.table layoutIfNeeded];
+    NSUInteger order = 0;
+    for (NSIndexPath *path in self.table.indexPathsForVisibleRows) {
+        if ((NSUInteger)path.section != self.placesSectionIndex) continue;
+        UITableViewCell *cell = [self.table cellForRowAtIndexPath:path];
+        if (!cell) continue;
+        cell.alpha = 0;
+        cell.transform = CGAffineTransformMakeTranslation(0, 8);
+        [UIView animateWithDuration:0.4 delay:0.03 * MIN(order, 10) usingSpringWithDamping:0.9 initialSpringVelocity:0
+                            options:UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionBeginFromCurrentState
+                         animations:^{
+            cell.alpha = 1;
+            cell.transform = CGAffineTransformIdentity;
+        } completion:nil];
+        order++;
+    }
+}
+
+// VoiceOver moves to the first result, then hears the count after reading it.
+- (void)focusFirstResultSaying:(NSString *)message {
+    UITableViewCell *first = nil;
+    if (UIAccessibilityIsVoiceOverRunning() && self.placesSectionIndex != NSNotFound) {
+        [self.table layoutIfNeeded];
+        first = [self.table cellForRowAtIndexPath:[NSIndexPath indexPathForRow:0 inSection:(NSInteger)self.placesSectionIndex]];
+    }
+    if (!first) { LSAnnounce(message); return; }
+    UIAccessibilityPostNotification(UIAccessibilityLayoutChangedNotification, first);
+    NSAttributedString *queued = [[NSAttributedString alloc] initWithString:message attributes:@{UIAccessibilitySpeechAttributeQueueAnnouncement: @YES}];
+    UIAccessibilityPostNotification(UIAccessibilityAnnouncementNotification, queued);
 }
 
 #pragma mark Table
@@ -1434,31 +1533,45 @@ typedef NS_OPTIONS(NSUInteger, LSSearchOptions) {
 
 - (UITableViewCell *)tableView:(UITableView *)table cellForRowAtIndexPath:(NSIndexPath *)path {
     LSSearchRow *row = [self rowAtIndexPath:path];
+    UITableViewCell *cell;
     if (row.kind == LSRowStatus || row.kind == LSRowEmpty) {
-        LSSearchMessageCell *cell = [table dequeueReusableCellWithIdentifier:@"Message"] ?: [[LSSearchMessageCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"Message"];
-        if (row.kind == LSRowStatus) {
-            [cell host:LSStatusView(row.title, row.symbol, row.busy)];
-            cell.isAccessibilityElement = YES;
-            cell.accessibilityLabel = row.title;
-            cell.accessibilityTraits = UIAccessibilityTraitStaticText;
-        } else {
+        cell = [table dequeueReusableCellWithIdentifier:@"Message"] ?: [[LSSearchMessageCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"Message"];
+    } else {
+        cell = [table dequeueReusableCellWithIdentifier:@"Result"] ?: [[LSSearchResultCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"Result"];
+    }
+    [self configureCell:cell row:row];
+    return cell;
+}
+
+- (void)configureCell:(UITableViewCell *)cell row:(LSSearchRow *)row {
+    if ([cell isKindOfClass:LSSearchResultCell.class]) {
+        LSSearchResultCell *result = (LSSearchResultCell *)cell;
+        [result configureWithRow:row traits:self.table.traitCollection];
+        result.accessibilityCustomActions = [self accessibilityActionsForRow:row];
+        return;
+    }
+    if (![cell isKindOfClass:LSSearchMessageCell.class]) return;
+    LSSearchMessageCell *message = (LSSearchMessageCell *)cell;
+    NSString *key = [NSString stringWithFormat:@"%ld|%@|%@|%@|%d|%@", (long)row.kind, row.symbol, row.title, row.detail ?: @"", row.busy, row.actionTitle ?: @""];
+    if (row.kind == LSRowStatus) {
+        if (![message.hostedKey isEqualToString:key]) [message host:LSStatusView(row.title, row.symbol, row.busy)];
+        message.isAccessibilityElement = YES;
+        message.accessibilityLabel = row.title;
+        message.accessibilityTraits = UIAccessibilityTraitStaticText;
+    } else {
+        if (![message.hostedKey isEqualToString:key]) {
             UIButton *action = nil;
             if (row.actionTitle.length && row.action) {
                 action = LSButton(row.actionTitle, @"arrow.clockwise", NO);
                 [action addTarget:self action:row.action forControlEvents:UIControlEventTouchUpInside];
-                LSAddPressFeedback(action);
             }
-            [cell host:LSEmptyState(row.symbol, row.title, row.detail ?: @"", action)];
-            // Leave the title, message and button reachable one by one.
-            cell.isAccessibilityElement = NO;
-            cell.accessibilityLabel = nil;
+            [message host:LSEmptyState(row.symbol, row.title, row.detail ?: @"", action)];
         }
-        return cell;
+        // Leave the title, message and button reachable one by one.
+        message.isAccessibilityElement = NO;
+        message.accessibilityLabel = nil;
     }
-    LSSearchResultCell *cell = [table dequeueReusableCellWithIdentifier:@"Result"] ?: [[LSSearchResultCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"Result"];
-    [cell configureWithRow:row traits:table.traitCollection];
-    cell.accessibilityCustomActions = [self accessibilityActionsForRow:row];
-    return cell;
+    message.hostedKey = key;
 }
 
 - (BOOL)rowIsSelectable:(LSSearchRow *)row {
@@ -1493,14 +1606,14 @@ typedef NS_OPTIONS(NSUInteger, LSSearchOptions) {
     __weak typeof(self) weakSelf = self;
     return [UIContextMenuConfiguration configurationWithIdentifier:nil previewProvider:nil actionProvider:^UIMenu *(__unused NSArray<UIMenuElement *> *suggested) {
         NSMutableArray<UIMenuElement *> *items = [NSMutableArray array];
-        [items addObject:[UIAction actionWithTitle:@"Use This Place" image:[UIImage systemImageNamed:@"mappin.and.ellipse"] identifier:nil handler:^(__unused UIAction *action) {
+        [items addObject:[UIAction actionWithTitle:@"Use this place" image:[UIImage systemImageNamed:@"mappin.and.ellipse"] identifier:nil handler:^(__unused UIAction *action) {
             [weakSelf choose:row.coordinate name:row.name];
         }]];
-        [items addObject:[UIAction actionWithTitle:@"Copy Coordinates" image:[UIImage systemImageNamed:@"doc.on.doc"] identifier:nil handler:^(__unused UIAction *action) {
+        [items addObject:[UIAction actionWithTitle:@"Copy coordinates" image:[UIImage systemImageNamed:@"doc.on.doc"] identifier:nil handler:^(__unused UIAction *action) {
             [weakSelf copyText:LSCoordinateText(row.coordinate) message:@"Coordinates copied"];
         }]];
         if (row.address.length) {
-            [items addObject:[UIAction actionWithTitle:@"Copy Address" image:[UIImage systemImageNamed:@"text.quote"] identifier:nil handler:^(__unused UIAction *action) {
+            [items addObject:[UIAction actionWithTitle:@"Copy address" image:[UIImage systemImageNamed:@"text.quote"] identifier:nil handler:^(__unused UIAction *action) {
                 [weakSelf copyText:row.address message:@"Address copied"];
             }]];
         }
@@ -1541,6 +1654,10 @@ typedef NS_OPTIONS(NSUInteger, LSSearchOptions) {
     entry.initialCoordinate = typed ? self.smartRow.coordinate : self.initialCoordinate;
     __weak typeof(self) weakSelf = self;
     entry.didChoose = ^(CLLocationCoordinate2D coordinate) { [weakSelf choose:coordinate name:@"Selected coordinates"]; };
+    // Called instead of didChoose; keeps a name the entry screen found for the spot.
+    entry.didChooseNamed = ^(CLLocationCoordinate2D coordinate, NSString *name) {
+        [weakSelf choose:coordinate name:name.length ? name : @"Selected coordinates"];
+    };
     [self.navigationController pushViewController:entry animated:LSMapAnimationsEnabled()];
 }
 - (void)choose:(CLLocationCoordinate2D)coordinate name:(NSString *)name {

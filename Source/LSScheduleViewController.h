@@ -6,6 +6,9 @@ NS_ASSUME_NONNULL_BEGIN
 @interface LSScheduleViewController : UIViewController
 // What would be scheduled, e.g. "Hold “Eiffel Tower”"; nil when there is nothing yet.
 @property (nonatomic, copy, nullable) NSString *subject;
+// YES when the subject is a route (drawn in the route colour). Default NO; a subject worded
+// "Play the route …" is also treated as a route.
+@property (nonatomic) BOOL subjectIsRoute;
 // Returns NO when the schedule could not be saved.
 @property (nonatomic, copy, nullable) BOOL (^schedule)(NSDate *start, NSDate * _Nullable end, BOOL daily);
 @property (nonatomic, copy, nullable) void (^didFinish)(NSString *message);

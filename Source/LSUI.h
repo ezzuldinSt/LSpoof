@@ -21,7 +21,11 @@ FOUNDATION_EXPORT UIFont *LSFont(UIFontTextStyle style, UIFontWeight weight, CGF
 FOUNDATION_EXPORT UIFont *LSMonospacedFont(UIFontTextStyle style);
 // Capsule button (a rounded rectangle once Dynamic Type wraps the title). Prominent uses
 // Liquid Glass on iOS 26, a filled accent capsule before. Springs slightly when pressed.
+// A fixed background cornerRadius set by the caller (e.g. concentric with its panel) is kept.
+// The filled style's glow follows the enabled state by itself: never write layer.shadowOpacity.
 FOUNDATION_EXPORT UIButton *LSButton(NSString *title, NSString * _Nullable symbol, BOOL prominent);
+// Same as button.enabled = enabled; for an LSButton the glow fades with it (never under glass).
+FOUNDATION_EXPORT void LSSetButtonEnabled(UIButton *button, BOOL enabled);
 // Round 44 pt glass button for floating map and header controls.
 FOUNDATION_EXPORT UIButton *LSIconButton(NSString *symbol, NSString *accessibilityLabel);
 // Compact capsule action, optionally selectable.
@@ -30,11 +34,18 @@ FOUNDATION_EXPORT UIButton *LSChipButton(NSString *title, NSString * _Nullable s
 // Differentiate Without Color is on) plus an outline ring with Differentiate Without Color or
 // Increase Contrast, so selection never relies on colour alone.
 FOUNDATION_EXPORT void LSSetChipSelected(UIButton *chip, BOOL selected);
+// Symbol colour of an idle (unselected, enabled) chip; nil restores the accent. Selected chips
+// show white symbols. An imageColorTransformer the caller sets on the configuration also wins.
+FOUNDATION_EXPORT void LSSetChipIconColor(UIButton *chip, UIColor * _Nullable color);
 // Rounded-square tinted symbol, like the icons in iOS Settings.
 FOUNDATION_EXPORT UIView *LSIconBadge(NSString *symbol, UIColor *color, CGFloat size);
 FOUNDATION_EXPORT UIView *LSSeparator(void);
-// Shows an accent ring while editing and an error ring while the LSFieldRow error is visible.
+// Owns its border: an accent ring while editing, an error ring while LSSetFieldInvalid(YES) or
+// while its LSFieldRow error label is visible, a hairline with Increase Contrast. Callers must
+// never write layer.borderWidth or layer.borderColor on an LSNumberField.
 FOUNDATION_EXPORT UITextField *LSNumberField(NSString *name);
+// Shows or clears the error ring of an LSNumberField. Does nothing for other text fields.
+FOUNDATION_EXPORT void LSSetFieldInvalid(UITextField *field, BOOL invalid);
 FOUNDATION_EXPORT UIStackView *LSStack(NSArray<UIView *> *views, CGFloat spacing);
 FOUNDATION_EXPORT UIStackView *LSRow(NSArray<UIView *> *views, CGFloat spacing);
 FOUNDATION_EXPORT UIView *LSInsetPanel(UIView *content);
@@ -161,7 +172,12 @@ FOUNDATION_EXPORT void LSHapticApplied(void);
 // Status capsule for the applied session: a symbol (or dot), the title and a soft tint.
 // Session titles from LSSessionTitle get their LSSessionSymbol automatically. The text uses
 // the label colour; the colour tints the symbol and background. Cheap to call at 4 Hz.
+// When it becomes active (or its state changes while active) the symbol pulses twice and then
+// rests, so several live indicators never loop together. Wraps to two lines at accessibility
+// sizes and offers the Large Content Viewer.
 @interface LSStatusChip : UIView
+// Pulse for as long as the chip is active instead (a single, primary live indicator). NO by default.
+@property (nonatomic) BOOL pulsesContinuously;
 - (void)setTitle:(NSString *)title color:(UIColor *)color active:(BOOL)active;
 - (void)setTitle:(NSString *)title symbol:(nullable NSString *)symbol color:(UIColor *)color active:(BOOL)active;
 // Title, symbol, colour and live pulse for an LSSessionMode value.

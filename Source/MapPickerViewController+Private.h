@@ -183,6 +183,10 @@ typedef NS_ENUM(NSInteger, LSEndpoint) { LSEndpointFrom, LSEndpointStop, LSEndpo
 // the whole view, part of which is under the header). Respects Reduce Motion.
 - (void)focusMapOnRect:(MKMapRect)rect animated:(BOOL)animated;
 - (void)focusMapOnCoordinate:(CLLocationCoordinate2D)coordinate meters:(double)meters animated:(BOOL)animated;
+// Switch workspace the way tapping the tab does: drops pending choosers and route lookups,
+// keeps the segmented control in sync, rebuilds the workspace and moves VoiceOver focus to it.
+// Call it instead of setting `tab` directly; set the selection after it returns.
+- (void)showTab:(LSPickerTab)tab animated:(BOOL)animated;
 @end
 @class LSRouteRailView, LSRouteInstrumentView, LSRouteStatView;
 @interface MapPickerViewController () // Route planner and playback (MapPickerViewController+Route.m)
@@ -206,6 +210,16 @@ typedef NS_ENUM(NSInteger, LSEndpoint) { LSEndpointFrom, LSEndpointStop, LSEndpo
 @property (nonatomic, strong) UIView *routeToolsWrap;
 @property (nonatomic, strong, nullable) UIView *routeTip;
 @property (nonatomic) NSUInteger routeExportRevision;
+// Link and file imports: a token per import, so a superseded one can clear its busy status.
+@property (nonatomic) NSUInteger routeImportToken;
+@property (nonatomic) BOOL routeImportActive;
+@property (nonatomic, strong, nullable) UIView *routeToastAnchor;
+@property (nonatomic, strong, nullable) NSLayoutConstraint *routeToastAnchorHeight;
+// While the drafted route plays, the planner folds into a one-line trip summary.
+@property (nonatomic, strong) UIView *routeEndpointsCard;
+@property (nonatomic, strong) UIView *routeTripCard;
+@property (nonatomic, strong) UILabel *routeTripLabel;
+@property (nonatomic) BOOL routeEditorOpen;
 // Map: an outline under the route, the travelled part dimmed, and the draw-in once built.
 @property (nonatomic, strong, nullable) MKPolyline *routeCasing;
 @property (nonatomic, weak, nullable) MKPolylineRenderer *routeLineRenderer;
@@ -215,6 +229,7 @@ typedef NS_ENUM(NSInteger, LSEndpoint) { LSEndpointFrom, LSEndpointStop, LSEndpo
 @property (nonatomic) NSUInteger routeDrawRevision;
 @property (nonatomic) BOOL routeDrawInPending;
 @property (nonatomic, weak, nullable) UIView *routeTraceView;
+@property (nonatomic, copy, nullable) NSArray<MKAnnotationView *> *routeHiddenMarkers;
 // Playback instrument and the spoken milestones (halfway, each stop, arrival).
 @property (nonatomic, strong) LSRouteInstrumentView *routeInstrument;
 @property (nonatomic, weak, nullable) LSRoute *milestoneRoute;

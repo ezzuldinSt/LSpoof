@@ -2,6 +2,7 @@
 #import "SessionController.h"
 #import <objc/message.h>
 #import <objc/runtime.h>
+#import <os/lock.h>
 
 // MARK: - Palette
 
@@ -212,27 +213,75 @@ static UIButtonConfiguration *LSSystemGlassConfiguration(BOOL prominent) {
     return [configuration isKindOfClass:UIButtonConfiguration.class] ? configuration : nil;
 }
 
+static CGFloat LSEdgeWidth(UITraitCollection *traits) {
+    if (traits.accessibilityContrast == UIAccessibilityContrastHigh) return 1.0;
+    return 1.0 / (traits.displayScale > 0 ? traits.displayScale : UIScreen.mainScreen.scale);
+}
+
 // Keeps a fixed-corner button a capsule at any single-line height, and a concentric rounded
 // rectangle once Dynamic Type wraps the title (a tall capsule would crowd the text).
 @interface LSPillButton : UIButton
 @property (nonatomic) CGFloat lsMaximumCornerRadius;
+@property (nonatomic) CGFloat lsAppliedRadius;  // The radius this class last wrote.
+@property (nonatomic) BOOL lsCallerRadius;      // A caller set its own radius: keep it.
+@property (nonatomic) BOOL lsGlass;
+@property (nonatomic) float lsRestingShadowOpacity;
 @end
 @implementation LSPillButton
 - (void)layoutSubviews {
     [super layoutSubviews];
     CGSize size = self.bounds.size;
     if (size.height <= 0) return;
-    CGFloat radius = MIN(size.height / 2, self.lsMaximumCornerRadius);
     UIButtonConfiguration *config = self.configuration;
+    BOOL fixed = config.cornerStyle == UIButtonConfigurationCornerStyleFixed;
+    CGFloat current = config.background.cornerRadius;
+    // A radius this class did not write came from the caller, e.g. a concentric corner inside a
+    // floating panel. From then on it is respected and no extra configuration pass runs.
+    if (fixed && !self.lsCallerRadius && fabs(current - self.lsAppliedRadius) > 0.5) self.lsCallerRadius = YES;
+    CGFloat radius = MIN(size.height / 2, self.lsMaximumCornerRadius);
     if (config.cornerStyle == UIButtonConfigurationCornerStyleCapsule) radius = size.height / 2;
-    if (config && config.cornerStyle == UIButtonConfigurationCornerStyleFixed && fabs(config.background.cornerRadius - radius) > 0.5) {
+    else if (fixed && self.lsCallerRadius) radius = MIN(current, size.height / 2);
+    else if (fixed && fabs(current - radius) > 0.5) {
         UIBackgroundConfiguration *background = config.background;
         background.cornerRadius = radius;
         config.background = background;
+        self.lsAppliedRadius = radius;
         self.configuration = config; // Converges: the next pass finds the radius already set.
     }
     // An explicit path keeps the glow cheap and shaped like the button.
     self.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:self.bounds cornerRadius:radius].CGPath;
+}
+- (void)setEnabled:(BOOL)enabled {
+    [super setEnabled:enabled];
+    // Filled buttons glow only while they can be pressed. Glass draws its own depth, and an
+    // accent shadow under it would read as a smudge.
+    float target = enabled && !self.lsGlass ? self.lsRestingShadowOpacity : 0;
+    if (self.layer.shadowOpacity == target) return;
+    if (self.window) {
+        CABasicAnimation *fade = [CABasicAnimation animationWithKeyPath:@"shadowOpacity"];
+        fade.fromValue = @(self.layer.shadowOpacity);
+        fade.toValue = @(target);
+        fade.duration = 0.2;
+        [self.layer addAnimation:fade forKey:@"lsShadow"];
+    }
+    self.layer.shadowOpacity = target;
+}
+@end
+void LSSetButtonEnabled(UIButton *button, BOOL enabled) { button.enabled = enabled; }
+
+// Keeps the fallback rim legible when Increase Contrast is switched while the button is shown.
+@interface LSIconControlButton : UIButton
+@property (nonatomic) BOOL lsGlass;
+@end
+@implementation LSIconControlButton
+- (void)traitCollectionDidChange:(UITraitCollection *)previous {
+    [super traitCollectionDidChange:previous];
+    if (self.lsGlass || previous.accessibilityContrast == self.traitCollection.accessibilityContrast) return;
+    UIButtonConfiguration *config = self.configuration;
+    UIBackgroundConfiguration *background = config.background;
+    background.strokeWidth = LSEdgeWidth(self.traitCollection);
+    config.background = background;
+    self.configuration = config;
 }
 @end
 
@@ -260,15 +309,18 @@ UIButton *LSButton(NSString *title, NSString *symbol, BOOL prominent) {
     }
     LSPillButton *button = [LSPillButton buttonWithType:UIButtonTypeSystem];
     button.lsMaximumCornerRadius = prominent ? 28 : 24;
+    button.lsAppliedRadius = glass ? 0 : config.background.cornerRadius;
+    button.lsGlass = glass != nil;
+    button.lsRestingShadowOpacity = prominent && !glass ? 0.25 : 0;
     button.configuration = config;
     button.tintColor = LSAccentColor();
     button.translatesAutoresizingMaskIntoConstraints = NO;
     button.titleLabel.adjustsFontForContentSizeCategory = YES;
     button.titleLabel.numberOfLines = 0;
     // No accessibilityLabel: UIButton speaks the configuration title, which callers update.
-    // Shadow properties are always set because callers toggle shadowOpacity with the enabled state.
+    // The glow follows the enabled state (see LSPillButton); callers never touch it.
     button.layer.shadowColor = LSAccentColor().CGColor;
-    button.layer.shadowOpacity = prominent && !glass ? 0.25 : 0;
+    button.layer.shadowOpacity = button.lsRestingShadowOpacity;
     button.layer.shadowRadius = 12;
     button.layer.shadowOffset = CGSizeMake(0, 6);
     LSApplyMinimumSize(button, prominent ? 52 : 44, 44);
@@ -288,10 +340,12 @@ UIButton *LSIconButton(NSString *symbol, NSString *accessibilityLabel) {
         background.visualEffect = [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThickMaterial];
         background.cornerRadius = 22;
         background.strokeColor = LSGlassEdgeColor();
+        // Traits are unknown until the button joins a window; LSIconControlButton follows changes.
         background.strokeWidth = LSIncreaseContrast() ? 1.0 : 1.0 / UIScreen.mainScreen.scale;
         config.background = background;
     }
-    UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
+    LSIconControlButton *button = [LSIconControlButton buttonWithType:UIButtonTypeSystem];
+    button.lsGlass = glass != nil;
     button.configuration = config;
     button.translatesAutoresizingMaskIntoConstraints = NO;
     button.accessibilityLabel = accessibilityLabel;
@@ -314,7 +368,11 @@ UIButton *LSIconButton(NSString *symbol, NSString *accessibilityLabel) {
     return button;
 }
 
-static char ls_chipSelectedKey, ls_chipCheckKey, ls_chipOriginalImageKey;
+static char ls_chipSelectedKey, ls_chipCheckKey, ls_chipOriginalImageKey, ls_chipIconColorKey, ls_chipShownIconKey;
+void LSSetChipIconColor(UIButton *chip, UIColor *color) {
+    objc_setAssociatedObject(chip, &ls_chipIconColorKey, color, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    [chip setNeedsUpdateConfiguration];
+}
 static void LSStyleChipBackground(UIButtonConfiguration *config, BOOL selected) {
     UIBackgroundConfiguration *background = config.background;
     if (selected && (LSDifferentiateWithoutColor() || LSIncreaseContrast())) {
@@ -345,15 +403,23 @@ UIButton *LSChipButton(NSString *title, NSString *symbol) {
     LSStyleChipBackground(config, NO);
     UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
     button.configuration = config;
-    // Accent symbols on idle chips, white on selected ones, system dimming when disabled.
+    // Idle chips tint their symbol (accent, or LSSetChipIconColor), selected ones go white,
+    // disabled ones use system dimming.
     button.configurationUpdateHandler = ^(UIButton *chip) {
         UIButtonConfiguration *updated = chip.configuration;
-        BOOL selected = [objc_getAssociatedObject(chip, &ls_chipSelectedKey) boolValue];
-        UIColor *icon = !chip.enabled ? nil : (selected ? UIColor.whiteColor : LSAccentTextColor());
-        updated.imageColorTransformer = icon ? ^UIColor *(__unused UIColor *color) { return icon; } : nil;
-        chip.configuration = updated;
         // Follows title changes made by callers; a configuration title is not currentTitle.
         chip.largeContentTitle = updated.title;
+        // A transformer the caller installed wins. Ours returns the exact colour object it last
+        // installed, which a caller's transformer cannot.
+        UIConfigurationColorTransformer current = updated.imageColorTransformer;
+        UIColor *shown = objc_getAssociatedObject(chip, &ls_chipShownIconKey);
+        if (current && !(shown && current(UIColor.clearColor) == shown)) return;
+        BOOL selected = [objc_getAssociatedObject(chip, &ls_chipSelectedKey) boolValue];
+        UIColor *idle = objc_getAssociatedObject(chip, &ls_chipIconColorKey) ?: LSAccentTextColor();
+        UIColor *icon = !chip.enabled ? nil : (selected ? UIColor.whiteColor : idle);
+        updated.imageColorTransformer = icon ? ^UIColor *(__unused UIColor *color) { return icon; } : nil;
+        objc_setAssociatedObject(chip, &ls_chipShownIconKey, icon, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        chip.configuration = updated;
     };
     button.translatesAutoresizingMaskIntoConstraints = NO;
     button.titleLabel.adjustsFontForContentSizeCategory = YES;
@@ -452,20 +518,42 @@ UIView *LSSeparator(void) {
 
 // MARK: - Fields
 
+// Owns its border: a focus ring while editing and an error ring while invalid. Callers mark
+// errors with LSSetFieldInvalid (or an LSFieldRow error label), never with layer.border.
 @interface LSNumberTextField : UITextField
-@property (nonatomic) BOOL lsInvalid;
+@property (nonatomic) BOOL lsInvalid;     // From LSSetFieldInvalid.
+@property (nonatomic) BOOL lsRowInvalid;  // Mirrored from the LSFieldRow error label.
 @end
 @implementation LSNumberTextField
 - (void)ls_updateRing {
     UITraitCollection *traits = self.traitCollection;
-    UIColor *ring = self.lsInvalid ? LSErrorColor() : (self.isFirstResponder ? LSAccentTextColor() : nil);
+    BOOL invalid = self.lsInvalid || self.lsRowInvalid;
+    UIColor *ring = invalid ? LSErrorColor() : (self.isFirstResponder ? LSAccentTextColor() : nil);
     BOOL emphasized = ring != nil;
     if (!ring && traits.accessibilityContrast == UIAccessibilityContrastHigh) ring = UIColor.opaqueSeparatorColor;
-    self.layer.borderWidth = ring ? (emphasized ? 2 : 1) : 0;
-    self.layer.borderColor = [ring resolvedColorWithTraitCollection:traits].CGColor;
+    CGFloat width = ring ? (emphasized ? 2 : 1) : 0;
+    CGColorRef color = [ring resolvedColorWithTraitCollection:traits].CGColor;
+    if (self.layer.borderWidth == width && CGColorEqualToColor(self.layer.borderColor, color)) return;
+    if (self.window) {
+        // A quick cross-fade so the ring arrives rather than flashes.
+        CABasicAnimation *fadeColor = [CABasicAnimation animationWithKeyPath:@"borderColor"];
+        fadeColor.fromValue = (__bridge id)self.layer.borderColor;
+        CABasicAnimation *fadeWidth = [CABasicAnimation animationWithKeyPath:@"borderWidth"];
+        fadeWidth.fromValue = @(self.layer.borderWidth);
+        CAAnimationGroup *group = [CAAnimationGroup animation];
+        group.animations = @[fadeColor, fadeWidth];
+        group.duration = 0.15;
+        [self.layer addAnimation:group forKey:@"lsRing"];
+    }
+    self.layer.borderWidth = width;
+    self.layer.borderColor = color;
 }
 - (void)setLsInvalid:(BOOL)invalid {
     _lsInvalid = invalid;
+    [self ls_updateRing];
+}
+- (void)setLsRowInvalid:(BOOL)invalid {
+    _lsRowInvalid = invalid;
     [self ls_updateRing];
 }
 - (BOOL)becomeFirstResponder {
@@ -483,6 +571,9 @@ UIView *LSSeparator(void) {
     [self ls_updateRing];
 }
 @end
+void LSSetFieldInvalid(UITextField *field, BOOL invalid) {
+    if ([field isKindOfClass:LSNumberTextField.class]) ((LSNumberTextField *)field).lsInvalid = invalid;
+}
 
 UITextField *LSNumberField(NSString *name) {
     LSNumberTextField *field = [[LSNumberTextField alloc] init];
@@ -517,7 +608,7 @@ UITextField *LSNumberField(NSString *name) {
     [super layoutSubviews];
     LSNumberTextField *field = (LSNumberTextField *)self.lsField;
     UILabel *error = self.lsError;
-    if (error && [field isKindOfClass:LSNumberTextField.class] && field.lsInvalid == error.hidden) field.lsInvalid = !error.hidden;
+    if (error && [field isKindOfClass:LSNumberTextField.class] && field.lsRowInvalid == error.hidden) field.lsRowInvalid = !error.hidden;
 }
 @end
 
@@ -760,6 +851,10 @@ BOOL LSIncreaseContrast(void) { return UIAccessibilityDarkerSystemColorsEnabled(
 BOOL LSDifferentiateWithoutColor(void) { return UIAccessibilityShouldDifferentiateWithoutColor(); }
 BOOL LSLiquidGlassAvailable(void) { return NSClassFromString(@"UIGlassEffect") != Nil; }
 
+// The regular material keeps text on floating panels legible over busy map imagery.
+static UIBlurEffectStyle LSFallbackMaterial(BOOL highContrast) {
+    return highContrast ? UIBlurEffectStyleSystemThickMaterial : UIBlurEffectStyleSystemMaterial;
+}
 // Both system glass and blur materials already turn opaque under Reduce Transparency; the
 // fallback adds a rim so the edge stays visible over the map, firmer when the material is opaque.
 @interface LSGlassEffectView : UIVisualEffectView
@@ -780,6 +875,11 @@ BOOL LSLiquidGlassAvailable(void) { return NSClassFromString(@"UIGlassEffect") !
 }
 - (void)traitCollectionDidChange:(UITraitCollection *)previous {
     [super traitCollectionDidChange:previous];
+    // The fallback material thickens with Increase Contrast, also when it changes on screen.
+    UIAccessibilityContrast contrast = self.traitCollection.accessibilityContrast;
+    if (self.lsDrawsEdge && previous.accessibilityContrast != contrast && contrast != UIAccessibilityContrastUnspecified) {
+        self.effect = [UIBlurEffect effectWithStyle:LSFallbackMaterial(contrast == UIAccessibilityContrastHigh)];
+    }
     [self ls_updateEdge];
 }
 - (void)ls_updateEdge {
@@ -806,8 +906,7 @@ UIVisualEffectView *LSGlassView(CGFloat cornerRadius, BOOL interactive) {
         }
     }
     BOOL systemGlass = effect != nil;
-    // The regular material keeps text on floating panels legible over busy map imagery.
-    if (!effect) effect = [UIBlurEffect effectWithStyle:LSIncreaseContrast() ? UIBlurEffectStyleSystemThickMaterial : UIBlurEffectStyleSystemMaterial];
+    if (!effect) effect = [UIBlurEffect effectWithStyle:LSFallbackMaterial(LSIncreaseContrast())];
     LSGlassEffectView *view = [[LSGlassEffectView alloc] initWithEffect:effect];
     view.translatesAutoresizingMaskIntoConstraints = NO;
     view.layer.cornerRadius = cornerRadius;
@@ -931,8 +1030,12 @@ void LSSetHidden(UIView *view, BOOL hidden, BOOL animated) {
     LSVisibilityChange *change = [[LSVisibilityChange alloc] init];
     change.hidden = hidden;
     objc_setAssociatedObject(view, &ls_visibilityKey, change, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    UIView *root = view;
-    while (root.superview && ![root.superview isKindOfClass:UIWindow.class]) root = root.superview;
+    // Lay out from the nearest scroll view (or the view controller's view) down: the stack and
+    // every content-sized panel around it resize in one animation, while unrelated layout
+    // elsewhere in the window is not swept into it. The stack alone left its panel jumping.
+    UIView *root = stack ?: view;
+    while (root.superview && ![root isKindOfClass:UIScrollView.class] && ![root.nextResponder isKindOfClass:UIViewController.class] &&
+           ![root.superview isKindOfClass:UIWindow.class]) root = root.superview;
     dispatch_block_t finish = ^{
         if (objc_getAssociatedObject(view, &ls_visibilityKey) != change) return;
         objc_setAssociatedObject(view, &ls_visibilityKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -1153,6 +1256,32 @@ void LSDismissToast(UIView *host) {
 
 // MARK: - Parsing and formatting
 
+// Building a number formatter is costly and these run several times per playback tick, so
+// configured formatters are cached (they are safe to use from any thread once configured).
+// A locale change in Settings empties the cache.
+static os_unfair_lock ls_formatterLock = OS_UNFAIR_LOCK_INIT;
+static NSMutableDictionary<id, NSNumberFormatter *> *ls_formatters;
+static NSNumberFormatter *LSCachedFormatter(id key, NSNumberFormatter *(^make)(void)) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        ls_formatters = [NSMutableDictionary dictionary];
+        [NSNotificationCenter.defaultCenter addObserverForName:NSCurrentLocaleDidChangeNotification object:nil queue:nil usingBlock:^(__unused NSNotification *note) {
+            os_unfair_lock_lock(&ls_formatterLock);
+            [ls_formatters removeAllObjects];
+            os_unfair_lock_unlock(&ls_formatterLock);
+        }];
+    });
+    os_unfair_lock_lock(&ls_formatterLock);
+    NSNumberFormatter *formatter = ls_formatters[key];
+    os_unfair_lock_unlock(&ls_formatterLock);
+    if (formatter) return formatter;
+    formatter = make(); // Outside the lock: formatter set-up can take a while.
+    os_unfair_lock_lock(&ls_formatterLock);
+    ls_formatters[key] = formatter;
+    os_unfair_lock_unlock(&ls_formatterLock);
+    return formatter;
+}
+
 NSNumber *LSParseDecimal(NSString *text, NSLocale *locale) {
     NSString *trimmed = [text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
     NSCharacterSet *directionMarks = [NSCharacterSet characterSetWithCharactersInString:@"؜‎‏⁦⁧⁨⁩"];
@@ -1166,11 +1295,15 @@ NSNumber *LSParseDecimal(NSString *text, NSLocale *locale) {
         grammar = [NSRegularExpression regularExpressionWithPattern:@"^[+−-]?(?:\\p{Nd}+(?:[.,٫]\\p{Nd}*)?|[.,٫]\\p{Nd}+)$" options:0 error:nil];
     });
     if ([grammar numberOfMatchesInString:trimmed options:0 range:NSMakeRange(0, trimmed.length)] != 1) return nil;
-    NSNumberFormatter *formatter = [[NSNumberFormatter alloc] init];
-    formatter.locale = locale;
-    formatter.numberStyle = NSNumberFormatterDecimalStyle;
-    formatter.usesGroupingSeparator = NO;
-    formatter.lenient = NO;
+    NSString *key = [NSString stringWithFormat:@"parse:%@|%@", locale.localeIdentifier, [locale objectForKey:NSLocaleDecimalSeparator] ?: @""];
+    NSNumberFormatter *formatter = LSCachedFormatter(key, ^NSNumberFormatter *{
+        NSNumberFormatter *made = [[NSNumberFormatter alloc] init];
+        made.locale = locale;
+        made.numberStyle = NSNumberFormatterDecimalStyle;
+        made.usesGroupingSeparator = NO;
+        made.lenient = NO;
+        return made;
+    });
     NSString *normalized = [[trimmed stringByReplacingOccurrencesOfString:@"−" withString:@"-"] stringByReplacingOccurrencesOfString:@"," withString:@"."];
     normalized = [normalized stringByReplacingOccurrencesOfString:@"٫" withString:@"."];
     if ([normalized hasPrefix:@"+"]) normalized = [normalized substringFromIndex:1];
@@ -1180,6 +1313,55 @@ NSNumber *LSParseDecimal(NSString *text, NSLocale *locale) {
     BOOL success = [formatter getObjectValue:&value forString:normalized range:&parsedRange error:nil];
     return success && parsedRange.location == 0 && parsedRange.length == normalized.length &&
         [value isKindOfClass:NSNumber.class] && isfinite([value doubleValue]) ? value : nil;
+}
+static NSString *LSMatchGroup(NSString *text, NSTextCheckingResult *match, NSUInteger index) {
+    NSRange range = [match rangeAtIndex:index];
+    return range.location == NSNotFound ? nil : [text substringWithRange:range];
+}
+static unichar LSHemisphere(NSString *letter) { return letter.length ? [letter.uppercaseString characterAtIndex:0] : 0; }
+// Degrees with optional minutes and seconds. Only the last part given may have a fraction,
+// minutes and seconds stay below 60, and a minus sign never combines with a hemisphere letter.
+static BOOL LSAngleValue(NSString *degrees, NSString *minutes, NSString *seconds, NSString *sign, unichar hemisphere, double *value) {
+    if ((minutes && [degrees containsString:@"."]) || (seconds && [minutes containsString:@"."])) return NO;
+    double m = minutes.doubleValue, s = seconds.doubleValue;
+    if (m >= 60 || s >= 60) return NO;
+    BOOL minus = sign && ![sign isEqualToString:@"+"];
+    if (minus && hemisphere) return NO;
+    double angle = degrees.doubleValue + m / 60.0 + s / 3600.0;
+    *value = minus || hemisphere == 'S' || hemisphere == 'W' ? -angle : angle;
+    return isfinite(*value);
+}
+// 48°51'29.6"N 2°17'40.2"E, N 48° 51.493' E 2° 17.67', 48.8584° N, 2.2945° E. Primes, smart
+// quotes and '' all mark minutes and seconds; letters may lead or trail each value and put
+// longitude first. ASCII digits only, like the decimal forms.
+static BOOL LSParseAnglePair(NSString *text, CLLocationCoordinate2D *coordinate) {
+    static NSRegularExpression *pair;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSString *part = @"([NSEW])?\\s*([+−-])?\\s*([0-9]{1,3}(?:\\.[0-9]+)?)\\s*[°º˚]\\s*"
+                         @"(?:([0-9]{1,2}(?:\\.[0-9]+)?)\\s*['′’]\\s*(?:([0-9]{1,2}(?:\\.[0-9]+)?)\\s*(?:\"|″|”|''|′′))?)?\\s*([NSEW])?";
+        NSString *pattern = [NSString stringWithFormat:@"^\\s*%@\\s*(?:[,;/]\\s*)?%@\\s*$", part, part];
+        pair = [NSRegularExpression regularExpressionWithPattern:pattern options:NSRegularExpressionCaseInsensitive error:nil];
+    });
+    NSTextCheckingResult *match = [pair firstMatchInString:text options:0 range:NSMakeRange(0, text.length)];
+    if (!match || match.numberOfRanges < 13) return NO;
+    unichar lead1 = LSHemisphere(LSMatchGroup(text, match, 1)), trail1 = LSHemisphere(LSMatchGroup(text, match, 6));
+    unichar lead2 = LSHemisphere(LSMatchGroup(text, match, 7)), trail2 = LSHemisphere(LSMatchGroup(text, match, 12));
+    // "N 48° 51' E 2° 17'": the greedy first value took the letter that leads the second.
+    if (lead1 && trail1 && !lead2) { lead2 = trail1; trail1 = 0; }
+    if ((lead1 && trail1) || (lead2 && trail2)) return NO;
+    unichar first = lead1 ?: trail1, second = lead2 ?: trail2;
+    double a, b;
+    if (!LSAngleValue(LSMatchGroup(text, match, 3), LSMatchGroup(text, match, 4), LSMatchGroup(text, match, 5), LSMatchGroup(text, match, 2), first, &a) ||
+        !LSAngleValue(LSMatchGroup(text, match, 9), LSMatchGroup(text, match, 10), LSMatchGroup(text, match, 11), LSMatchGroup(text, match, 8), second, &b)) return NO;
+    BOOL firstLat = first == 'N' || first == 'S', firstLon = first == 'E' || first == 'W';
+    BOOL secondLat = second == 'N' || second == 'S', secondLon = second == 'E' || second == 'W';
+    if ((firstLat && secondLat) || (firstLon && secondLon)) return NO;
+    BOOL swapped = firstLon || secondLat;
+    double latitude = swapped ? b : a, longitude = swapped ? a : b;
+    if (fabs(latitude) > 90 || fabs(longitude) > 180) return NO;
+    if (coordinate) *coordinate = CLLocationCoordinate2DMake(latitude, longitude);
+    return YES;
 }
 BOOL LSParseCoordinatePair(NSString *text, CLLocationCoordinate2D *coordinate) {
     if (!text.length || text.length > 128) return NO;
@@ -1196,7 +1378,7 @@ BOOL LSParseCoordinatePair(NSString *text, CLLocationCoordinate2D *coordinate) {
     });
     NSRange whole = NSMakeRange(0, text.length);
     NSTextCheckingResult *match = [spaced firstMatchInString:text options:0 range:whole] ?: [compact firstMatchInString:text options:0 range:whole];
-    if (!match) return NO;
+    if (!match) return LSParseAnglePair(text, coordinate);
     NSString *(^clean)(NSRange) = ^NSString *(NSRange range) {
         return [[text substringWithRange:range] stringByReplacingOccurrencesOfString:@"−" withString:@"-"];
     };
@@ -1207,11 +1389,14 @@ BOOL LSParseCoordinatePair(NSString *text, CLLocationCoordinate2D *coordinate) {
     return YES;
 }
 NSString *LSFormatDecimal(double value, NSUInteger fractionDigits) {
-    NSNumberFormatter *formatter = [[NSNumberFormatter alloc] init];
-    formatter.locale = NSLocale.currentLocale;
-    formatter.numberStyle = NSNumberFormatterDecimalStyle;
-    formatter.usesGroupingSeparator = NO;
-    formatter.maximumFractionDigits = fractionDigits;
+    NSNumberFormatter *formatter = LSCachedFormatter(@(fractionDigits), ^NSNumberFormatter *{
+        NSNumberFormatter *made = [[NSNumberFormatter alloc] init];
+        made.locale = NSLocale.currentLocale;
+        made.numberStyle = NSNumberFormatterDecimalStyle;
+        made.usesGroupingSeparator = NO;
+        made.maximumFractionDigits = fractionDigits;
+        return made;
+    });
     return [formatter stringFromNumber:@(value)] ?: @"";
 }
 NSString *LSCoordinateText(CLLocationCoordinate2D coordinate) {
@@ -1414,6 +1599,7 @@ static NSString *LSSymbolForSessionTitle(NSString *title) {
         _label.adjustsFontSizeToFitWidth = YES;
         _label.minimumScaleFactor = 0.8;
         [self ls_updateSymbolSize];
+        LSInstallLargeContentViewer(self);
         UIStackView *row = LSRow(@[_dot, _lsSymbolView, _label], 5);
         [self addSubview:row];
         // Width below required: the stack view collapses the dot to zero while a symbol shows.
@@ -1432,12 +1618,19 @@ static NSString *LSSymbolForSessionTitle(NSString *title) {
 }
 - (void)layoutSubviews {
     [super layoutSubviews];
-    self.layer.cornerRadius = self.bounds.size.height / 2;
+    // A capsule on one line; a rounded rectangle once the title wraps.
+    CGFloat height = self.bounds.size.height;
+    self.layer.cornerRadius = self.label.numberOfLines == 1 ? height / 2 : MIN(height / 2, 14);
 }
 - (void)traitCollectionDidChange:(UITraitCollection *)previous {
     [super traitCollectionDidChange:previous];
+    // At accessibility sizes the title wraps to two lines rather than shrinking out of reach.
+    BOOL large = UIContentSizeCategoryIsAccessibilityCategory(self.traitCollection.preferredContentSizeCategory);
+    self.label.numberOfLines = large ? 2 : 1;
+    self.label.adjustsFontSizeToFitWidth = !large;
     [self ls_updateSymbolSize];
     [self ls_updateEdge];
+    [self setNeedsLayout];
 }
 - (void)ls_updateSymbolSize {
     // Sized from the capped label font, so the symbol never outgrows the text.
@@ -1456,22 +1649,24 @@ static NSString *LSSymbolForSessionTitle(NSString *title) {
     [self setTitle:LSSessionTitle(mode) symbol:LSSessionSymbol(mode) color:LSSessionColor(mode) active:mode == LSSessionModeMoving];
 }
 - (void)setTitle:(NSString *)title symbol:(NSString *)symbol color:(UIColor *)color active:(BOOL)active {
-    // Called on every playback refresh. The pulse state is tracked explicitly: with Reduce
-    // Motion an active chip has no animation, which made every tick look like a change.
+    // Called on every playback refresh. Pulse state is tracked explicitly: with Reduce Motion an
+    // active chip has no animation, which made every tick look like a change.
     UIView *indicator = symbol ? self.lsSymbolView : self.dot;
-    BOOL wantsPulse = active && LSMapAnimationsEnabled();
-    // The system drops the pulse when the app is backgrounded; a refresh puts it back.
-    BOOL pulseLost = wantsPulse && ![indicator.layer animationForKey:@"pulse"];
+    BOOL motion = LSMapAnimationsEnabled();
+    BOOL wantsLoop = self.pulsesContinuously && active && motion;
+    // The system drops a looping pulse when the app is backgrounded; a refresh puts it back.
+    BOOL loopLost = wantsLoop && ![indicator.layer animationForKey:@"pulse"];
+    BOOL sameTitle = [title isEqualToString:self.label.text];
     BOOL sameSymbol = symbol == self.lsSymbol || [symbol isEqualToString:self.lsSymbol];
     BOOL sameColor = color == self.lsColor || [color isEqual:self.lsColor];
-    if (self.lsConfigured && [title isEqualToString:self.label.text] && sameSymbol && sameColor &&
-        active == self.lsActive && wantsPulse == self.lsPulsing && !pulseLost) return;
-    BOOL titleChanged = self.lsConfigured && ![title isEqualToString:self.label.text];
+    if (self.lsConfigured && sameTitle && sameSymbol && sameColor && active == self.lsActive && wantsLoop == self.lsPulsing && !loopLost) return;
+    BOOL titleChanged = self.lsConfigured && !sameTitle;
+    BOOL stateChanged = !self.lsConfigured || !sameTitle || !sameSymbol || active != self.lsActive;
     self.lsConfigured = YES;
     self.lsSymbol = symbol;
     self.lsColor = color;
     self.lsActive = active;
-    self.lsPulsing = wantsPulse;
+    self.lsPulsing = wantsLoop;
     // Label-coloured text stays at full contrast; the colour tints the symbol and wash.
     self.label.text = title;
     self.label.textColor = UIColor.labelColor;
@@ -1485,16 +1680,23 @@ static NSString *LSSymbolForSessionTitle(NSString *title) {
     // Denser than other washes: the chip is the "what is happening now" signal.
     self.backgroundColor = LSWash(color, 0.22, 0.32);
     self.accessibilityLabel = [NSString stringWithFormat:@"Status: %@", title];
+    self.largeContentTitle = title;
+    self.largeContentImage = symbol ? [UIImage systemImageNamed:symbol] : nil;
     [self ls_updateEdge];
-    [self.dot.layer removeAnimationForKey:@"pulse"];
-    [self.lsSymbolView.layer removeAnimationForKey:@"pulse"];
-    if (wantsPulse) {
+    // By default the indicator pulses twice when the state changes and then rests, so this chip,
+    // other chips and the map's own live markers never throb together through a playback.
+    BOOL pulseOnce = !self.pulsesContinuously && active && motion && stateChanged;
+    if (wantsLoop || pulseOnce || !active || stateChanged) {
+        [self.dot.layer removeAnimationForKey:@"pulse"];
+        [self.lsSymbolView.layer removeAnimationForKey:@"pulse"];
+    }
+    if (wantsLoop || pulseOnce) {
         CABasicAnimation *pulse = [CABasicAnimation animationWithKeyPath:@"opacity"];
         pulse.fromValue = @1.0;
         pulse.toValue = @0.3;
-        pulse.duration = 0.9;
+        pulse.duration = wantsLoop ? 0.9 : 0.45; // Two brisk beats, or the slower steady loop.
         pulse.autoreverses = YES;
-        pulse.repeatCount = HUGE_VALF;
+        pulse.repeatCount = wantsLoop ? HUGE_VALF : 2;
         pulse.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
         [indicator.layer addAnimation:pulse forKey:@"pulse"];
     }

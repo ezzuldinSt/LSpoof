@@ -66,13 +66,12 @@ static CGFloat LSRelativeVelocity(CGFloat velocity, CGFloat distance) {
     return MAX(-30, MIN(30, velocity / distance));
 }
 
+// Fill shades keep the white glyph and ring legible in both appearances.
 static UIColor *LSOpenerDiscColor(LSSessionMode mode) {
-    // The deeper light-appearance shades keep white glyphs legible in both appearances.
-    UITraitCollection *light = [UITraitCollection traitCollectionWithUserInterfaceStyle:UIUserInterfaceStyleLight];
     switch (mode) {
-        case LSSessionModeStatic: return [LSAccentColor() resolvedColorWithTraitCollection:light];
-        case LSSessionModeMoving: return [LSSuccessColor() resolvedColorWithTraitCollection:light];
-        case LSSessionModePaused: return [LSWarningColor() resolvedColorWithTraitCollection:light];
+        case LSSessionModeStatic: return LSFillColor(LSAccentColor());
+        case LSSessionModeMoving: return LSFillColor(LSSuccessColor());
+        case LSSessionModePaused: return LSFillColor(LSWarningColor());
         case LSSessionModeOff: break;
     }
     return UIColor.clearColor;
@@ -120,11 +119,20 @@ static NSString *LSOpenerSpeedText(void) {
 static NSString * _Nullable LSOpenerDuration(NSTimeInterval seconds, BOOL spoken) {
     if (!isfinite(seconds) || seconds <= 0) return nil;
     if (seconds < 60) return spoken ? @"under a minute" : @"under 1 min";
-    NSDateComponentsFormatter *formatter = [[NSDateComponentsFormatter alloc] init];
-    formatter.allowedUnits = NSCalendarUnitHour | NSCalendarUnitMinute;
-    formatter.maximumUnitCount = 2;
-    formatter.unitsStyle = spoken ? NSDateComponentsFormatterUnitsStyleFull : NSDateComponentsFormatterUnitsStyleAbbreviated;
-    return [formatter stringFromTimeInterval:seconds];
+    // Made once: the status is rebuilt for every menu open and VoiceOver query.
+    static NSDateComponentsFormatter *shortFormatter, *spokenFormatter;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        shortFormatter = [[NSDateComponentsFormatter alloc] init];
+        spokenFormatter = [[NSDateComponentsFormatter alloc] init];
+        for (NSDateComponentsFormatter *formatter in @[shortFormatter, spokenFormatter]) {
+            formatter.allowedUnits = NSCalendarUnitHour | NSCalendarUnitMinute;
+            formatter.maximumUnitCount = 2;
+        }
+        shortFormatter.unitsStyle = NSDateComponentsFormatterUnitsStyleAbbreviated;
+        spokenFormatter.unitsStyle = NSDateComponentsFormatterUnitsStyleFull;
+    });
+    return [spoken ? spokenFormatter : shortFormatter stringFromTimeInterval:seconds];
 }
 // What is happening now: the quick menu's header, or the button's VoiceOver value.
 static NSString *LSOpenerStatus(BOOL spoken) {
@@ -228,6 +236,10 @@ static NSString *LSOpenerStatus(BOOL spoken) {
 @property (nonatomic, strong) CAShapeLayer *progressLayer;
 @property (nonatomic, strong) UIImageView *glyph;
 @property (nonatomic, strong) UIImageView *tabGlyph;
+@property (nonatomic, strong) UIView *tabProgress;
+@property (nonatomic, strong) CAShapeLayer *tabTrackLayer;
+@property (nonatomic, strong) CAShapeLayer *tabProgressLayer;
+@property (nonatomic, strong, nullable) UIVisualEffectView *hintPointer;
 @property (nonatomic, strong) LSOpenerButton *button;
 @property (nonatomic, strong) UITapGestureRecognizer *tabTap;
 @property (nonatomic, strong, nullable) UIVisualEffectView *hint;
@@ -244,6 +256,7 @@ static NSString *LSOpenerStatus(BOOL spoken) {
 @property (nonatomic) NSUInteger snapGeneration;
 @property (nonatomic) NSUInteger visibilityGeneration;
 @property (nonatomic) BOOL dragging, lifted, pressed, dimmed, menuOpen, tucked, right, glassOn;
+@property (nonatomic) BOOL dragProjectedRight, dragInTuckZone, offFromQuickAction;
 @end
 
 @implementation LSOpenerViewController
@@ -335,6 +348,23 @@ static NSString *LSOpenerStatus(BOOL spoken) {
     tab.alpha = 0;
     [content addSubview:tab];
     self.tabGlyph = tab;
+    // Route progress along the exposed rim while tucked; its path follows the side.
+    UIView *tabProgress = [[UIView alloc] initWithFrame:bounds];
+    tabProgress.userInteractionEnabled = NO;
+    tabProgress.alpha = 0;
+    CAShapeLayer *tabTrack = [CAShapeLayer layer], *tabFill = [CAShapeLayer layer];
+    for (CAShapeLayer *layer in @[tabTrack, tabFill]) {
+        layer.frame = bounds;
+        layer.fillColor = nil;
+        layer.lineWidth = 3;
+        layer.lineCap = kCALineCapRound;
+        [tabProgress.layer addSublayer:layer];
+    }
+    tabFill.strokeEnd = 0;
+    [content addSubview:tabProgress];
+    self.tabProgress = tabProgress;
+    self.tabTrackLayer = tabTrack;
+    self.tabProgressLayer = tabFill;
 
     LSOpenerButton *button = [LSOpenerButton buttonWithType:UIButtonTypeCustom];
     button.frame = bounds;
@@ -434,7 +464,9 @@ static NSString *LSOpenerStatus(BOOL spoken) {
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     self.progressLayer.lineDashPattern = mode == LSSessionModePaused ? @[@0, @6] : nil;
+    self.tabProgressLayer.lineDashPattern = self.progressLayer.lineDashPattern;
     [CATransaction commit];
+    self.button.accessibilityTraits = mode == LSSessionModeMoving ? UIAccessibilityTraitButton | UIAccessibilityTraitUpdatesFrequently : UIAccessibilityTraitButton;
     if (route) {
         [self setRingHidden:NO];
         [self setRingProgress:LSOpenerRouteProgress() duration:animated ? 0.3 : 0];
@@ -454,11 +486,15 @@ static NSString *LSOpenerStatus(BOOL spoken) {
     [self updateTab];
     [self applyAppearance];
     [self updateHalo];
+    BOOL offerLast = self.offFromQuickAction && off && PersistenceManager.shared.hasStoredCoordinate;
+    if (changed) self.offFromQuickAction = NO;
     if (changed && animated) {
         [self wake];
         [self pop];
         if (arrived) LSHapticSuccess();
-        LSOpenerAnnounce(arrived ? @"Arrived. Holding location" : LSOpenerAnnouncement(mode));
+        NSString *message = arrived ? @"Arrived. Holding location" : LSOpenerAnnouncement(mode);
+        if (offerLast) message = @"Spoofing is off. Apply last location is in quick actions";
+        LSOpenerAnnounce(message);
     }
 }
 - (void)setRingHidden:(BOOL)hidden {
@@ -466,15 +502,17 @@ static NSString *LSOpenerStatus(BOOL spoken) {
     [CATransaction setDisableActions:YES];
     self.trackLayer.hidden = hidden;
     self.progressLayer.hidden = hidden;
-    if (hidden) self.progressLayer.strokeEnd = 0;
+    if (hidden) self.progressLayer.strokeEnd = self.tabProgressLayer.strokeEnd = 0;
     [CATransaction commit];
 }
 - (void)setRingProgress:(double)progress duration:(NSTimeInterval)duration {
     [CATransaction begin];
-    [CATransaction setDisableActions:duration <= 0];
+    [CATransaction setDisableActions:duration <= 0 || !LSMapAnimationsEnabled()];
     [CATransaction setAnimationDuration:duration];
     [CATransaction setAnimationTimingFunction:[CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionLinear]];
-    self.progressLayer.strokeEnd = MAX(0, MIN(1, progress));
+    CGFloat value = MAX(0, MIN(1, progress));
+    self.progressLayer.strokeEnd = value;
+    self.tabProgressLayer.strokeEnd = value;
     [CATransaction commit];
 }
 // Turns the arrow by the short way round; the layer's angle keeps accumulating so a
@@ -517,10 +555,6 @@ static NSString *LSOpenerStatus(BOOL spoken) {
         return;
     }
     if ([halo animationForKey:@"breathe"]) return;
-    [CATransaction begin];
-    [CATransaction setDisableActions:YES];
-    halo.backgroundColor = LSOpenerDiscColor(LSSessionModeMoving).CGColor;
-    [CATransaction commit];
     CABasicAnimation *grow = [CABasicAnimation animationWithKeyPath:@"transform.scale"];
     grow.fromValue = @1.0;
     grow.toValue = @1.32;
@@ -540,6 +574,19 @@ static NSString *LSOpenerStatus(BOOL spoken) {
     NSString *name = LSDifferentiateWithoutColor() ? LSOpenerSymbol(mode) : (self.right ? @"chevron.compact.left" : @"chevron.compact.right");
     self.tabGlyph.image = [UIImage systemImageNamed:name] ?: [UIImage systemImageNamed:self.right ? @"chevron.left" : @"chevron.right"];
     self.tabGlyph.tintColor = mode == LSSessionModeOff ? UIColor.secondaryLabelColor : LSSessionColor(mode);
+    // Top to bottom along whichever half of the rim stays on screen.
+    CGFloat c = kLSOpenerSize / 2, spread = 80 * M_PI / 180;
+    UIBezierPath *arc = self.right
+        ? [UIBezierPath bezierPathWithArcCenter:CGPointMake(c, c) radius:c - 4 startAngle:M_PI + M_PI_2 - (M_PI_2 - spread) endAngle:M_PI_2 + (M_PI_2 - spread) clockwise:NO]
+        : [UIBezierPath bezierPathWithArcCenter:CGPointMake(c, c) radius:c - 4 startAngle:-spread endAngle:spread clockwise:YES];
+    UITraitCollection *traits = self.traitCollection;
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    self.tabTrackLayer.path = arc.CGPath;
+    self.tabProgressLayer.path = arc.CGPath;
+    self.tabTrackLayer.strokeColor = [[UIColor.labelColor colorWithAlphaComponent:LSIncreaseContrast() ? 0.3 : 0.15] resolvedColorWithTraitCollection:traits].CGColor;
+    self.tabProgressLayer.strokeColor = [LSSessionColor(mode) resolvedColorWithTraitCollection:traits].CGColor;
+    [CATransaction commit];
 }
 
 // MARK: Chrome (glass, ghost, lift, tuck)
@@ -558,6 +605,7 @@ static NSString *LSOpenerStatus(BOOL spoken) {
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     self.trackLayer.strokeColor = [UIColor colorWithWhite:1 alpha:contrast ? 0.5 : 0.3].CGColor;
+    self.halo.backgroundColor = [LSOpenerDiscColor(LSSessionModeMoving) resolvedColorWithTraitCollection:self.traitCollection].CGColor;
     [CATransaction commit];
     [self applyChromeValues];
 }
@@ -577,7 +625,8 @@ static NSString *LSOpenerStatus(BOOL spoken) {
     if (self.lifted && !motion) alpha = 0.7;
     self.content.alpha = self.leaving ? 0 : alpha;
     CGFloat scale = 1;
-    if (self.leaving) scale = motion ? 0.6 : 1;
+    // Leaving, it swells a touch as it fades, as if lifting into the rising sheet.
+    if (self.leaving) scale = motion ? 1.08 : 1;
     else if (self.lifted) scale = motion ? 1.1 : 1;
     else if (self.pressed) scale = LSLiquidGlassAvailable() ? 1 : 0.92; // Liquid Glass answers presses itself.
     else if (ghost) scale = 0.88;
@@ -587,6 +636,8 @@ static NSString *LSOpenerStatus(BOOL spoken) {
 
     self.face.alpha = self.tucked ? 0 : 1;
     self.tabGlyph.alpha = self.tucked ? 1 : 0;
+    BOOL route = self.shownMode == LSSessionModeMoving || self.shownMode == LSSessionModePaused;
+    self.tabProgress.alpha = self.tucked && route ? 1 : 0;
     CGFloat offset = (kLSOpenerSize - kLSOpenerTabWidth) / 2;
     self.tabGlyph.center = CGPointMake(kLSOpenerSize / 2 + (self.right ? -offset : offset), kLSOpenerSize / 2);
     CGFloat reach = 44 - kLSOpenerTabWidth;
@@ -691,14 +742,14 @@ static NSString *LSOpenerStatus(BOOL spoken) {
     self.dimTimer = nil;
     [self.halo removeAnimationForKey:@"breathe"];
 }
-// Shrinks into its spot just before the picker sheet rises, then the window hides.
+// Fades out just before the picker sheet rises, then the window hides.
 - (void)leaveWithCompletion:(dispatch_block_t)completion {
     [self openerWillHide];
     self.leaving = YES;
     self.view.userInteractionEnabled = NO;
     NSUInteger generation = self.visibilityGeneration;
     [self updateShadowAnimated:YES];
-    [UIView animateWithDuration:0.16 delay:0 options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionCurveEaseIn animations:^{
+    [UIView animateWithDuration:0.18 delay:0 options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionCurveEaseOut animations:^{
         [self applyChromeValues];
     } completion:^(__unused BOOL finished) {
         if (self.visibilityGeneration == generation && self.leaving && completion) completion();
@@ -814,8 +865,11 @@ static NSString *LSOpenerStatus(BOOL spoken) {
             self.dimTimer = nil;
             self.dimmed = NO;
             self.lifted = YES;
+            self.dragProjectedRight = self.right;
+            self.dragInTuckZone = self.tucked;
             // The face shows while held, even when it was tucked.
             self.tucked = NO;
+            LSHapticPrepare();
             LSHapticImpact(UIImpactFeedbackStyleLight);
             [self animateChrome];
             break;
@@ -826,6 +880,7 @@ static NSString *LSOpenerStatus(BOOL spoken) {
             CGFloat minX = [self xOnRight:NO tucked:YES dock:dock], maxX = [self xOnRight:YES tucked:YES dock:dock];
             self.container.center = CGPointMake(LSRubberBand(self.dragOrigin.x + translation.x, minX, maxX, kLSOpenerSize),
                                                 LSRubberBand(self.dragOrigin.y + translation.y, CGRectGetMinY(dock), CGRectGetMaxY(dock), 2 * kLSOpenerSize));
+            [self dragFeedbackInDock:dock velocity:[pan velocityInView:self.view]];
             break;
         }
         case UIGestureRecognizerStateEnded:
@@ -857,6 +912,24 @@ static NSString *LSOpenerStatus(BOOL spoken) {
         }
         default:
             break;
+    }
+}
+// Felt while dragging: a soft bump on entering or leaving the tuck zone at either edge, and
+// a tick each time the side it would land on flips (with a little hysteresis at the middle).
+- (void)dragFeedbackInDock:(CGRect)dock velocity:(CGPoint)velocity {
+    CGFloat x = self.container.center.x, mid = CGRectGetMidX(dock);
+    CGFloat leftZone = (CGRectGetMinX(dock) + [self xOnRight:NO tucked:YES dock:dock]) / 2;
+    CGFloat rightZone = (CGRectGetMaxX(dock) + [self xOnRight:YES tucked:YES dock:dock]) / 2;
+    BOOL zone = x < leftZone || x > rightZone;
+    if (zone != self.dragInTuckZone) {
+        self.dragInTuckZone = zone;
+        LSHapticImpact(UIImpactFeedbackStyleSoft);
+    }
+    if (zone) { self.dragProjectedRight = x > mid; return; }
+    CGFloat projected = x + LSProjectedDistance(velocity.x);
+    if (self.dragProjectedRight ? projected < mid - 12 : projected > mid + 12) {
+        self.dragProjectedRight = !self.dragProjectedRight;
+        LSHapticSelection();
     }
 }
 // Springs to a docked or tucked spot, carrying the throw's velocity, and remembers it.
@@ -948,16 +1021,27 @@ static NSString *LSOpenerStatus(BOOL spoken) {
     self.hintEffect = hint.effect;
     self.hint = hint;
     self.hintLabel = label;
+    // A small glass dot in the gap, level with the opener's centre, points the bubble at it.
+    // It is separate rather than joined so two glass layers never overlap.
+    UIVisualEffectView *pointer = LSGlassView(4, NO);
+    pointer.translatesAutoresizingMaskIntoConstraints = YES;
+    pointer.userInteractionEnabled = NO;
+    pointer.accessibilityElementsHidden = YES;
+    pointer.bounds = CGRectMake(0, 0, 8, 8);
+    self.hintPointer = pointer;
     [self.view insertSubview:hint belowSubview:self.container];
+    [self.view insertSubview:pointer belowSubview:self.container];
     [self layoutHint];
     if (!self.hint) return;
     hint.effect = nil;
+    pointer.effect = nil;
     label.alpha = 0;
     CGFloat shift = self.right ? 12 : -12;
     if (LSMapAnimationsEnabled()) hint.transform = CGAffineTransformMakeTranslation(shift, 0);
-    UIVisualEffect *effect = self.hintEffect;
+    UIVisualEffect *effect = self.hintEffect, *pointerEffect = self.hintEffect;
     LSAnimate(^{
         hint.effect = effect;
+        pointer.effect = pointerEffect;
         hint.transform = CGAffineTransformIdentity;
         label.alpha = 1;
     }, nil);
@@ -976,7 +1060,7 @@ static NSString *LSOpenerStatus(BOOL spoken) {
     if (!hint || !label) return;
     CGRect safe = [self safeRect];
     CGPoint center = self.container.center;
-    CGFloat gap = 10, padX = 14, padY = 10;
+    CGFloat gap = 18, padX = 14, padY = 10;
     // Beside the opener, on the side facing the screen.
     CGFloat edge = self.right ? center.x - kLSOpenerSize / 2 - gap : center.x + kLSOpenerSize / 2 + gap;
     CGFloat available = self.right ? edge - CGRectGetMinX(safe) - 12 : CGRectGetMaxX(safe) - 12 - edge;
@@ -988,19 +1072,27 @@ static NSString *LSOpenerStatus(BOOL spoken) {
     CGFloat y = MAX(CGRectGetMinY(safe) + 8, MIN(CGRectGetMaxY(safe) - 8 - height, center.y - height / 2));
     hint.bounds = CGRectMake(0, 0, width, height);
     hint.center = CGPointMake(x + width / 2, y + height / 2);
-    hint.layer.cornerRadius = MIN(LSRadiusM, height / 2);
+    CGFloat radius = MIN(LSRadiusM, height / 2);
+    hint.layer.cornerRadius = radius;
     label.frame = CGRectMake(padX, padY, width - 2 * padX, height - 2 * padY);
+    CGFloat inner = self.right ? center.x - kLSOpenerSize / 2 : center.x + kLSOpenerSize / 2;
+    self.hintPointer.center = CGPointMake((inner + edge) / 2, MAX(y + radius, MIN(y + height - radius, center.y)));
 }
 - (void)dismissHint {
-    UIVisualEffectView *hint = self.hint;
+    UIVisualEffectView *hint = self.hint, *pointer = self.hintPointer;
     UILabel *label = self.hintLabel;
     if (!hint) return;
     self.hint = nil;
     self.hintLabel = nil;
+    self.hintPointer = nil;
     [UIView animateWithDuration:0.25 delay:0 options:UIViewAnimationOptionBeginFromCurrentState animations:^{
         hint.effect = nil;
+        pointer.effect = nil;
         label.alpha = 0;
-    } completion:^(__unused BOOL finished) { [hint removeFromSuperview]; }];
+    } completion:^(__unused BOOL finished) {
+        [hint removeFromSuperview];
+        [pointer removeFromSuperview];
+    }];
     [self scheduleDim];
 }
 
@@ -1102,6 +1194,8 @@ static NSString *LSOpenerStatus(BOOL spoken) {
     else { LSHapticError(); LSOpenerAnnounce(@"Couldn't apply the last location"); }
 }
 - (void)turnOff {
+    // The state change then says that Apply last location can bring it back.
+    self.offFromQuickAction = YES;
     [LSSessionController.shared disable];
     LSHapticImpact(UIImpactFeedbackStyleMedium);
 }

@@ -112,19 +112,20 @@ static BOOL LSCombineAngles(LSAngle first, LSAngle second, CLLocationCoordinate2
 // Decimal pairs, decimal-comma pairs, and degrees/minutes/seconds with or without N/S/E/W.
 static BOOL LSParseCoordinateText(NSString *text, CLLocationCoordinate2D *coordinate, LSCoordinateNotation *notation) {
     if (!text.length || text.length > 160) return NO;
+    // The labelled grammar goes first so the status names the notation that was read; the
+    // shared pair parser (which also reads some DMS) only handles what this one leaves.
     NSString *normalized = LSNormalizedCoordinateText(text);
-    CLLocationCoordinate2D pair;
-    if (LSParseCoordinatePair(text, &pair) || LSParseCoordinatePair(normalized, &pair)) {
-        if (coordinate) *coordinate = pair;
-        if (notation) *notation = LSCoordinateNotationDecimal;
-        return YES;
-    }
     LSPrepareAngleExpressions();
     NSRange whole = NSMakeRange(0, normalized.length);
     NSTextCheckingResult *match = [LSTrailingPair firstMatchInString:normalized options:0 range:whole];
     if (match && LSCombineAngles(LSReadAngle(match, normalized, 1, 2, 8), LSReadAngle(match, normalized, 9, 10, 16), coordinate, notation)) return YES;
     match = [LSLeadingPair firstMatchInString:normalized options:0 range:whole];
-    return match && LSCombineAngles(LSReadAngle(match, normalized, 2, 3, 1), LSReadAngle(match, normalized, 10, 11, 9), coordinate, notation);
+    if (match && LSCombineAngles(LSReadAngle(match, normalized, 2, 3, 1), LSReadAngle(match, normalized, 10, 11, 9), coordinate, notation)) return YES;
+    CLLocationCoordinate2D pair;
+    if (!LSParseCoordinatePair(text, &pair) && !LSParseCoordinatePair(normalized, &pair)) return NO;
+    if (coordinate) *coordinate = pair;
+    if (notation) *notation = LSCoordinateNotationDecimal;
+    return YES;
 }
 
 // One value pasted into Latitude or Longitude, such as 48°51'29.6"N. A bare number is
@@ -224,12 +225,73 @@ static NSString *LSMapAppName(LSMapApp app) {
     }
     return @"map";
 }
-static UIFont *LSRoundedDigitsFont(UIFontTextStyle style, CGFloat size, UIFontWeight weight, CGFloat maximum) {
-    UIFont *base = [UIFont monospacedDigitSystemFontOfSize:size weight:weight];
-    UIFontDescriptor *rounded = [base.fontDescriptor fontDescriptorWithDesign:UIFontDescriptorSystemDesignRounded];
-    UIFont *font = rounded ? [UIFont fontWithDescriptor:rounded size:size] : base;
-    return [[UIFontMetrics metricsForTextStyle:style] scaledFontForFont:font maximumPointSize:maximum];
+// "Moved 12 m north-east": distance in the user's units and the nearest of eight directions.
+static NSString *LSMoveText(CLLocationCoordinate2D from, CLLocationCoordinate2D to) {
+    CLLocationDistance distance = LSDistanceBetween(from, to);
+    if (distance == CLLocationDistanceMax) return nil;
+    MKDistanceFormatter *formatter = [[MKDistanceFormatter alloc] init];
+    formatter.unitStyle = MKDistanceFormatterUnitStyleAbbreviated;
+    if (distance < 1) return [NSString stringWithFormat:@"Moved less than %@", [formatter stringFromDistance:1]];
+    double phi1 = from.latitude * M_PI / 180, phi2 = to.latitude * M_PI / 180, dLambda = (to.longitude - from.longitude) * M_PI / 180;
+    double bearing = atan2(sin(dLambda) * cos(phi2), cos(phi1) * sin(phi2) - sin(phi1) * cos(phi2) * cos(dLambda)) * 180 / M_PI;
+    static NSArray<NSString *> *names;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ names = @[@"north", @"north-east", @"east", @"south-east", @"south", @"south-west", @"west", @"north-west"]; });
+    long index = lround(fmod(bearing + 360, 360) / 45) % 8;
+    return [NSString stringWithFormat:@"Moved %@ %@", [formatter stringFromDistance:distance], names[(NSUInteger)index]];
 }
+
+// Floating button that lets touches beside it reach the content underneath.
+@interface LSPassThroughView : UIView
+@end
+@implementation LSPassThroughView
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    UIView *hit = [super hitTest:point withEvent:event];
+    return hit == self ? nil : hit;
+}
+@end
+
+// Keeps a glass child a true capsule (and its shadow matching) at any height: the button
+// inside grows with Dynamic Type and its subtitle.
+@interface LSCapsuleView : UIView
+@property (nonatomic, weak) UIView *rounded;
+@end
+@implementation LSCapsuleView
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    CGFloat radius = CGRectGetHeight(self.bounds) / 2;
+    if (radius <= 0) return;
+    self.rounded.layer.cornerRadius = radius;
+    self.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:self.bounds cornerRadius:radius].CGPath;
+}
+@end
+
+// Soft fade from clear to the screen background behind the floating action.
+@interface LSFadeView : UIView
+@end
+@implementation LSFadeView
++ (Class)layerClass { return CAGradientLayer.class; }
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (!self) return nil;
+    self.translatesAutoresizingMaskIntoConstraints = NO;
+    self.userInteractionEnabled = NO;
+    [self updateColors];
+    return self;
+}
+- (void)updateColors {
+    UIColor *base = [UIColor.systemGroupedBackgroundColor resolvedColorWithTraitCollection:self.traitCollection];
+    CGFloat solid = LSReduceTransparency() ? 1 : 0.94;
+    CAGradientLayer *gradient = (CAGradientLayer *)self.layer;
+    gradient.colors = @[(id)[base colorWithAlphaComponent:0].CGColor, (id)[base colorWithAlphaComponent:solid].CGColor, (id)[base colorWithAlphaComponent:solid].CGColor];
+    gradient.locations = @[@0, @0.55, @1];
+}
+- (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
+    [super traitCollectionDidChange:previousTraitCollection];
+    [self updateColors];
+}
+@end
+
 
 #pragma mark - Inline status line
 
@@ -305,7 +367,7 @@ typedef NS_ENUM(NSInteger, LSReadoutState) { LSReadoutStateNone = -1, LSReadoutS
 // The "drag the map" hint shows until the first drag in this app session.
 static BOOL LSMapDragTaught;
 
-@interface LSCoordinateEntryController () <UITextFieldDelegate, MKMapViewDelegate, UIScrollViewDelegate, UIGestureRecognizerDelegate>
+@interface LSCoordinateEntryController () <UITextFieldDelegate, MKMapViewDelegate, UIGestureRecognizerDelegate>
 @property (nonatomic, strong) UIView *mapCard;
 @property (nonatomic, strong) UIView *mapContainer;
 @property (nonatomic, strong) MKMapView *map;
@@ -336,12 +398,18 @@ static BOOL LSMapDragTaught;
 @property (nonatomic, strong) LSEntryStatusView *latitudeStatus;
 @property (nonatomic, strong) LSEntryStatusView *longitudeStatus;
 @property (nonatomic, strong) UIView *footer;
-@property (nonatomic, strong) UIView *footerSeparator;
+@property (nonatomic, strong) UIVisualEffectView *footerGlass;
+@property (nonatomic, strong) UIView *footerCapsule;
+@property (nonatomic, strong) UIButton *clipboardButton;
+@property (nonatomic) BOOL dragHintAllowed;
+@property (nonatomic) CLLocationCoordinate2D dragStartCoordinate;
+@property (nonatomic, copy) NSString *moveNote;
+@property (nonatomic) NSUInteger moveNoteToken;
+@property (nonatomic, copy) NSString *announcementPrefix;
+@property (nonatomic) NSInteger readoutActionsSignature;
 @property (nonatomic, strong) UIButton *chooseButton;
 @property (nonatomic, strong) UIColor *fieldBaseColor;
 @property (nonatomic, strong) UIColor *smartBaseColor;
-@property (nonatomic) CGFloat fieldBaseBorderWidth;
-@property (nonatomic, strong) UIColor *fieldBaseBorderColor; // Retained: a bare CGColorRef from the layer could be freed.
 @property (nonatomic, strong) UIFont *nameFont;
 @property (nonatomic, strong) UIFont *coordinateFont;
 @property (nonatomic) BOOL choosing;
@@ -390,6 +458,9 @@ static BOOL LSMapDragTaught;
         _linkCoordinate = kCLLocationCoordinate2DInvalid;
         _resolvedCoordinate = kCLLocationCoordinate2DInvalid;
         _readoutState = LSReadoutStateNone;
+        _readoutActionsSignature = -1;
+        _dragHintAllowed = YES;
+        _dragStartCoordinate = kCLLocationCoordinate2DInvalid;
     }
     return self;
 }
@@ -547,7 +618,30 @@ static BOOL LSMapDragTaught;
     [self.undoButton setContentCompressionResistancePriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
     [self.undoButton addTarget:self action:@selector(undoLastChange) forControlEvents:UIControlEventTouchUpInside];
     LSAddPressFeedback(self.undoButton);
-    self.readoutRow = LSRow(@[self.readoutIcon, texts, self.undoButton], LSSpaceM);
+    UIButtonConfiguration *copyConfig = UIButtonConfiguration.plainButtonConfiguration;
+    copyConfig.image = [UIImage systemImageNamed:@"doc.on.doc"];
+    copyConfig.preferredSymbolConfigurationForImage = [UIImageSymbolConfiguration configurationWithTextStyle:UIFontTextStyleBody scale:UIImageSymbolScaleMedium];
+    copyConfig.baseForegroundColor = LSAccentTextColor();
+    copyConfig.contentInsets = NSDirectionalEdgeInsetsMake(10, 10, 10, 10);
+    self.clipboardButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    self.clipboardButton.configuration = copyConfig;
+    self.clipboardButton.translatesAutoresizingMaskIntoConstraints = NO;
+    self.clipboardButton.accessibilityLabel = @"Copy coordinates";
+    self.clipboardButton.largeContentTitle = @"Copy coordinates";
+    self.clipboardButton.showsLargeContentViewer = YES;
+    [self.clipboardButton addInteraction:[[UILargeContentViewerInteraction alloc] init]];
+    self.clipboardButton.hidden = YES;
+    NSLayoutConstraint *copyWidth = [self.clipboardButton.widthAnchor constraintGreaterThanOrEqualToConstant:44];
+    NSLayoutConstraint *copyHeight = [self.clipboardButton.heightAnchor constraintGreaterThanOrEqualToConstant:44];
+    copyWidth.priority = 999; copyHeight.priority = 999; // Hidden arranged subviews get zero-size constraints.
+    [NSLayoutConstraint activateConstraints:@[copyWidth, copyHeight]];
+    [self.clipboardButton setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+    [self.clipboardButton setContentCompressionResistancePriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+    [self.clipboardButton addTarget:self action:@selector(putCoordinatesOnClipboard) forControlEvents:UIControlEventTouchUpInside];
+    LSAddPressFeedback(self.clipboardButton);
+    UIStackView *readoutActions = LSRow(@[self.undoButton, self.clipboardButton], LSSpaceXS);
+    [readoutActions setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+    self.readoutRow = LSRow(@[self.readoutIcon, texts, readoutActions], LSSpaceM);
     self.readoutRow.layoutMargins = UIEdgeInsetsMake(LSSpaceM, LSSpaceL, LSSpaceM, LSSpaceM);
     self.readoutRow.layoutMarginsRelativeArrangement = YES;
 
@@ -650,7 +744,6 @@ static UIView *LSEntryHeader(NSString *text) {
     self.scroll.translatesAutoresizingMaskIntoConstraints = NO;
     self.scroll.keyboardDismissMode = UIScrollViewKeyboardDismissModeInteractive;
     self.scroll.alwaysBounceVertical = YES;
-    self.scroll.delegate = self;
     [self.view addSubview:self.scroll];
 
     // One field that reads whatever was copied; the precise fields below stay editable.
@@ -701,9 +794,6 @@ static UIView *LSEntryHeader(NSString *text) {
     self.latitudeField = LSNumberField(@"Latitude");
     self.longitudeField = LSNumberField(@"Longitude");
     self.fieldBaseColor = self.latitudeField.backgroundColor;
-    self.fieldBaseBorderWidth = self.latitudeField.layer.borderWidth;
-    CGColorRef border = self.latitudeField.layer.borderColor;
-    self.fieldBaseBorderColor = border ? [UIColor colorWithCGColor:border] : nil;
     // Big tabular digits: the numbers are the point of this screen.
     UIFont *valueFont = [[UIFontMetrics metricsForTextStyle:UIFontTextStyleTitle3] scaledFontForFont:[UIFont monospacedDigitSystemFontOfSize:20 weight:UIFontWeightMedium] maximumPointSize:40];
     for (UITextField *field in @[self.latitudeField, self.longitudeField]) {
@@ -741,35 +831,51 @@ static UIView *LSEntryHeader(NSString *text) {
 }
 
 - (void)buildFooter {
-    // Glass bar riding the keyboard, so the action stays in reach while typing.
-    UIVisualEffectView *glass = LSGlassView(0, NO);
-    glass.userInteractionEnabled = NO;
-    [self.view addSubview:glass];
-    self.footer = [[UIView alloc] init];
+    // A floating glass capsule riding the keyboard, so the action stays in reach while typing;
+    // the content fades out beneath it instead of being cut by a bar.
+    LSFadeView *fade = [[LSFadeView alloc] init];
+    [self.view addSubview:fade];
+    self.footer = [[LSPassThroughView alloc] init];
     self.footer.translatesAutoresizingMaskIntoConstraints = NO;
     [self.view addSubview:self.footer];
-    self.footerSeparator = LSSeparator();
-    self.footerSeparator.alpha = 0;
-    [self.footer addSubview:self.footerSeparator];
+    LSCapsuleView *capsule = [[LSCapsuleView alloc] init];
+    self.footerCapsule = capsule;
+    self.footerCapsule.translatesAutoresizingMaskIntoConstraints = NO;
+    self.footerCapsule.layer.shadowColor = UIColor.blackColor.CGColor;
+    self.footerCapsule.layer.shadowOpacity = LSLiquidGlassAvailable() ? 0.08 : 0.16; // Liquid Glass draws its own depth.
+    self.footerCapsule.layer.shadowRadius = 16;
+    self.footerCapsule.layer.shadowOffset = CGSizeMake(0, 6);
+    self.footerGlass = LSGlassView(LSRadiusL, NO);
+    capsule.rounded = self.footerGlass;
+    [self.footerCapsule addSubview:self.footerGlass];
+    [self.footer addSubview:self.footerCapsule];
     self.chooseButton = LSButton(@"Use this spot", @"mappin.and.ellipse", YES);
     UIButtonConfiguration *config = self.chooseButton.configuration;
     config.titleAlignment = UIButtonConfigurationTitleAlignmentCenter;
+    config.cornerStyle = UIButtonConfigurationCornerStyleCapsule; // Concentric with the glass around it.
     self.chooseButton.configuration = config;
+    self.chooseButton.layer.shadowOpacity = 0; // The capsule casts the shadow.
     [self.chooseButton addTarget:self action:@selector(choose) forControlEvents:UIControlEventTouchUpInside];
     LSAddPressFeedback(self.chooseButton);
-    [self.footer addSubview:self.chooseButton];
+    [self.footerGlass.contentView addSubview:self.chooseButton];
+    const CGFloat ring = 6;
     [NSLayoutConstraint activateConstraints:@[
-        [glass.topAnchor constraintEqualToAnchor:self.footer.topAnchor],
-        [glass.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
-        [glass.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
-        [glass.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
-        [self.footerSeparator.topAnchor constraintEqualToAnchor:self.footer.topAnchor],
-        [self.footerSeparator.leadingAnchor constraintEqualToAnchor:self.footer.leadingAnchor],
-        [self.footerSeparator.trailingAnchor constraintEqualToAnchor:self.footer.trailingAnchor],
-        [self.chooseButton.topAnchor constraintEqualToAnchor:self.footer.topAnchor constant:LSSpaceM],
-        [self.chooseButton.bottomAnchor constraintEqualToAnchor:self.footer.bottomAnchor constant:-LSSpaceS],
-        [self.chooseButton.leadingAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.leadingAnchor constant:LSSpaceL],
-        [self.chooseButton.trailingAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.trailingAnchor constant:-LSSpaceL]
+        [fade.topAnchor constraintEqualToAnchor:self.footer.topAnchor constant:-LSSpaceXL],
+        [fade.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [fade.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [fade.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
+        [self.footerCapsule.topAnchor constraintEqualToAnchor:self.footer.topAnchor constant:LSSpaceS],
+        [self.footerCapsule.bottomAnchor constraintEqualToAnchor:self.footer.bottomAnchor constant:-LSSpaceS],
+        [self.footerCapsule.leadingAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.leadingAnchor constant:LSSpaceL],
+        [self.footerCapsule.trailingAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.trailingAnchor constant:-LSSpaceL],
+        [self.footerGlass.topAnchor constraintEqualToAnchor:self.footerCapsule.topAnchor],
+        [self.footerGlass.leadingAnchor constraintEqualToAnchor:self.footerCapsule.leadingAnchor],
+        [self.footerGlass.trailingAnchor constraintEqualToAnchor:self.footerCapsule.trailingAnchor],
+        [self.footerGlass.bottomAnchor constraintEqualToAnchor:self.footerCapsule.bottomAnchor],
+        [self.chooseButton.topAnchor constraintEqualToAnchor:self.footerGlass.contentView.topAnchor constant:ring],
+        [self.chooseButton.bottomAnchor constraintEqualToAnchor:self.footerGlass.contentView.bottomAnchor constant:-ring],
+        [self.chooseButton.leadingAnchor constraintEqualToAnchor:self.footerGlass.contentView.leadingAnchor constant:ring],
+        [self.chooseButton.trailingAnchor constraintEqualToAnchor:self.footerGlass.contentView.trailingAnchor constant:-ring]
     ]];
 }
 
@@ -822,7 +928,6 @@ static UIView *LSEntryHeader(NSString *text) {
         self.keyboardVisible = keyboard;
         [self refreshChooseButton];
     }
-    [self updateFooterSeparator];
     CGSize size = self.scroll.bounds.size;
     if (CGSizeEqualToSize(size, self.previousScrollSize)) return;
     self.previousScrollSize = size;
@@ -840,9 +945,16 @@ static UIView *LSEntryHeader(NSString *text) {
 - (void)applyTraitDependentLayout {
     BOOL large = UIContentSizeCategoryIsAccessibilityCategory(self.traitCollection.preferredContentSizeCategory);
     self.nameFont = LSFont(UIFontTextStyleSubheadline, UIFontWeightSemibold, 26);
-    self.coordinateFont = LSRoundedDigitsFont(UIFontTextStyleSubheadline, 15, UIFontWeightSemibold, 26);
+    self.coordinateFont = LSNumberFont(UIFontTextStyleSubheadline, UIFontWeightSemibold, 26);
     if (self.readoutState != LSReadoutStateNone) self.readoutTitle.font = self.readoutState == LSReadoutStateNamed || self.readoutState == LSReadoutStateEmpty ? self.nameFont : self.coordinateFont;
     self.smartRow.axis = large ? UILayoutConstraintAxisVertical : UILayoutConstraintAxisHorizontal;
+    // At accessibility sizes the Undo and Copy actions move under the text instead of squeezing it.
+    self.readoutRow.axis = large ? UILayoutConstraintAxisVertical : UILayoutConstraintAxisHorizontal;
+    self.readoutRow.alignment = large ? UIStackViewAlignmentLeading : UIStackViewAlignmentCenter;
+    // The one-line drag hint would cover the pin at those sizes; the readout's actions remain.
+    self.dragHintAllowed = !large;
+    if (!self.dragHintAllowed) self.dragHint.alpha = 0;
+    else if (self.mapShowsPreview && !LSMapDragTaught) self.dragHint.alpha = 1;
     // Deactivate before activating so the two limits never apply together.
     if (large) { self.mapLimit.active = NO; self.mapLimitLarge.active = YES; }
     else { self.mapLimitLarge.active = NO; self.mapLimit.active = YES; }
@@ -850,17 +962,6 @@ static UIView *LSEntryHeader(NSString *text) {
     self.mapCard.layer.borderWidth = contrast ? 1 : 0;
     self.mapCard.layer.borderColor = [UIColor.separatorColor resolvedColorWithTraitCollection:self.traitCollection].CGColor;
     self.mapDim.backgroundColor = [UIColor.systemBackgroundColor colorWithAlphaComponent:contrast ? 0.7 : 0.5];
-    [self applyErrorBorder:self.latitudeField];
-    [self applyErrorBorder:self.longitudeField];
-}
-- (void)updateFooterSeparator {
-    UIScrollView *scroll = self.scroll;
-    BOOL contentBelow = scroll.contentOffset.y + CGRectGetHeight(scroll.bounds) - scroll.contentInset.bottom < scroll.contentSize.height - 1;
-    CGFloat alpha = contentBelow ? 1 : 0;
-    if (self.footerSeparator.alpha != alpha) self.footerSeparator.alpha = alpha;
-}
-- (void)scrollViewDidScroll:(UIScrollView *)scrollView {
-    if (scrollView == self.scroll) [self updateFooterSeparator];
 }
 - (UITextField *)focusedField {
     for (UITextField *field in @[self.smartField, self.latitudeField, self.longitudeField]) if (field.isFirstResponder) return field;
@@ -906,17 +1007,7 @@ static UIView *LSEntryHeader(NSString *text) {
     BOOL error = status.tone == LSEntryToneError;
     field.accessibilityLabel = error ? [NSString stringWithFormat:@"%@, error: %@", name, status.label.text] : name;
     field.accessibilityHint = status.tone == LSEntryToneSuccess ? [NSString stringWithFormat:@"%@. %@", status.label.accessibilityLabel, range] : range;
-    [self applyErrorBorder:field];
-}
-- (void)applyErrorBorder:(UITextField *)field {
-    LSEntryStatusView *status = field == self.latitudeField ? self.latitudeStatus : self.longitudeStatus;
-    if (status.tone == LSEntryToneError) {
-        field.layer.borderWidth = 1.5;
-        field.layer.borderColor = [LSErrorColor() resolvedColorWithTraitCollection:self.traitCollection].CGColor;
-    } else {
-        field.layer.borderWidth = self.fieldBaseBorderWidth;
-        field.layer.borderColor = self.fieldBaseBorderColor.CGColor;
-    }
+    LSSetFieldInvalid(field, error); // The shared field owns its focus and error ring.
 }
 - (BOOL)validate:(UITextField *)field {
     NSNumber *value = [self valueForField:field];
@@ -1004,6 +1095,7 @@ static UIView *LSEntryHeader(NSString *text) {
     if (self.smartStatus.tone == LSEntryToneSuccess) [self showSmartHint];
     [self clearUndo];
     self.linkName = nil;
+    self.moveNote = nil;
     [self refreshStatusForField:field strict:NO];
     [self updateDraftPreviewImmediately:immediate];
 }
@@ -1207,6 +1299,7 @@ static UIView *LSEntryHeader(NSString *text) {
     self.longitudeField.text = longitude;
     self.linkName = name.length ? name : nil;
     self.linkCoordinate = name.length ? coordinate : kCLLocationCoordinate2DInvalid;
+    self.moveNote = nil;
     [self refreshStatusForField:self.latitudeField strict:NO];
     [self refreshStatusForField:self.longitudeField strict:NO];
     self.announcePlaceName = feedback;
@@ -1218,7 +1311,7 @@ static UIView *LSEntryHeader(NSString *text) {
     else [self clearUndo];
     if (!feedback) return;
     LSHapticSuccess();
-    LSAnnounce([NSString stringWithFormat:@"%@ Latitude %@, longitude %@.", message, latitude, longitude]);
+    [self announceReadoutWithPrefix:message];
 }
 
 #pragma mark Undo
@@ -1230,6 +1323,7 @@ static UIView *LSEntryHeader(NSString *text) {
     self.undoButton.hidden = NO;
     self.undoButton.alpha = 0;
     LSAnimate(^{ self.undoButton.alpha = 1; [self.mapCard layoutIfNeeded]; }, nil);
+    [self refreshReadoutActions];
 }
 - (void)clearUndo {
     self.undoLatitude = nil;
@@ -1237,6 +1331,7 @@ static UIView *LSEntryHeader(NSString *text) {
     if (self.undoButton.hidden) return;
     self.undoButton.hidden = YES;
     LSAnimate(^{ [self.mapCard layoutIfNeeded]; }, nil);
+    [self refreshReadoutActions];
 }
 - (void)undoLastChange {
     if (!self.undoLatitude && !self.undoLongitude) return;
@@ -1245,6 +1340,7 @@ static UIView *LSEntryHeader(NSString *text) {
     [self invalidateSmartLookup];
     [self clearUndo];
     self.linkName = nil;
+    self.moveNote = nil;
     [self refreshStatusForField:self.latitudeField strict:NO];
     [self refreshStatusForField:self.longitudeField strict:NO];
     [self.smartStatus setTone:LSEntryToneNeutral text:@"Restored the previous coordinates." spoken:nil];
@@ -1334,6 +1430,7 @@ static UIView *LSEntryHeader(NSString *text) {
     self.pinLifted = NO;
     self.liftToken++;
     self.map.userInteractionEnabled = NO;
+    self.moveNote = nil;
     [self clearUndo];
     LSAnimate(^{
         self.mapDim.alpha = 1;
@@ -1358,12 +1455,12 @@ static UIView *LSEntryHeader(NSString *text) {
         return;
     }
     if (LSDistanceBetween(self.map.centerCoordinate, coordinate) < 0.5) {
-        if (haptic) LSHapticImpact(UIImpactFeedbackStyleLight);
+        if (haptic) LSHapticPinDrop();
         return;
     }
     if (!motion) {
         [self.map setCenterCoordinate:coordinate animated:NO];
-        if (haptic) LSHapticImpact(UIImpactFeedbackStyleLight);
+        if (haptic) LSHapticPinDrop();
         return;
     }
     [self liftPin];
@@ -1380,7 +1477,7 @@ static UIView *LSEntryHeader(NSString *text) {
 - (void)dropPinAnimated:(BOOL)animated haptic:(BOOL)haptic {
     self.pinLifted = NO;
     self.liftToken++;
-    CGFloat hintAlpha = LSMapDragTaught ? 0 : 1;
+    CGFloat hintAlpha = LSMapDragTaught || !self.dragHintAllowed ? 0 : 1;
     void (^settle)(void) = ^{
         self.mapDim.alpha = 0;
         self.pinView.alpha = 1;
@@ -1391,13 +1488,13 @@ static UIView *LSEntryHeader(NSString *text) {
     };
     if (!animated) {
         settle();
-        if (haptic) LSHapticImpact(UIImpactFeedbackStyleLight);
+        if (haptic) LSHapticPinDrop();
         return;
     }
     self.pinView.alpha = 0;
     self.pinView.transform = CGAffineTransformMakeTranslation(0, -36);
     self.pinShadow.transform = CGAffineTransformMakeScale(0.3, 0.3);
-    LSAnimateBouncy(settle, ^{ if (haptic) LSHapticImpact(UIImpactFeedbackStyleLight); });
+    LSAnimateBouncy(settle, ^{ if (haptic) LSHapticPinDrop(); });
 }
 - (void)liftPin {
     self.pinLifted = YES;
@@ -1419,7 +1516,7 @@ static UIView *LSEntryHeader(NSString *text) {
         self.pinShadow.transform = CGAffineTransformIdentity;
         self.pinShadow.alpha = 1;
     }, nil);
-    if (haptic) LSHapticImpact(UIImpactFeedbackStyleLight);
+    if (haptic) LSHapticPinDrop();
 }
 - (void)mapView:(MKMapView *)mapView regionDidChangeAnimated:(BOOL)animated {
     if (mapView != self.map) return;
@@ -1479,7 +1576,9 @@ static UIView *LSEntryHeader(NSString *text) {
     self.landHaptic = NO; // The drag's own selection tick replaces an interrupted move's.
     self.dragStartLatitude = self.latitudeField.text ?: @"";
     self.dragStartLongitude = self.longitudeField.text ?: @"";
+    self.dragStartCoordinate = self.previewCoordinate;
     self.userMovingMap = YES;
+    LSHapticPrepare();
     [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(applyPreviewToMap) object:nil];
     [self invalidateSmartLookup];
     [self liftPin];
@@ -1499,15 +1598,99 @@ static UIView *LSEntryHeader(NSString *text) {
         [self refreshReadout];
         return;
     }
-    self.latitudeField.text = latitude;
-    self.longitudeField.text = longitude;
+    [self moveTo:center from:self.dragStartCoordinate previousLatitude:self.dragStartLatitude previousLongitude:self.dragStartLongitude];
+    LSHapticSelection();
+}
+// Shared end of a map drag and a VoiceOver nudge: write the fields, offer Undo, and say how far it went.
+- (void)moveTo:(CLLocationCoordinate2D)coordinate from:(CLLocationCoordinate2D)from previousLatitude:(NSString *)previousLatitude previousLongitude:(NSString *)previousLongitude {
+    self.latitudeField.text = LSFormatDecimal(coordinate.latitude, 6);
+    self.longitudeField.text = LSFormatDecimal(coordinate.longitude, 6);
     self.linkName = nil;
+    [self invalidateSmartLookup];
     if (self.smartStatus.tone == LSEntryToneSuccess) [self showSmartHint];
     [self refreshStatusForField:self.latitudeField strict:NO];
     [self refreshStatusForField:self.longitudeField strict:NO];
-    [self updateDraftPreviewImmediately:YES]; // Already centred there, so the map stays put.
-    [self offerUndoLatitude:self.dragStartLatitude longitude:self.dragStartLongitude];
+    [self showMoveNote:LSMoveText(from, coordinate)];
+    [self updateDraftPreviewImmediately:YES]; // After a drag the map is already centred there and stays put.
+    [self offerUndoLatitude:previousLatitude longitude:previousLongitude];
+    [self announceReadoutWithPrefix:nil];
+}
+- (void)showMoveNote:(NSString *)note {
+    self.moveNote = note;
+    NSUInteger token = ++self.moveNoteToken;
+    __weak typeof(self) weakSelf = self;
+    // Long enough to read; then the place name comes back.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        typeof(self) self = weakSelf;
+        if (!self || token != self.moveNoteToken || !self.moveNote) return;
+        self.moveNote = nil;
+        [self refreshReadout];
+    });
+}
+
+#pragma mark VoiceOver and copy
+
+// About ten metres, the VoiceOver equivalent of a small drag of the map.
+- (BOOL)nudgeNorth:(double)north east:(double)east {
+    if (!self.hasPreview || self.finished) return NO;
+    CLLocationCoordinate2D from = self.previewCoordinate;
+    double latitude = MAX(-90.0, MIN(90.0, from.latitude + north / 111320.0));
+    double metresPerDegree = 111320.0 * cos(from.latitude * M_PI / 180.0);
+    double longitude = from.longitude + (metresPerDegree > 1 ? east / metresPerDegree : 0);
+    if (longitude > 180) longitude -= 360;
+    if (longitude < -180) longitude += 360;
+    [self moveTo:CLLocationCoordinate2DMake(latitude, longitude) from:from previousLatitude:self.latitudeField.text ?: @"" previousLongitude:self.longitudeField.text ?: @""];
+    return YES;
+}
+- (BOOL)putCoordinatesOnClipboard {
+    if (!self.hasPreview) return NO;
+    NSString *text = LSHemisphereText(self.previewCoordinate);
+    UIPasteboard.generalPasteboard.string = text; // Writing never triggers the paste prompt.
     LSHapticSelection();
+    LSShowToastAbove(self.view, self.footer, [NSString stringWithFormat:@"Copied %@", text], @"doc.on.doc");
+    return YES;
+}
+- (void)refreshReadoutActions {
+    BOOL undo = !self.undoButton.hidden;
+    NSInteger signature = (self.hasPreview ? 1 : 0) | (undo ? 2 : 0);
+    if (signature == self.readoutActionsSignature) return;
+    self.readoutActionsSignature = signature;
+    LSSetHidden(self.clipboardButton, !self.hasPreview, self.view.window != nil);
+    if (!self.hasPreview) { self.readoutText.accessibilityCustomActions = nil; return; }
+    __weak typeof(self) weakSelf = self;
+    NSMutableArray<UIAccessibilityCustomAction *> *actions = [NSMutableArray array];
+    NSArray<NSArray *> *moves = @[@[@"north", @10, @0], @[@"south", @-10, @0], @[@"east", @0, @10], @[@"west", @0, @-10]];
+    for (NSArray *move in moves) {
+        double north = [move[1] doubleValue], east = [move[2] doubleValue];
+        [actions addObject:[[UIAccessibilityCustomAction alloc] initWithName:[NSString stringWithFormat:@"Move 10 m %@", move[0]]
+                                                               actionHandler:^BOOL(__unused UIAccessibilityCustomAction *action) {
+            return [weakSelf nudgeNorth:north east:east];
+        }]];
+    }
+    [actions addObject:[[UIAccessibilityCustomAction alloc] initWithName:@"Copy coordinates" actionHandler:^BOOL(__unused UIAccessibilityCustomAction *action) {
+        return [weakSelf putCoordinatesOnClipboard];
+    }]];
+    if (undo) {
+        [actions addObject:[[UIAccessibilityCustomAction alloc] initWithName:@"Undo" actionHandler:^BOOL(__unused UIAccessibilityCustomAction *action) {
+            typeof(self) self = weakSelf;
+            if (!self || self.undoButton.hidden) return NO;
+            [self undoLastChange];
+            return YES;
+        }]];
+    }
+    self.readoutText.accessibilityCustomActions = actions;
+}
+// Speaks the readout once things settle, so a drag, nudge or paste is described in one go.
+- (void)announceReadoutWithPrefix:(NSString *)prefix {
+    self.announcementPrefix = prefix;
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(announceReadout) object:nil];
+    [self performSelector:@selector(announceReadout) withObject:nil afterDelay:0.5];
+}
+- (void)announceReadout {
+    NSString *readout = self.readoutText.accessibilityValue;
+    if (!readout.length || self.finished) return;
+    LSAnnounce(self.announcementPrefix.length ? [NSString stringWithFormat:@"%@ %@", self.announcementPrefix, readout] : readout);
+    self.announcementPrefix = nil;
 }
 
 #pragma mark Readout and place name
@@ -1525,6 +1708,7 @@ static UIView *LSEntryHeader(NSString *text) {
 }
 - (void)refreshReadout {
     if (self.userMovingMap) return;
+    [self refreshReadoutActions];
     LSReadoutState state;
     NSString *title, *subtitle, *symbol, *spoken;
     UIColor *tint = LSAccentColor();
@@ -1542,13 +1726,14 @@ static UIView *LSEntryHeader(NSString *text) {
         if (name.length) {
             state = LSReadoutStateNamed;
             title = name;
-            subtitle = context ?: coordinate;
-            spoken = [NSString stringWithFormat:@"%@%@. %@", name, context ? [@", " stringByAppendingString:context] : @"", LSSpokenCoordinate(self.previewCoordinate)];
+            subtitle = self.moveNote ?: context ?: coordinate;
+            spoken = [NSString stringWithFormat:@"%@%@%@. %@", self.moveNote ? [self.moveNote stringByAppendingString:@". "] : @"", name,
+                      context ? [@", " stringByAppendingString:context] : @"", LSSpokenCoordinate(self.previewCoordinate)];
         } else {
             state = LSReadoutStateCoordinate;
             title = coordinate;
             // Always one subtitle line, so the sticky header never jumps while a lookup runs.
-            subtitle = self.geocoding ? @"Looking up this place…" : @"Dropped pin";
+            subtitle = self.moveNote ?: (self.geocoding ? @"Looking up this place…" : @"Dropped pin");
             spoken = [NSString stringWithFormat:@"%@. %@", LSSpokenCoordinate(self.previewCoordinate), subtitle];
         }
     }
