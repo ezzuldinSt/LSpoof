@@ -22,12 +22,6 @@ static BOOL LSSettingsLargeText(UITraitCollection *traits) {
     if (!category.length || [category isEqualToString:UIContentSizeCategoryUnspecified]) category = UIApplication.sharedApplication.preferredContentSizeCategory;
     return UIContentSizeCategoryIsAccessibilityCategory(category);
 }
-static NSString *LSSettingsNumber(double value, NSUInteger digits) {
-    NSNumberFormatter *formatter = [[NSNumberFormatter alloc] init];
-    formatter.numberStyle = NSNumberFormatterDecimalStyle;
-    formatter.maximumFractionDigits = digits;
-    return [formatter stringFromNumber:@(value)] ?: @"";
-}
 
 #pragma mark - Plain-language readings of the values
 
@@ -41,9 +35,9 @@ static NSString *LSSettingsAltitudeText(double meters) {
     for (size_t i = 0; i < sizeof(marks) / sizeof(marks[0]); i++) {
         if (fabs(meters - marks[i].meters) <= fabs(marks[i].meters) * 0.15) return @(marks[i].text);
     }
-    if (meters < 0) return [NSString stringWithFormat:@"%@ m below sea level", LSSettingsNumber(-meters, 0)];
+    if (meters < 0) return [NSString stringWithFormat:@"%@ m below sea level", LSFormatDecimal(-meters, 0)];
     if (meters < 50) return @"Near sea level, like most coastal cities";
-    return [NSString stringWithFormat:@"%@ m above sea level", LSSettingsNumber(meters, 0)];
+    return [NSString stringWithFormat:@"%@ m above sea level", LSFormatDecimal(meters, 0)];
 }
 static NSString *LSSettingsCourseText(double course) {
     NSArray<NSString *> *names = @[@"north", @"northeast", @"east", @"southeast", @"south", @"southwest", @"west", @"northwest"];
@@ -63,7 +57,7 @@ static NSString *LSSettingsWanderComparison(double radius) {
     return @"About a small town center";
 }
 static NSString *LSSettingsWanderText(double radius) {
-    return [NSString stringWithFormat:@"%@ · %@ m across", LSSettingsWanderComparison(radius), LSSettingsNumber(radius * 2, 1)];
+    return [NSString stringWithFormat:@"%@ · %@ m across", LSSettingsWanderComparison(radius), LSFormatDecimal(radius * 2, 1)];
 }
 // The slider runs on a square-root scale so 1 to 50 m, where most choices are, gets most of its travel.
 static float LSSettingsSliderValue(double meters) { return (float)sqrt(MAX(0, MIN(1, (meters - 1) / 999.0))); }
@@ -172,7 +166,9 @@ static LSSettingsReflowStack *LSSettingsFlow(NSArray<UIView *> *views, CGFloat s
 @end
 @implementation LSSettingsWanderPreview {
     CAShapeLayer *_streets, *_circle;
-    CALayer *_spot, *_dot;
+    CALayer *_spot, *_dot, *_knob;
+    UILabel *_readout;
+    BOOL _dragging;
     double _radius;
     CGSize _laidOut;
 }
@@ -200,7 +196,20 @@ static LSSettingsReflowStack *LSSettingsFlow(NSArray<UIView *> *views, CGFloat s
         _dot.shadowOpacity = 0.25;
         _dot.shadowRadius = 3;
         _dot.shadowOffset = CGSizeMake(0, 1);
-        for (CALayer *layer in @[_streets, _circle, _spot, _dot]) [self.layer addSublayer:layer];
+        // A handle on the ring at 3 o'clock says "drag me".
+        _knob = [CALayer layer];
+        _knob.bounds = CGRectMake(0, 0, 12, 12);
+        _knob.cornerRadius = 6;
+        _knob.backgroundColor = UIColor.whiteColor.CGColor;
+        _knob.shadowColor = UIColor.blackColor.CGColor;
+        _knob.shadowOpacity = 0.3;
+        _knob.shadowRadius = 2.5;
+        _knob.shadowOffset = CGSizeMake(0, 1);
+        for (CALayer *layer in @[_streets, _circle, _spot, _dot, _knob]) [self.layer addSublayer:layer];
+        _readout = LSPillLabel(@"", LSAccentTextColor());
+        _readout.translatesAutoresizingMaskIntoConstraints = YES; // Placed by frame next to the knob.
+        _readout.alpha = 0;
+        [self addSubview:_readout];
         [self updateColors];
     }
     return self;
@@ -221,15 +230,50 @@ static LSSettingsReflowStack *LSSettingsFlow(NSArray<UIView *> *views, CGFloat s
     return (CGFloat)hypot(point.x - CGRectGetMidX(self.bounds), point.y - CGRectGetMidY(self.bounds));
 }
 // Grab the ring, or swipe sideways anywhere on the preview; a vertical swipe that starts
-// away from the ring still scrolls the page.
+// away from the ring still scrolls the page. UIKit also asks this view about its ancestors'
+// recognizers (the page scroll), which are always allowed.
 - (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gesture {
-    if (![gesture isKindOfClass:UIPanGestureRecognizer.class]) return [super gestureRecognizerShouldBegin:gesture];
+    if (gesture.view != self || ![gesture isKindOfClass:UIPanGestureRecognizer.class]) return YES;
     CGPoint velocity = [(UIPanGestureRecognizer *)gesture velocityInView:self];
     return fabs([self distanceOf:gesture] - [self circlePoints]) < 24 || fabs(velocity.x) > fabs(velocity.y);
 }
 - (void)drag:(UIPanGestureRecognizer *)pan {
-    if (pan.state != UIGestureRecognizerStateBegan && pan.state != UIGestureRecognizerStateChanged) return;
-    if (self.dragged) self.dragged([self metersAtDistance:[self distanceOf:pan]]);
+    UIGestureRecognizerState state = pan.state;
+    if (state == UIGestureRecognizerStateBegan) {
+        _dragging = YES;
+        LSHapticImpact(UIImpactFeedbackStyleLight);
+        [self setGrabbed:YES];
+    }
+    if (state == UIGestureRecognizerStateBegan || state == UIGestureRecognizerStateChanged) {
+        if (self.dragged) self.dragged([self metersAtDistance:[self distanceOf:pan]]);
+        [self placeReadout];
+    } else if (_dragging) {
+        _dragging = NO;
+        [self setGrabbed:NO];
+    }
+}
+- (CGPoint)knobPosition {
+    return CGPointMake(CGRectGetMidX(self.bounds) + [self circlePoints], CGRectGetMidY(self.bounds));
+}
+- (void)setGrabbed:(BOOL)grabbed {
+    [CATransaction begin];
+    [CATransaction setDisableActions:!LSMapAnimationsEnabled()];
+    [CATransaction setAnimationDuration:0.18];
+    _knob.transform = grabbed ? CATransform3DMakeScale(1.25, 1.25, 1) : CATransform3DIdentity;
+    [CATransaction commit];
+    if (grabbed) [self placeReadout];
+    UILabel *readout = _readout;
+    LSAnimate(^{ readout.alpha = grabbed ? 1 : 0; }, nil);
+}
+// "40 m" in a small capsule just above the knob, kept inside the preview.
+- (void)placeReadout {
+    _readout.text = [NSString stringWithFormat:@"%@ m", LSFormatDecimal(_radius, 0)];
+    CGSize size = _readout.intrinsicContentSize;
+    CGPoint knob = [self knobPosition];
+    CGFloat x = MAX(4, MIN(CGRectGetWidth(self.bounds) - size.width - 4, knob.x - size.width / 2));
+    CGFloat y = knob.y - 12 - size.height;
+    if (y < 4) y = knob.y + 12;
+    _readout.frame = CGRectMake(x, y, size.width, size.height);
 }
 - (void)updateColors {
     UITraitCollection *traits = self.traitCollection;
@@ -242,6 +286,8 @@ static LSSettingsReflowStack *LSSettingsFlow(NSArray<UIView *> *views, CGFloat s
     _spot.borderColor = [UIColor.secondaryLabelColor resolvedColorWithTraitCollection:traits].CGColor;
     _dot.backgroundColor = [LSAccentColor() resolvedColorWithTraitCollection:traits].CGColor;
     _dot.borderColor = UIColor.whiteColor.CGColor;
+    _knob.borderWidth = contrast ? 1.5 : 0;
+    _knob.borderColor = [LSAccentColor() resolvedColorWithTraitCollection:traits].CGColor;
 }
 - (void)traitCollectionDidChange:(UITraitCollection *)previous {
     [super traitCollectionDidChange:previous];
@@ -275,6 +321,7 @@ static LSSettingsReflowStack *LSSettingsFlow(NSArray<UIView *> *views, CGFloat s
     for (CALayer *layer in @[_streets, _circle]) layer.frame = self.bounds;
     _circle.path = [self circlePath].CGPath;
     _spot.position = CGPointMake(CGRectGetMidX(self.bounds), CGRectGetMidY(self.bounds));
+    _knob.position = [self knobPosition];
     [self updateStreets];
     [CATransaction commit];
     if (!CGSizeEqualToSize(_laidOut, self.bounds.size)) {
@@ -289,10 +336,12 @@ static LSSettingsReflowStack *LSSettingsFlow(NSArray<UIView *> *views, CGFloat s
 - (void)setRadius:(double)radius animated:(BOOL)animated {
     if (!isfinite(radius) || fabs(radius - _radius) < 0.001) return;
     id from = (__bridge id)_circle.path; // Kept alive past the path change below.
+    CGPoint knobFrom = _knob.position;
     _radius = radius;
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     _circle.path = [self circlePath].CGPath;
+    _knob.position = [self knobPosition];
     [self updateStreets];
     [CATransaction commit];
     if (animated && from && LSMapAnimationsEnabled()) {
@@ -301,7 +350,13 @@ static LSSettingsReflowStack *LSSettingsFlow(NSArray<UIView *> *views, CGFloat s
         grow.duration = 0.3;
         grow.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut];
         [_circle addAnimation:grow forKey:@"grow"];
+        CABasicAnimation *slide = [CABasicAnimation animationWithKeyPath:@"position"];
+        slide.fromValue = [NSValue valueWithCGPoint:knobFrom];
+        slide.duration = grow.duration;
+        slide.timingFunction = grow.timingFunction;
+        [_knob addAnimation:slide forKey:@"slide"];
     }
+    if (_dragging) [self placeReadout];
     // Restarting the drift on every slider tick made the dot jump; wait for a pause.
     [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(restartDrift) object:nil];
     [self performSelector:@selector(restartDrift) withObject:nil afterDelay:0.25];
@@ -618,7 +673,7 @@ static UIView *LSSettingsSection(NSString *header, UIView *card, NSString *foote
     __weak typeof(self) weakSelf = self;
     self.radiusSlider.describe = ^NSString *{
         NSNumber *radius = [weakSelf liveValue:weakSelf.radiusField];
-        return radius ? [NSString stringWithFormat:@"%@ meters, %@", LSSettingsNumber(radius.doubleValue, 1), LSSettingsWanderComparison(radius.doubleValue).lowercaseString] : @"Not set";
+        return radius ? [NSString stringWithFormat:@"%@ meters, %@", LSFormatDecimal(radius.doubleValue, 1), LSSettingsWanderComparison(radius.doubleValue).lowercaseString] : @"Not set";
     };
     [self.radiusSlider addTarget:self action:@selector(radiusSlid) forControlEvents:UIControlEventValueChanged];
     // Same rounding and detents as the slider.
@@ -815,9 +870,8 @@ static UIView *LSSettingsSection(NSString *header, UIView *card, NSString *foote
 - (UILabel *)errorForField:(UITextField *)field { return (UILabel *)[self errorRowForField:field].arrangedSubviews.lastObject; }
 - (void)showError:(BOOL)visible forField:(UITextField *)field {
     UILabel *error = [self errorForField:field];
-    LSSetFieldInvalid(field, visible); // The field owns its focus and error rings.
-    // In the label, not only the hint: hints can be turned off.
-    field.accessibilityLabel = visible ? [NSString stringWithFormat:@"%@, invalid. %@", [self labelForField:field], error.text] : [self labelForField:field];
+    // Ring plus the message in the field's label (hints can be turned off), in one call.
+    LSSetFieldError(field, visible ? error.text : nil);
     field.accessibilityHint = [self hintForField:field];
     UIView *row = [self errorRowForField:field];
     if (row.hidden == !visible) return;
@@ -839,7 +893,7 @@ static UIView *LSSettingsSection(NSString *header, UIView *card, NSString *foote
         else self.compassArrow.transform = turn;
     }
     NSNumber *radius = [self liveValue:self.radiusField];
-    self.radiusValue.text = radius ? [NSString stringWithFormat:@"%@ m", LSSettingsNumber(radius.doubleValue, 1)] : @"–";
+    self.radiusValue.text = radius ? [NSString stringWithFormat:@"%@ m", LSFormatDecimal(radius.doubleValue, 1)] : @"–";
     self.radiusDetail.text = radius ? LSSettingsWanderText(radius.doubleValue) : @"From 1 to 1,000 m";
     if (radius) [self.wanderPreview setRadius:radius.doubleValue animated:animated];
     for (UITextField *field in @[self.altitudeField, self.courseField]) {

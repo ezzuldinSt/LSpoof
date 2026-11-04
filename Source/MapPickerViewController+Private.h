@@ -187,6 +187,9 @@ typedef NS_ENUM(NSInteger, LSEndpoint) { LSEndpointFrom, LSEndpointStop, LSEndpo
 // keeps the segmented control in sync, rebuilds the workspace and moves VoiceOver focus to it.
 // Call it instead of setting `tab` directly; set the selection after it returns.
 - (void)showTab:(LSPickerTab)tab animated:(BOOL)animated;
+// The floating footer glass, for LSShowToastAbove / LSShowActionToast so a toast sits just
+// above it; nil while the footer is hidden (the toast then sits above the safe area).
+- (nullable UIView *)toastAnchorView;
 @end
 @class LSRouteRailView, LSRouteInstrumentView, LSRouteStatView;
 @interface MapPickerViewController () // Route planner and playback (MapPickerViewController+Route.m)
@@ -213,12 +216,13 @@ typedef NS_ENUM(NSInteger, LSEndpoint) { LSEndpointFrom, LSEndpointStop, LSEndpo
 // Link and file imports: a token per import, so a superseded one can clear its busy status.
 @property (nonatomic) NSUInteger routeImportToken;
 @property (nonatomic) BOOL routeImportActive;
-@property (nonatomic, strong, nullable) UIView *routeToastAnchor;
-@property (nonatomic, strong, nullable) NSLayoutConstraint *routeToastAnchorHeight;
 // While the drafted route plays, the planner folds into a one-line trip summary.
 @property (nonatomic, strong) UIView *routeEndpointsCard;
 @property (nonatomic, strong) UIView *routeTripCard;
 @property (nonatomic, strong) UILabel *routeTripLabel;
+@property (nonatomic, strong) UIView *routeTripRow;
+@property (nonatomic, copy, nullable) NSString *routeTripKey;
+@property (nonatomic, strong) UIView *routeEditHeader;
 @property (nonatomic) BOOL routeEditorOpen;
 // Map: an outline under the route, the travelled part dimmed, and the draw-in once built.
 @property (nonatomic, strong, nullable) MKPolyline *routeCasing;
@@ -230,6 +234,8 @@ typedef NS_ENUM(NSInteger, LSEndpoint) { LSEndpointFrom, LSEndpointStop, LSEndpo
 @property (nonatomic) BOOL routeDrawInPending;
 @property (nonatomic, weak, nullable) UIView *routeTraceView;
 @property (nonatomic, copy, nullable) NSArray<MKAnnotationView *> *routeHiddenMarkers;
+@property (nonatomic, copy, nullable) NSArray<NSNumber *> *routeHiddenMarkerAlphas;
+@property (nonatomic, copy, nullable) NSArray<UIGestureRecognizer *> *routeDrawGestures;
 // Playback instrument and the spoken milestones (halfway, each stop, arrival).
 @property (nonatomic, strong) LSRouteInstrumentView *routeInstrument;
 @property (nonatomic, weak, nullable) LSRoute *milestoneRoute;
@@ -258,6 +264,8 @@ typedef NS_ENUM(NSInteger, LSEndpoint) { LSEndpointFrom, LSEndpointStop, LSEndpo
 @property (nonatomic, strong, nullable) UIView *savedTip;
 @property (nonatomic, strong, nullable) UIView *savedToastAnchor;
 @property (nonatomic, copy, nullable) NSString *savedPulseKey;
+// Bumped on every filter edit, so only the last one, once typing pauses, is announced.
+@property (nonatomic) NSUInteger savedFilterRevision;
 // What the session holds: the Applied badge and the distances shown on rows.
 @property (nonatomic) NSInteger savedSessionMode;
 @property (nonatomic) CLLocationCoordinate2D savedHeldCoordinate;

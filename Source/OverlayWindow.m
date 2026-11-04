@@ -174,6 +174,13 @@ static NSString *LSOpenerStatus(BOOL spoken) {
 }
 @end
 
+// Alpha mask for the hint bubble: rounded body plus a tail, as one shape.
+@interface LSHintShapeView : UIView
+@end
+@implementation LSHintShapeView
++ (Class)layerClass { return CAShapeLayer.class; }
+@end
+
 @interface LSOpenerViewController : UIViewController
 @property (nonatomic, copy, nullable) void (^openPicker)(void);
 @property (nonatomic, readonly) UIView *opener;
@@ -239,7 +246,7 @@ static NSString *LSOpenerStatus(BOOL spoken) {
 @property (nonatomic, strong) UIView *tabProgress;
 @property (nonatomic, strong) CAShapeLayer *tabTrackLayer;
 @property (nonatomic, strong) CAShapeLayer *tabProgressLayer;
-@property (nonatomic, strong, nullable) UIVisualEffectView *hintPointer;
+@property (nonatomic, strong, nullable) CAShapeLayer *hintOutline;
 @property (nonatomic, strong) LSOpenerButton *button;
 @property (nonatomic, strong) UITapGestureRecognizer *tabTap;
 @property (nonatomic, strong, nullable) UIVisualEffectView *hint;
@@ -255,8 +262,8 @@ static NSString *LSOpenerStatus(BOOL spoken) {
 @property (nonatomic) CGPoint dragOrigin;
 @property (nonatomic) NSUInteger snapGeneration;
 @property (nonatomic) NSUInteger visibilityGeneration;
-@property (nonatomic) BOOL dragging, lifted, pressed, dimmed, menuOpen, tucked, right, glassOn;
-@property (nonatomic) BOOL dragProjectedRight, dragInTuckZone, offFromQuickAction;
+@property (nonatomic) BOOL dragging, lifted, pressed, dimmed, menuOpen, tucked, right;
+@property (nonatomic) BOOL dragProjectedRight, dragInTuckZone, dragZoneRight, offFromQuickAction, arrivalPeek;
 @end
 
 @implementation LSOpenerViewController
@@ -270,7 +277,6 @@ static NSString *LSOpenerStatus(BOOL spoken) {
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.right = YES;
-    self.glassOn = YES;
     CGRect bounds = CGRectMake(0, 0, kLSOpenerSize, kLSOpenerSize);
     LSOpenerView *container = [[LSOpenerView alloc] initWithFrame:bounds];
     container.layer.shadowColor = UIColor.blackColor.CGColor;
@@ -415,6 +421,8 @@ static NSString *LSOpenerStatus(BOOL spoken) {
     (void)note;
     LSSessionMode mode = LSSessionController.shared.snapshot.mode;
     if (!self.hasShownMode || mode != self.shownMode) { [self updateForSessionAnimated:YES]; return; }
+    // A turn-off that changed nothing must not leave its spoken hint for a later one.
+    self.offFromQuickAction = NO;
     if (mode != LSSessionModeMoving || ![self isOnScreen]) return;
     // Route ticks arrive at up to 10 Hz: the arrow turns at most 4 times a second and the
     // ring moves once a second, gliding linearly in between.
@@ -440,6 +448,8 @@ static NSString *LSOpenerStatus(BOOL spoken) {
     animated = animated && [self isOnScreen];
     BOOL off = mode == LSSessionModeOff, route = mode == LSSessionModeMoving || mode == LSSessionModePaused;
     BOOL arrived = changed && previous == LSSessionModeMoving && mode == LSSessionModeStatic && LSOpenerRouteComplete();
+    // Set before the tab is restyled below, so its progress stays up through the peek.
+    if (arrived && animated && self.tucked) self.arrivalPeek = YES;
     UIImage *image = [UIImage systemImageNamed:LSOpenerSymbol(mode)];
     UIColor *disc = LSOpenerDiscColor(mode);
     void (^colours)(void) = ^{
@@ -492,17 +502,44 @@ static NSString *LSOpenerStatus(BOOL spoken) {
         [self wake];
         [self pop];
         if (arrived) LSHapticSuccess();
+        if (self.arrivalPeek) [self peekForArrival];
         NSString *message = arrived ? @"Arrived. Holding location" : LSOpenerAnnouncement(mode);
         if (offerLast) message = @"Spoofing is off. Apply last location is in quick actions";
         LSOpenerAnnounce(message);
     }
+}
+// Arrival while tucked: the tab fills green and nudges out of the edge and back.
+- (void)peekForArrival {
+    if (LSMapAnimationsEnabled() && !self.dragging && !self.snapAnimator) {
+        UIView *container = self.container;
+        CGPoint home = container.center;
+        CGFloat out = self.right ? -8 : 8;
+        [UIView animateWithDuration:0.16 delay:0 options:UIViewAnimationOptionCurveEaseOut | UIViewAnimationOptionAllowUserInteraction animations:^{
+            container.center = CGPointMake(home.x + out, home.y);
+        } completion:^(__unused BOOL finished) {
+            LSAnimateBouncy(^{ container.center = home; }, nil);
+        }];
+    }
+    __weak typeof(self) weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        LSOpenerViewController *strongSelf = weakSelf;
+        if (!strongSelf || !strongSelf.arrivalPeek) return;
+        strongSelf.arrivalPeek = NO;
+        [UIView animateWithDuration:0.3 animations:^{ [strongSelf applyTabValues]; } completion:^(__unused BOOL finished) {
+            if (strongSelf.arrivalPeek) return;
+            LSSessionMode now = strongSelf.shownMode;
+            if (now != LSSessionModeMoving && now != LSSessionModePaused) [strongSelf setRingHidden:YES];
+            [strongSelf updateTab];
+        }];
+    });
 }
 - (void)setRingHidden:(BOOL)hidden {
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     self.trackLayer.hidden = hidden;
     self.progressLayer.hidden = hidden;
-    if (hidden) self.progressLayer.strokeEnd = self.tabProgressLayer.strokeEnd = 0;
+    if (hidden) self.progressLayer.strokeEnd = 0;
+    if (hidden && !self.arrivalPeek) self.tabProgressLayer.strokeEnd = 0;
     [CATransaction commit];
 }
 - (void)setRingProgress:(double)progress duration:(NSTimeInterval)duration {
@@ -573,7 +610,6 @@ static NSString *LSOpenerStatus(BOOL spoken) {
     // A chevron says "pull me out"; with Differentiate Without Color it shows the state glyph instead.
     NSString *name = LSDifferentiateWithoutColor() ? LSOpenerSymbol(mode) : (self.right ? @"chevron.compact.left" : @"chevron.compact.right");
     self.tabGlyph.image = [UIImage systemImageNamed:name] ?: [UIImage systemImageNamed:self.right ? @"chevron.left" : @"chevron.right"];
-    self.tabGlyph.tintColor = mode == LSSessionModeOff ? UIColor.secondaryLabelColor : LSSessionColor(mode);
     // Top to bottom along whichever half of the rim stays on screen.
     CGFloat c = kLSOpenerSize / 2, spread = 80 * M_PI / 180;
     UIBezierPath *arc = self.right
@@ -584,8 +620,11 @@ static NSString *LSOpenerStatus(BOOL spoken) {
     [CATransaction setDisableActions:YES];
     self.tabTrackLayer.path = arc.CGPath;
     self.tabProgressLayer.path = arc.CGPath;
-    self.tabTrackLayer.strokeColor = [[UIColor.labelColor colorWithAlphaComponent:LSIncreaseContrast() ? 0.3 : 0.15] resolvedColorWithTraitCollection:traits].CGColor;
-    self.tabProgressLayer.strokeColor = [LSSessionColor(mode) resolvedColorWithTraitCollection:traits].CGColor;
+    BOOL contrast = LSIncreaseContrast();
+    self.tabTrackLayer.strokeColor = [(contrast ? UIColor.labelColor : [UIColor.labelColor colorWithAlphaComponent:0.15]) resolvedColorWithTraitCollection:traits].CGColor;
+    self.tabTrackLayer.lineWidth = contrast ? 1.5 : 3;
+    UIColor *fill = self.arrivalPeek ? LSSuccessColor() : LSSessionColor(mode);
+    self.tabProgressLayer.strokeColor = [fill resolvedColorWithTraitCollection:traits].CGColor;
     [CATransaction commit];
 }
 
@@ -615,10 +654,10 @@ static NSString *LSOpenerStatus(BOOL spoken) {
     // Visual effect views must not sit under a translucent ancestor, so idling swaps the
     // glass for a faint backing instead of fading the whole opener.
     BOOL glassOn = !ghost && !self.leaving;
-    if (glassOn != self.glassOn) {
-        self.glass.effect = glassOn ? self.glassEffect : nil;
-        self.glassOn = glassOn;
-    }
+    UIVisualEffect *shown = self.glass.effect;
+    // Keep the material actually in use; the fallback thickens with Increase Contrast.
+    if (shown && glassOn) self.glassEffect = shown;
+    if (glassOn != (shown != nil)) self.glass.effect = glassOn ? self.glassEffect : nil;
     self.backing.alpha = !self.leaving && (ghost || LSReduceTransparency()) ? 1 : 0;
     CGFloat alpha = ghost ? (contrast ? 0.85 : 0.6) : 1;
     // Under Reduce Motion a held opener dips instead of growing.
@@ -635,15 +674,24 @@ static NSString *LSOpenerStatus(BOOL spoken) {
     self.glass.layer.borderWidth = contrast ? (off ? 2 : 1) : (ghost || !LSLiquidGlassAvailable() ? 0.5 : 0);
 
     self.face.alpha = self.tucked ? 0 : 1;
-    self.tabGlyph.alpha = self.tucked ? 1 : 0;
-    BOOL route = self.shownMode == LSSessionModeMoving || self.shownMode == LSSessionModePaused;
-    self.tabProgress.alpha = self.tucked && route ? 1 : 0;
-    CGFloat offset = (kLSOpenerSize - kLSOpenerTabWidth) / 2;
-    self.tabGlyph.center = CGPointMake(kLSOpenerSize / 2 + (self.right ? -offset : offset), kLSOpenerSize / 2);
+    [self applyTabValues];
     CGFloat reach = 44 - kLSOpenerTabWidth;
     self.container.hitInsets = !self.tucked ? UIEdgeInsetsZero
         : (self.right ? UIEdgeInsetsMake(-8, -reach, -8, 0) : UIEdgeInsetsMake(-8, 0, -8, -reach));
     self.tabTap.enabled = self.tucked;
+}
+- (void)applyTabValues {
+    // Held over the tuck zone, the tab's chevron shows through the face: letting go tucks it.
+    BOOL preview = !self.tucked && self.dragging && self.dragInTuckZone;
+    self.tabGlyph.alpha = self.tucked ? 1 : (preview ? 0.5 : 0);
+    LSSessionMode mode = self.shownMode;
+    // Over the coloured disc the preview is white; on its own the tab carries the state colour.
+    self.tabGlyph.tintColor = preview && mode != LSSessionModeOff ? UIColor.whiteColor
+        : (mode == LSSessionModeOff ? UIColor.secondaryLabelColor : LSSessionColor(mode));
+    BOOL route = mode == LSSessionModeMoving || mode == LSSessionModePaused;
+    self.tabProgress.alpha = self.tucked && (route || self.arrivalPeek) ? 1 : 0;
+    CGFloat offset = (kLSOpenerSize - kLSOpenerTabWidth) / 2;
+    self.tabGlyph.center = CGPointMake(kLSOpenerSize / 2 + (self.right ? -offset : offset), kLSOpenerSize / 2);
 }
 - (void)updateShadowAnimated:(BOOL)animated {
     // Liquid Glass draws its own depth; the blur fallback needs a soft shadow over the map.
@@ -719,7 +767,6 @@ static NSString *LSOpenerStatus(BOOL spoken) {
     [self applyAppearance];
     // Materialises from the spot it sits on: glass and glyph grow in together.
     self.glass.effect = nil;
-    self.glassOn = NO;
     self.content.alpha = 0;
     if (LSMapAnimationsEnabled()) self.container.transform = CGAffineTransformMakeScale(0.5, 0.5);
     self.container.layer.shadowOpacity = 0;
@@ -867,6 +914,7 @@ static NSString *LSOpenerStatus(BOOL spoken) {
             self.lifted = YES;
             self.dragProjectedRight = self.right;
             self.dragInTuckZone = self.tucked;
+            self.dragZoneRight = self.right;
             // The face shows while held, even when it was tucked.
             self.tucked = NO;
             LSHapticPrepare();
@@ -896,11 +944,13 @@ static NSString *LSOpenerStatus(BOOL spoken) {
             CGPoint velocity = [pan velocityInView:self.view];
             CGPoint center = self.container.center;
             CGFloat leftDock = CGRectGetMinX(dock), rightDock = CGRectGetMaxX(dock);
-            CGFloat leftTuck = [self xOnRight:NO tucked:YES dock:dock], rightTuck = [self xOnRight:YES tucked:YES dock:dock];
             BOOL right, tuck = YES;
-            // Pushed into an edge, or flicked hard at the edge it is already next to, it tucks away.
-            if (center.x < (leftDock + leftTuck) / 2 && velocity.x < 300) right = NO;
-            else if (center.x > (rightDock + rightTuck) / 2 && velocity.x > -300) right = YES;
+            // Let go in the tuck zone (as previewed), or flicked hard at the edge it is next to,
+            // it tucks away; a throw back out of the zone docks instead.
+            BOOL zone = self.dragInTuckZone;
+            self.dragInTuckZone = NO;
+            if (zone && !self.dragZoneRight && velocity.x < 300) right = NO;
+            else if (zone && self.dragZoneRight && velocity.x > -300) right = YES;
             else if (center.x < leftDock + kLSOpenerSize && velocity.x < -1200) right = NO;
             else if (center.x > rightDock - kLSOpenerSize && velocity.x > 1200) right = YES;
             else {
@@ -920,10 +970,19 @@ static NSString *LSOpenerStatus(BOOL spoken) {
     CGFloat x = self.container.center.x, mid = CGRectGetMidX(dock);
     CGFloat leftZone = (CGRectGetMinX(dock) + [self xOnRight:NO tucked:YES dock:dock]) / 2;
     CGFloat rightZone = (CGRectGetMaxX(dock) + [self xOnRight:YES tucked:YES dock:dock]) / 2;
-    BOOL zone = x < leftZone || x > rightZone;
+    // Easier to stay in the zone than to enter it, so hovering at its edge does not buzz.
+    CGFloat band = self.dragInTuckZone ? 6 : -6;
+    BOOL zone = x < leftZone + band || x > rightZone - band;
     if (zone != self.dragInTuckZone) {
         self.dragInTuckZone = zone;
+        if (zone) {
+            self.dragZoneRight = x > mid;
+            // The preview chevron sits where the tab would be.
+            if (self.right != self.dragZoneRight) { self.right = self.dragZoneRight; [self updateTab]; }
+        }
         LSHapticImpact(UIImpactFeedbackStyleSoft);
+        [UIView animateWithDuration:0.15 delay:0 options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
+                         animations:^{ [self applyTabValues]; } completion:nil];
     }
     if (zone) { self.dragProjectedRight = x > mid; return; }
     CGFloat projected = x + LSProjectedDistance(velocity.x);
@@ -1012,36 +1071,33 @@ static NSString *LSOpenerStatus(BOOL spoken) {
     [text appendAttributedString:[[NSAttributedString alloc] initWithString:[@"\n" stringByAppendingString:message] attributes:@{
         NSFontAttributeName: LSFont(UIFontTextStyleFootnote, UIFontWeightRegular, 22), NSForegroundColorAttributeName: UIColor.secondaryLabelColor}]];
     label.attributedText = text;
-    UIVisualEffectView *hint = LSGlassView(LSRadiusM, NO);
-    hint.translatesAutoresizingMaskIntoConstraints = YES;
+    // The shared glass material, in a plain effect view so the bubble's shape (body and tail)
+    // comes only from its mask and its own outline.
+    UIVisualEffectView *hint = [[UIVisualEffectView alloc] initWithEffect:LSGlassView(LSRadiusM, NO).effect];
     hint.userInteractionEnabled = NO;
     // The same words are in the button's hint; VoiceOver users are not shown this at all.
     hint.accessibilityElementsHidden = YES;
+    LSHintShapeView *mask = [[LSHintShapeView alloc] init];
+    ((CAShapeLayer *)mask.layer).fillColor = UIColor.blackColor.CGColor;
+    hint.maskView = mask;
+    CAShapeLayer *outline = [CAShapeLayer layer];
+    outline.fillColor = nil;
+    [hint.contentView.layer addSublayer:outline];
     [hint.contentView addSubview:label];
     self.hintEffect = hint.effect;
     self.hint = hint;
     self.hintLabel = label;
-    // A small glass dot in the gap, level with the opener's centre, points the bubble at it.
-    // It is separate rather than joined so two glass layers never overlap.
-    UIVisualEffectView *pointer = LSGlassView(4, NO);
-    pointer.translatesAutoresizingMaskIntoConstraints = YES;
-    pointer.userInteractionEnabled = NO;
-    pointer.accessibilityElementsHidden = YES;
-    pointer.bounds = CGRectMake(0, 0, 8, 8);
-    self.hintPointer = pointer;
+    self.hintOutline = outline;
     [self.view insertSubview:hint belowSubview:self.container];
-    [self.view insertSubview:pointer belowSubview:self.container];
     [self layoutHint];
     if (!self.hint) return;
     hint.effect = nil;
-    pointer.effect = nil;
     label.alpha = 0;
     CGFloat shift = self.right ? 12 : -12;
     if (LSMapAnimationsEnabled()) hint.transform = CGAffineTransformMakeTranslation(shift, 0);
-    UIVisualEffect *effect = self.hintEffect, *pointerEffect = self.hintEffect;
+    UIVisualEffect *effect = self.hintEffect;
     LSAnimate(^{
         hint.effect = effect;
-        pointer.effect = pointerEffect;
         hint.transform = CGAffineTransformIdentity;
         label.alpha = 1;
     }, nil);
@@ -1054,45 +1110,85 @@ static NSString *LSOpenerStatus(BOOL spoken) {
         if (strongSelf && weakHint && strongSelf.hint == weakHint) [strongSelf dismissHint];
     });
 }
+// One outline for body and tail, so the mask and the stroke never disagree where they meet.
+static UIBezierPath *LSHintBubblePath(CGRect body, CGFloat r, BOOL tailOnRight, CGFloat tailY, CGFloat tail) {
+    CGFloat minX = CGRectGetMinX(body), maxX = CGRectGetMaxX(body), minY = CGRectGetMinY(body), maxY = CGRectGetMaxY(body);
+    UIBezierPath *path = [UIBezierPath bezierPath];
+    [path moveToPoint:CGPointMake(minX + r, minY)];
+    [path addLineToPoint:CGPointMake(maxX - r, minY)];
+    [path addArcWithCenter:CGPointMake(maxX - r, minY + r) radius:r startAngle:-M_PI_2 endAngle:0 clockwise:YES];
+    if (tailOnRight) {
+        [path addLineToPoint:CGPointMake(maxX, tailY - 6)];
+        [path addLineToPoint:CGPointMake(maxX + tail - 1, tailY - 1)];
+        [path addQuadCurveToPoint:CGPointMake(maxX + tail - 1, tailY + 1) controlPoint:CGPointMake(maxX + tail + 0.5, tailY)];
+        [path addLineToPoint:CGPointMake(maxX, tailY + 6)];
+    }
+    [path addLineToPoint:CGPointMake(maxX, maxY - r)];
+    [path addArcWithCenter:CGPointMake(maxX - r, maxY - r) radius:r startAngle:0 endAngle:M_PI_2 clockwise:YES];
+    [path addLineToPoint:CGPointMake(minX + r, maxY)];
+    [path addArcWithCenter:CGPointMake(minX + r, maxY - r) radius:r startAngle:M_PI_2 endAngle:M_PI clockwise:YES];
+    if (!tailOnRight) {
+        [path addLineToPoint:CGPointMake(minX, tailY + 6)];
+        [path addLineToPoint:CGPointMake(minX - tail + 1, tailY + 1)];
+        [path addQuadCurveToPoint:CGPointMake(minX - tail + 1, tailY - 1) controlPoint:CGPointMake(minX - tail - 0.5, tailY)];
+        [path addLineToPoint:CGPointMake(minX, tailY - 6)];
+    }
+    [path addLineToPoint:CGPointMake(minX, minY + r)];
+    [path addArcWithCenter:CGPointMake(minX + r, minY + r) radius:r startAngle:M_PI endAngle:3 * M_PI_2 clockwise:YES];
+    [path closePath];
+    return path;
+}
 - (void)layoutHint {
     UIVisualEffectView *hint = self.hint;
     UILabel *label = self.hintLabel;
     if (!hint || !label) return;
     CGRect safe = [self safeRect];
     CGPoint center = self.container.center;
-    CGFloat gap = 18, padX = 14, padY = 10;
-    // Beside the opener, on the side facing the screen.
+    CGFloat gap = 16, tail = 6, padX = 14, padY = 10;
+    // Beside the opener, on the side facing the screen, with the tail in the gap.
     CGFloat edge = self.right ? center.x - kLSOpenerSize / 2 - gap : center.x + kLSOpenerSize / 2 + gap;
     CGFloat available = self.right ? edge - CGRectGetMinX(safe) - 12 : CGRectGetMaxX(safe) - 12 - edge;
     CGFloat maxWidth = MIN(260, available);
     if (maxWidth < 120) { [self dismissHint]; return; }
     CGSize fit = [label sizeThatFits:CGSizeMake(maxWidth - 2 * padX, CGFLOAT_MAX)];
     CGFloat width = MIN(maxWidth, ceil(fit.width) + 2 * padX), height = ceil(fit.height) + 2 * padY;
-    CGFloat x = self.right ? edge - width : edge;
     CGFloat y = MAX(CGRectGetMinY(safe) + 8, MIN(CGRectGetMaxY(safe) - 8 - height, center.y - height / 2));
-    hint.bounds = CGRectMake(0, 0, width, height);
-    hint.center = CGPointMake(x + width / 2, y + height / 2);
+    CGFloat frameX = self.right ? edge - width : edge - tail;
+    hint.bounds = CGRectMake(0, 0, width + tail, height);
+    hint.center = CGPointMake(frameX + (width + tail) / 2, y + height / 2);
+    CGRect body = CGRectMake(self.right ? 0 : tail, 0, width, height);
     CGFloat radius = MIN(LSRadiusM, height / 2);
-    hint.layer.cornerRadius = radius;
-    label.frame = CGRectMake(padX, padY, width - 2 * padX, height - 2 * padY);
-    CGFloat inner = self.right ? center.x - kLSOpenerSize / 2 : center.x + kLSOpenerSize / 2;
-    self.hintPointer.center = CGPointMake((inner + edge) / 2, MAX(y + radius, MIN(y + height - radius, center.y)));
+    // The tail aims at the opener's centre, staying clear of the rounded corners.
+    CGFloat low = radius + 6, high = height - radius - 6;
+    CGFloat tailY = low <= high ? MAX(low, MIN(high, center.y - y)) : height / 2;
+    UIBezierPath *shape = LSHintBubblePath(body, radius, self.right, tailY, tail);
+    hint.maskView.frame = hint.bounds;
+    ((CAShapeLayer *)hint.maskView.layer).path = shape.CGPath;
+    // Half of the stroke falls outside the mask, so 2 pt reads as a 1 pt edge.
+    BOOL contrast = LSIncreaseContrast();
+    CGFloat scale = self.traitCollection.displayScale > 0 ? self.traitCollection.displayScale : 2;
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    self.hintOutline.frame = hint.bounds;
+    self.hintOutline.path = shape.CGPath;
+    self.hintOutline.lineWidth = contrast ? 2 : 2 / scale;
+    self.hintOutline.strokeColor = [(contrast ? UIColor.labelColor : UIColor.separatorColor) resolvedColorWithTraitCollection:self.traitCollection].CGColor;
+    [CATransaction commit];
+    label.frame = CGRectInset(body, padX, padY);
 }
 - (void)dismissHint {
-    UIVisualEffectView *hint = self.hint, *pointer = self.hintPointer;
+    UIVisualEffectView *hint = self.hint;
     UILabel *label = self.hintLabel;
+    CAShapeLayer *outline = self.hintOutline;
     if (!hint) return;
     self.hint = nil;
     self.hintLabel = nil;
-    self.hintPointer = nil;
+    self.hintOutline = nil;
     [UIView animateWithDuration:0.25 delay:0 options:UIViewAnimationOptionBeginFromCurrentState animations:^{
         hint.effect = nil;
-        pointer.effect = nil;
         label.alpha = 0;
-    } completion:^(__unused BOOL finished) {
-        [hint removeFromSuperview];
-        [pointer removeFromSuperview];
-    }];
+    } completion:^(__unused BOOL finished) { [hint removeFromSuperview]; }];
+    outline.opacity = 0;
     [self scheduleDim];
 }
 
@@ -1197,6 +1293,8 @@ static NSString *LSOpenerStatus(BOOL spoken) {
     // The state change then says that Apply last location can bring it back.
     self.offFromQuickAction = YES;
     [LSSessionController.shared disable];
+    __weak typeof(self) weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ weakSelf.offFromQuickAction = NO; });
     LSHapticImpact(UIImpactFeedbackStyleMedium);
 }
 - (NSArray<UIAccessibilityCustomAction *> *)accessibilityQuickActions {

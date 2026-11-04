@@ -26,6 +26,9 @@ FOUNDATION_EXPORT UIFont *LSMonospacedFont(UIFontTextStyle style);
 FOUNDATION_EXPORT UIButton *LSButton(NSString *title, NSString * _Nullable symbol, BOOL prominent);
 // Same as button.enabled = enabled; for an LSButton the glow fades with it (never under glass).
 FOUNDATION_EXPORT void LSSetButtonEnabled(UIButton *button, BOOL enabled);
+// Turns an LSButton's resting glow off (NO) or back to its default (YES); enabling it later
+// never brings a disabled glow back. Use this instead of writing layer.shadowOpacity.
+FOUNDATION_EXPORT void LSSetButtonGlow(UIButton *button, BOOL glow);
 // Round 44 pt glass button for floating map and header controls.
 FOUNDATION_EXPORT UIButton *LSIconButton(NSString *symbol, NSString *accessibilityLabel);
 // Compact capsule action, optionally selectable.
@@ -45,7 +48,12 @@ FOUNDATION_EXPORT UIView *LSSeparator(void);
 // never write layer.borderWidth or layer.borderColor on an LSNumberField.
 FOUNDATION_EXPORT UITextField *LSNumberField(NSString *name);
 // Shows or clears the error ring of an LSNumberField. Does nothing for other text fields.
+// Turning invalid while the field is being edited also plays a warning tap and a small shake.
 FOUNDATION_EXPORT void LSSetFieldInvalid(UITextField *field, BOOL invalid);
+// One call for an error: the ring, plus the message appended to the field's accessibility label
+// ("Latitude, Enter a latitude from −90 to 90."). nil or empty clears both. The label as it was
+// before the first call is kept as the base, so set any custom label before calling this.
+FOUNDATION_EXPORT void LSSetFieldError(UITextField *field, NSString * _Nullable message);
 FOUNDATION_EXPORT UIStackView *LSStack(NSArray<UIView *> *views, CGFloat spacing);
 FOUNDATION_EXPORT UIStackView *LSRow(NSArray<UIView *> *views, CGFloat spacing);
 FOUNDATION_EXPORT UIView *LSInsetPanel(UIView *content);
@@ -135,6 +143,9 @@ FOUNDATION_EXPORT UIStackView *LSAdaptiveRow(NSArray<UIView *> *views, CGFloat s
 FOUNDATION_EXPORT UILabel *LSPillLabel(NSString *text, UIColor *color);
 // Floating glass panel over the map: soft shadow, LSGlassView inside, content inset on all sides.
 FOUNDATION_EXPORT UIView *LSGlassPanel(UIView *content, CGFloat cornerRadius, CGFloat inset);
+// Same, as a capsule: glass corners and shadow stay at half the height through layout and
+// Dynamic Type, so no custom capsule subclass is needed. Content is inset on all sides.
+FOUNDATION_EXPORT UIView *LSGlassCapsule(UIView *content, CGFloat inset);
 // Inline first-use hint: tinted symbol, title, message and a close button. Closing collapses
 // it (animated) and then calls dismissed, where the caller remembers not to show it again.
 FOUNDATION_EXPORT UIView *LSTipView(NSString *symbol, NSString *title, NSString *message, dispatch_block_t _Nullable dismissed);

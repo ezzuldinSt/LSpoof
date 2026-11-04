@@ -226,6 +226,7 @@ static CGFloat LSEdgeWidth(UITraitCollection *traits) {
 @property (nonatomic) BOOL lsCallerRadius;      // A caller set its own radius: keep it.
 @property (nonatomic) BOOL lsGlass;
 @property (nonatomic) float lsRestingShadowOpacity;
+@property (nonatomic) float lsDefaultShadowOpacity;
 @end
 @implementation LSPillButton
 - (void)layoutSubviews {
@@ -268,6 +269,12 @@ static CGFloat LSEdgeWidth(UITraitCollection *traits) {
 }
 @end
 void LSSetButtonEnabled(UIButton *button, BOOL enabled) { button.enabled = enabled; }
+void LSSetButtonGlow(UIButton *button, BOOL glow) {
+    if (![button isKindOfClass:LSPillButton.class]) return;
+    LSPillButton *pill = (LSPillButton *)button;
+    pill.lsRestingShadowOpacity = glow ? pill.lsDefaultShadowOpacity : 0;
+    pill.layer.shadowOpacity = pill.enabled && !pill.lsGlass ? pill.lsRestingShadowOpacity : 0;
+}
 
 // Keeps the fallback rim legible when Increase Contrast is switched while the button is shown.
 @interface LSIconControlButton : UIButton
@@ -311,7 +318,8 @@ UIButton *LSButton(NSString *title, NSString *symbol, BOOL prominent) {
     button.lsMaximumCornerRadius = prominent ? 28 : 24;
     button.lsAppliedRadius = glass ? 0 : config.background.cornerRadius;
     button.lsGlass = glass != nil;
-    button.lsRestingShadowOpacity = prominent && !glass ? 0.25 : 0;
+    button.lsDefaultShadowOpacity = prominent && !glass ? 0.25 : 0;
+    button.lsRestingShadowOpacity = button.lsDefaultShadowOpacity;
     button.configuration = config;
     button.tintColor = LSAccentColor();
     button.translatesAutoresizingMaskIntoConstraints = NO;
@@ -548,13 +556,31 @@ UIView *LSSeparator(void) {
     self.layer.borderWidth = width;
     self.layer.borderColor = color;
 }
-- (void)setLsInvalid:(BOOL)invalid {
-    _lsInvalid = invalid;
+- (void)ls_invalidWas:(BOOL)wasInvalid {
+    // Turning invalid while being typed into earns a warning tap and a small head-shake, the
+    // way a wrong passcode does. Fields the person is not editing change quietly.
+    if (!wasInvalid && (self.lsInvalid || self.lsRowInvalid) && self.isFirstResponder) {
+        LSHapticWarning();
+        if (LSMapAnimationsEnabled()) {
+            CAKeyframeAnimation *nudge = [CAKeyframeAnimation animationWithKeyPath:@"position.x"];
+            nudge.values = @[@0, @(-5), @5, @(-5), @0];
+            nudge.additive = YES;
+            nudge.duration = 0.3;
+            nudge.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+            [self.layer addAnimation:nudge forKey:@"lsNudge"];
+        }
+    }
     [self ls_updateRing];
 }
+- (void)setLsInvalid:(BOOL)invalid {
+    BOOL was = _lsInvalid || _lsRowInvalid;
+    _lsInvalid = invalid;
+    [self ls_invalidWas:was];
+}
 - (void)setLsRowInvalid:(BOOL)invalid {
+    BOOL was = _lsInvalid || _lsRowInvalid;
     _lsRowInvalid = invalid;
-    [self ls_updateRing];
+    [self ls_invalidWas:was];
 }
 - (BOOL)becomeFirstResponder {
     BOOL result = [super becomeFirstResponder];
@@ -573,6 +599,20 @@ UIView *LSSeparator(void) {
 @end
 void LSSetFieldInvalid(UITextField *field, BOOL invalid) {
     if ([field isKindOfClass:LSNumberTextField.class]) ((LSNumberTextField *)field).lsInvalid = invalid;
+}
+static char ls_fieldBaseLabelKey;
+void LSSetFieldError(UITextField *field, NSString *message) {
+    if (!field) return;
+    // The label as it was before any error, captured once ("" when there was none).
+    NSString *base = objc_getAssociatedObject(field, &ls_fieldBaseLabelKey);
+    if (!base) {
+        base = field.accessibilityLabel ?: @"";
+        objc_setAssociatedObject(field, &ls_fieldBaseLabelKey, base, OBJC_ASSOCIATION_COPY_NONATOMIC);
+    }
+    BOOL invalid = message.length > 0;
+    if (!invalid) field.accessibilityLabel = base.length ? base : nil;
+    else field.accessibilityLabel = base.length ? [NSString stringWithFormat:@"%@, %@", base, message] : message;
+    LSSetFieldInvalid(field, invalid);
 }
 
 UITextField *LSNumberField(NSString *name) {
@@ -917,26 +957,34 @@ UIVisualEffectView *LSGlassView(CGFloat cornerRadius, BOOL interactive) {
     return view;
 }
 
-// Shadow host for a clipped glass view: the shadow lives outside the clip.
+// Shadow host for a clipped glass view: the shadow lives outside the clip. A capsule keeps
+// glass and shadow at half its height, so it stays round as Dynamic Type grows the content.
 @interface LSFloatingPanelView : UIView
 @property (nonatomic) CGFloat lsCornerRadius;
+@property (nonatomic) BOOL lsCapsule;
+@property (nonatomic, weak) UIView *lsGlass;
 @end
 @implementation LSFloatingPanelView
 - (void)layoutSubviews {
     [super layoutSubviews];
-    CGFloat radius = MIN(self.lsCornerRadius, MIN(self.bounds.size.width, self.bounds.size.height) / 2);
+    CGFloat half = MIN(self.bounds.size.width, self.bounds.size.height) / 2;
+    CGFloat radius = self.lsCapsule ? half : MIN(self.lsCornerRadius, half);
+    UIView *glass = self.lsGlass;
+    if (self.lsCapsule && fabs(glass.layer.cornerRadius - radius) > 0.25) glass.layer.cornerRadius = radius;
     self.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:self.bounds cornerRadius:radius].CGPath;
 }
 @end
-UIView *LSGlassPanel(UIView *content, CGFloat cornerRadius, CGFloat inset) {
+static UIView *LSFloatingGlass(UIView *content, CGFloat cornerRadius, CGFloat inset, BOOL capsule) {
     LSFloatingPanelView *panel = [[LSFloatingPanelView alloc] init];
     panel.translatesAutoresizingMaskIntoConstraints = NO;
     panel.lsCornerRadius = cornerRadius;
+    panel.lsCapsule = capsule;
     panel.layer.shadowColor = UIColor.blackColor.CGColor;
     panel.layer.shadowOpacity = LSLiquidGlassAvailable() ? 0.08 : 0.14; // Liquid Glass draws its own depth.
     panel.layer.shadowRadius = 18;
     panel.layer.shadowOffset = CGSizeMake(0, 8);
     UIVisualEffectView *glass = LSGlassView(cornerRadius, NO);
+    panel.lsGlass = glass;
     [panel addSubview:glass];
     content.translatesAutoresizingMaskIntoConstraints = NO;
     [glass.contentView addSubview:content];
@@ -954,6 +1002,8 @@ UIView *LSGlassPanel(UIView *content, CGFloat cornerRadius, CGFloat inset) {
     ]];
     return panel;
 }
+UIView *LSGlassPanel(UIView *content, CGFloat cornerRadius, CGFloat inset) { return LSFloatingGlass(content, cornerRadius, inset, NO); }
+UIView *LSGlassCapsule(UIView *content, CGFloat inset) { return LSFloatingGlass(content, 0, inset, YES); }
 
 @interface LSPillLabelView : UILabel
 @end
@@ -1096,14 +1146,43 @@ static char ls_toastKey;
 @property (nonatomic, copy, nullable) dispatch_block_t lsAction;
 @property (nonatomic) BOOL lsFromBottom;
 @property (nonatomic) BOOL lsDismissing;
+@property (nonatomic, strong, nullable) CAShapeLayer *lsCountdown; // Action toasts: time left.
+@property (nonatomic, strong, nullable) UIColor *lsTint;
 @end
 static void LSHideToast(LSToastView *toast, BOOL quick);
 @implementation LSToastView
 - (void)layoutSubviews {
     [super layoutSubviews];
-    CGFloat radius = MIN(self.bounds.size.height / 2, 26);
+    CGSize size = self.bounds.size;
+    CGFloat radius = MIN(size.height / 2, 26);
     self.lsGlass.layer.cornerRadius = radius;
     self.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:self.bounds cornerRadius:radius].CGPath;
+    CAShapeLayer *countdown = self.lsCountdown;
+    if (countdown) {
+        // Along the straight run of the bottom edge, clear of the rounded ends.
+        UIBezierPath *line = [UIBezierPath bezierPath];
+        [line moveToPoint:CGPointMake(radius, size.height - 1)];
+        [line addLineToPoint:CGPointMake(MAX(radius, size.width - radius), size.height - 1)];
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        countdown.frame = self.bounds;
+        countdown.path = line.CGPath;
+        [CATransaction commit];
+    }
+}
+- (void)ls_updateCountdownColor {
+    CAShapeLayer *countdown = self.lsCountdown;
+    if (!countdown || !self.lsTint) return;
+    UIColor *color = [self.lsTint resolvedColorWithTraitCollection:self.traitCollection];
+    if (!LSIncreaseContrast()) color = [color colorWithAlphaComponent:0.55];
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    countdown.strokeColor = color.CGColor;
+    [CATransaction commit];
+}
+- (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
+    [super traitCollectionDidChange:previousTraitCollection];
+    [self ls_updateCountdownColor];
 }
 - (void)ls_swiped:(UISwipeGestureRecognizer *)gesture {
     (void)gesture;
@@ -1213,6 +1292,15 @@ static void LSPresentToast(UIView *host, BOOL bottom, UIView *aboveView, NSStrin
 
     __weak LSToastView *weakToast = toast;
     if (hasAction) {
+        // A hairline that runs out with the time left to act; it stays full under Reduce Motion.
+        CAShapeLayer *countdown = [CAShapeLayer layer];
+        countdown.lineWidth = 2;
+        countdown.lineCap = kCALineCapRound;
+        countdown.fillColor = nil;
+        [glass.contentView.layer addSublayer:countdown];
+        toast.lsCountdown = countdown;
+        toast.lsTint = tint;
+        [toast ls_updateCountdownColor];
         UISwipeGestureRecognizer *swipe = [[UISwipeGestureRecognizer alloc] initWithTarget:toast action:@selector(ls_swiped:)];
         swipe.direction = UISwipeGestureRecognizerDirectionUp | UISwipeGestureRecognizerDirectionDown;
         [toast addGestureRecognizer:swipe];
@@ -1241,6 +1329,21 @@ static void LSPresentToast(UIView *host, BOOL bottom, UIView *aboveView, NSStrin
 
     NSTimeInterval visible = MIN(6.0, 2.2 + message.length / 40.0);
     if (hasAction) visible = UIAccessibilityIsVoiceOverRunning() ? 12.0 : MAX(visible, 5.0);
+    CAShapeLayer *countdown = toast.lsCountdown;
+    if (countdown && motion) {
+        CABasicAnimation *drain = [CABasicAnimation animationWithKeyPath:@"strokeEnd"];
+        drain.fromValue = @1;
+        drain.toValue = @0;
+        drain.duration = visible;
+        drain.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionLinear];
+        drain.removedOnCompletion = NO; // Survives a trip to the background.
+        drain.fillMode = kCAFillModeForwards;
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        countdown.strokeEnd = 0;
+        [CATransaction commit];
+        [countdown addAnimation:drain forKey:@"lsCountdown"];
+    }
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(visible * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ LSHideToast(weakToast, NO); });
 }
 void LSShowToast(UIView *host, NSString *message, NSString *symbol) { LSPresentToast(host, NO, nil, message, symbol, nil, nil); }
@@ -1319,9 +1422,13 @@ static NSString *LSMatchGroup(NSString *text, NSTextCheckingResult *match, NSUIn
     return range.location == NSNotFound ? nil : [text substringWithRange:range];
 }
 static unichar LSHemisphere(NSString *letter) { return letter.length ? [letter.uppercaseString characterAtIndex:0] : 0; }
-// Degrees with optional minutes and seconds. Only the last part given may have a fraction,
-// minutes and seconds stay below 60, and a minus sign never combines with a hemisphere letter.
+// Degrees with optional minutes and seconds. Only the last part given may have a fraction
+// (point or comma), minutes and seconds stay below 60, and a minus sign (- or −) never
+// combines with a hemisphere letter.
 static BOOL LSAngleValue(NSString *degrees, NSString *minutes, NSString *seconds, NSString *sign, unichar hemisphere, double *value) {
+    degrees = [degrees stringByReplacingOccurrencesOfString:@"," withString:@"."];
+    minutes = [minutes stringByReplacingOccurrencesOfString:@"," withString:@"."];
+    seconds = [seconds stringByReplacingOccurrencesOfString:@"," withString:@"."];
     if ((minutes && [degrees containsString:@"."]) || (seconds && [minutes containsString:@"."])) return NO;
     double m = minutes.doubleValue, s = seconds.doubleValue;
     if (m >= 60 || s >= 60) return NO;
@@ -1331,15 +1438,18 @@ static BOOL LSAngleValue(NSString *degrees, NSString *minutes, NSString *seconds
     *value = minus || hemisphere == 'S' || hemisphere == 'W' ? -angle : angle;
     return isfinite(*value);
 }
-// 48°51'29.6"N 2°17'40.2"E, N 48° 51.493' E 2° 17.67', 48.8584° N, 2.2945° E. Primes, smart
-// quotes and '' all mark minutes and seconds; letters may lead or trail each value and put
-// longitude first. ASCII digits only, like the decimal forms.
+// 48°51'29.6"N 2°17'40.2"E, N 48° 51.493' E 2° 17.67', 48.8584° N, 2.2945° E, 48°51,5' N.
+// Primes, smart quotes and '' all mark minutes and seconds; letters may lead or trail each
+// value and put longitude first. Every number ends in its unit mark, so a decimal comma can
+// never be read as the separator. ASCII digits only, like the decimal forms.
 static BOOL LSParseAnglePair(NSString *text, CLLocationCoordinate2D *coordinate) {
     static NSRegularExpression *pair;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        NSString *part = @"([NSEW])?\\s*([+−-])?\\s*([0-9]{1,3}(?:\\.[0-9]+)?)\\s*[°º˚]\\s*"
-                         @"(?:([0-9]{1,2}(?:\\.[0-9]+)?)\\s*['′’]\\s*(?:([0-9]{1,2}(?:\\.[0-9]+)?)\\s*(?:\"|″|”|''|′′))?)?\\s*([NSEW])?";
+        // Degrees never directly follow a degree or minute mark: in 48°51'29,2°17' the 29 is
+        // seconds missing their mark, not the start of the second value.
+        NSString *part = @"([NSEW])?\\s*([+−-])?\\s*(?<![°º˚'′’])([0-9]{1,3}(?:[.,][0-9]+)?)\\s*[°º˚]\\s*"
+                         @"(?:([0-9]{1,2}(?:[.,][0-9]+)?)\\s*['′’]\\s*(?:([0-9]{1,2}(?:[.,][0-9]+)?)\\s*(?:\"|″|”|''|′′))?)?\\s*([NSEW])?";
         NSString *pattern = [NSString stringWithFormat:@"^\\s*%@\\s*(?:[,;/]\\s*)?%@\\s*$", part, part];
         pair = [NSRegularExpression regularExpressionWithPattern:pattern options:NSRegularExpressionCaseInsensitive error:nil];
     });
