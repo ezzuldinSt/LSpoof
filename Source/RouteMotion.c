@@ -24,6 +24,75 @@ void LSMotionReset(LSMotionState *state) {
     state->segment = 1;
 }
 
+size_t LSMotionLegAt(const LSMotionRoute *route, double covered) {
+    if (!route || !route->legs || route->legCount == 0) return 0;
+    size_t leg = 0;
+    while (leg + 1 < route->legCount && route->legs[leg].end <= covered) leg++;
+    return leg;
+}
+
+LSMotionKind LSMotionKindForKmh(double kmh) {
+    return kmh <= 7.0 ? LSMotionKindWalking : (kmh <= 25.0 ? LSMotionKindCycling : LSMotionKindDriving);
+}
+
+void LSMotionApplyPhysics(LSMotionParams *params, LSMotionKind kind, int profile) {
+    if (!params) return;
+    switch (kind) {
+        case LSMotionKindWalking: params->acceleration = 0.6; params->deceleration = 1.0; params->lateralAcceleration = 1.5; params->minimumCornerSpeed = 0.8; break;
+        case LSMotionKindCycling: params->acceleration = 0.9; params->deceleration = 2.0; params->lateralAcceleration = 2.0; params->minimumCornerSpeed = 2.0; break;
+        default: params->acceleration = 2.2; params->deceleration = 3.0; params->lateralAcceleration = 2.8; params->minimumCornerSpeed = 3.0; break;
+    }
+    double scale = profile == 0 ? 0.6 : (profile == 2 ? 1.6 : 1.0);
+    double lateral = profile == 0 ? 0.85 : (profile == 2 ? 1.2 : 1.0);
+    params->acceleration *= scale;
+    params->deceleration *= scale;
+    params->lateralAcceleration *= lateral;
+}
+
+void LSMotionFillLegs(LSMotionLeg *legs, size_t count, const double *ends, const double *ownKmh,
+                      const unsigned long *paths, LSMotionKind routeKind, int profile) {
+    if (!legs || !ends || !ownKmh || !paths) return;
+    for (size_t index = 0; index < count; index++) {
+        bool own = isfinite(ownKmh[index]) && ownKmh[index] > 0.0;
+        LSMotionLeg leg = {.end = ends[index], .cruiseSpeed = NAN};
+        if (own) {
+            LSMotionParams physics = {0};
+            LSMotionApplyPhysics(&physics, LSMotionKindForKmh(ownKmh[index]), profile);
+            leg.cruiseSpeed = ownKmh[index] / 3.6;
+            leg.acceleration = physics.acceleration;
+            leg.deceleration = physics.deceleration;
+            leg.lateralAcceleration = physics.lateralAcceleration;
+            leg.minimumCornerSpeed = physics.minimumCornerSpeed;
+        }
+        if (index + 1 < count) {
+            // Getting out of the car: smooth motion comes to rest where the kind of movement
+            // or the path changes, then sets off again.
+            bool nextOwn = isfinite(ownKmh[index + 1]) && ownKmh[index + 1] > 0.0;
+            LSMotionKind here = own ? LSMotionKindForKmh(ownKmh[index]) : routeKind;
+            LSMotionKind there = nextOwn ? LSMotionKindForKmh(ownKmh[index + 1]) : routeKind;
+            leg.haltAtEnd = here != there || paths[index] != paths[index + 1];
+        }
+        legs[index] = leg;
+    }
+}
+
+static void LSAdvanceLeg(const LSMotionRoute *route, LSMotionState *state) {
+    if (!route->legs) return;
+    while (state->leg + 1 < route->legCount && route->legs[state->leg].end <= state->covered) state->leg++;
+}
+
+LSMotionParams LSMotionParamsForLeg(const LSMotionRoute *route, const LSMotionParams *params, size_t index) {
+    LSMotionParams result = *params;
+    if (!route || !route->legs || index >= route->legCount) return result;
+    const LSMotionLeg *leg = &route->legs[index];
+    if (isfinite(leg->cruiseSpeed) && leg->cruiseSpeed > 0.0) result.cruiseSpeed = leg->cruiseSpeed;
+    if (leg->acceleration > 0.0) result.acceleration = leg->acceleration;
+    if (leg->deceleration > 0.0) result.deceleration = leg->deceleration;
+    if (leg->lateralAcceleration > 0.0) result.lateralAcceleration = leg->lateralAcceleration;
+    if (leg->minimumCornerSpeed > 0.0) result.minimumCornerSpeed = leg->minimumCornerSpeed;
+    return result;
+}
+
 void LSMotionSeek(const LSMotionRoute *route, LSMotionState *state, double covered) {
     if (!state) return;
     LSMotionReset(state);
@@ -32,6 +101,7 @@ void LSMotionSeek(const LSMotionRoute *route, LSMotionState *state, double cover
     state->covered = LSClamp(covered, 0.0, total);
     while (state->segment + 1 < route->count && route->cumulative[state->segment] <= state->covered) state->segment++;
     while (state->nextStop < route->stopCount && route->stopDistance[state->nextStop] <= state->covered) state->nextStop++;
+    LSAdvanceLeg(route, state);
     state->finished = state->covered >= total;
 }
 
@@ -46,7 +116,8 @@ double LSMotionDwellForStop(const LSMotionRoute *route, const LSMotionParams *pa
 }
 
 double LSMotionCruise(const LSMotionRoute *route, const LSMotionParams *params, const LSMotionState *state) {
-    double cruise = isfinite(params->cruiseSpeed) ? params->cruiseSpeed : kLSMinimumSpeed;
+    double base = LSMotionParamsForLeg(route, params, state->leg).cruiseSpeed;
+    double cruise = isfinite(base) ? base : kLSMinimumSpeed;
     if (params->useRecordedPace && route->recordedSpeed && route->count >= 2) {
         size_t index = state->segment < route->count ? state->segment : route->count - 1;
         if (index == 0) index = 1;
@@ -57,12 +128,32 @@ double LSMotionCruise(const LSMotionRoute *route, const LSMotionParams *params, 
     return LSClamp(cruise, kLSMinimumSpeed, kLSMaximumSpeed);
 }
 
-// The highest speed from which every upcoming stop, turn and the destination can
-// still be met by braking at the configured rate.
-static double LSBrakingLimit(const LSMotionRoute *route, const LSMotionParams *params, const LSMotionState *state, double cruise) {
+// The highest speed from which every upcoming stop, turn, change of mode, slower leg and
+// the destination can still be met by braking at the configured rate. params are the
+// current leg's (LSMotionParamsForLeg); base are the route's, which other legs start from.
+static double LSBrakingLimit(const LSMotionRoute *route, const LSMotionParams *base, const LSMotionParams *params,
+                             const LSMotionState *state, double cruise) {
     double braking = params->deceleration > 0.0 ? params->deceleration : 1.0;
-    double horizon = cruise * cruise / (2.0 * braking) + 5.0;
+    // From the current speed too: it can be above cruise just after entering a slower leg.
+    double fastest = fmax(cruise, state->speed);
+    double horizon = fastest * fastest / (2.0 * braking) + 5.0;
     double limit = INFINITY;
+    if (route->legs) {
+        for (size_t index = state->leg; index + 1 < route->legCount; index++) {
+            double distance = route->legs[index].end - state->covered;
+            if (distance > horizon) break;
+            if (distance < 0.0) continue;
+            if (route->legs[index].haltAtEnd) {
+                limit = fmin(limit, sqrt(2.0 * braking * distance));
+                break;
+            }
+            if (params->useRecordedPace) continue;
+            // A slower leg is reached at its own speed instead of being braked into.
+            double next = LSMotionParamsForLeg(route, base, index + 1).cruiseSpeed;
+            next = LSClamp(isfinite(next) ? next : kLSMinimumSpeed, kLSMinimumSpeed, kLSMaximumSpeed);
+            if (next < cruise) limit = fmin(limit, sqrt(next * next + 2.0 * braking * distance));
+        }
+    }
     double toEnd = LSMotionTotal(route) - state->covered;
     if (toEnd <= horizon) limit = fmin(limit, sqrt(2.0 * braking * fmax(0.0, toEnd)));
     for (size_t index = state->nextStop; index < route->stopCount; index++) {
@@ -91,8 +182,6 @@ double LSMotionStep(const LSMotionRoute *route, const LSMotionParams *params, LS
     double total = LSMotionTotal(route);
     if (!(total > 0.0)) { state->finished = true; return 0.0; }
     double substep = params->substep > 0.0 ? params->substep : 0.1;
-    double acceleration = params->acceleration > 0.0 ? params->acceleration : 1.0;
-    double deceleration = params->deceleration > 0.0 ? params->deceleration : 1.0;
     double remaining = dt;
     unsigned guard = 0;
     while (remaining > 1e-9 && !state->finished && guard++ < 200000) {
@@ -110,10 +199,14 @@ double LSMotionStep(const LSMotionRoute *route, const LSMotionParams *params, LS
         }
         // Passing a stop with no wait leaves it behind.
         while (state->nextStop < route->stopCount && route->stopDistance[state->nextStop] < state->covered - 1e-9) state->nextStop++;
+        LSAdvanceLeg(route, state);
+        LSMotionParams leg = LSMotionParamsForLeg(route, params, state->leg);
+        double acceleration = leg.acceleration > 0.0 ? leg.acceleration : 1.0;
+        double deceleration = leg.deceleration > 0.0 ? leg.deceleration : 1.0;
         double step = params->smooth ? fmin(remaining, substep) : remaining;
         double cruise = LSMotionCruise(route, params, state);
         if (params->smooth) {
-            double limit = LSBrakingLimit(route, params, state, cruise);
+            double limit = LSBrakingLimit(route, params, &leg, state, cruise);
             double target = fmin(cruise, limit);
             if (state->speed < target) {
                 state->speed = fmin(target, state->speed + acceleration * step);
@@ -132,6 +225,21 @@ double LSMotionStep(const LSMotionRoute *route, const LSMotionParams *params, LS
             if (segmentEnd > state->covered && next > segmentEnd) {
                 step = (segmentEnd - state->covered) / state->speed;
                 next = segmentEnd;
+            }
+        }
+        bool halted = false;
+        if (route->legs && state->leg + 1 < route->legCount) {
+            double legEnd = route->legs[state->leg].end;
+            if (!params->smooth && state->speed > 0.0) {
+                // The next leg can play at another speed; end the step where this one ends.
+                if (legEnd > state->covered && next > legEnd) {
+                    step = (legEnd - state->covered) / state->speed;
+                    next = legEnd;
+                }
+            } else if (params->smooth && route->legs[state->leg].haltAtEnd &&
+                       (next >= legEnd - 1e-9 || (legEnd - next < kLSArrivalDistance && state->speed < kLSArrivalSpeed))) {
+                next = legEnd;
+                halted = true;
             }
         }
         bool arrivedAtStop = false;
@@ -161,12 +269,16 @@ double LSMotionStep(const LSMotionRoute *route, const LSMotionParams *params, LS
         state->covered = next;
         remaining -= step;
         while (state->segment + 1 < route->count && route->cumulative[state->segment] <= state->covered) state->segment++;
+        LSAdvanceLeg(route, state);
         if (arrivedAtEnd) {
             state->finished = true;
             state->speed = 0.0;
         } else if (arrivedAtStop) {
             state->dwelling = true;
             state->dwellRemaining = dwell;
+            state->speed = 0.0;
+        } else if (halted) {
+            // At rest where the mode changes; the next leg starts from standing.
             state->speed = 0.0;
         }
     }

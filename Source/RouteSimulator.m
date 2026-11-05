@@ -70,7 +70,13 @@ static const double kLSPresetSpeeds[] = {5, 15, 50};
 }
 @end
 
-// The route in the arrays the motion model reads, plus turn radii.
+// The kind of movement the route speed moves like; custom speeds like the nearest preset.
+static LSMotionKind LSMotionKindForOptions(LSPlaybackOptions *options) {
+    return options.mode == LSTransportModeCustom ? LSMotionKindForKmh(options.speedKmh) : (LSMotionKind)MAX(0, MIN(2, options.mode));
+}
+
+// The route in the arrays the motion model reads, plus turn radii and the legs, which
+// depend on the playback options and are filled in by paramsForOptions:.
 @interface LSMotionPlan : NSObject {
 @public
     LSMotionRoute _motion;
@@ -80,6 +86,8 @@ static const double kLSPresetSpeeds[] = {5, 15, 50};
 @property (nonatomic, strong, nullable) NSData *speeds;
 @property (nonatomic, strong) NSMutableData *stopDistances;
 @property (nonatomic, strong) NSMutableData *stopDwells;
+@property (nonatomic, strong) NSMutableData *legs;
+- (LSMotionParams)paramsForOptions:(LSPlaybackOptions *)options;
 @end
 @implementation LSMotionPlan
 - (instancetype)initWithRoute:(LSRoute *)route {
@@ -100,35 +108,52 @@ static const double kLSPresetSpeeds[] = {5, 15, 50};
         ((double *)_stopDistances.mutableBytes)[index] = route.stopDistances[index].doubleValue;
         ((double *)_stopDwells.mutableBytes)[index] = route.stopDwells[index].doubleValue;
     }
+    _legs = [NSMutableData dataWithLength:sizeof(LSMotionLeg) * route.legs.count];
     _motion = (LSMotionRoute){route.cumulativeDistances, _radii.bytes, _speeds.bytes, count,
-                              _stopDistances.bytes, _stopDwells.bytes, route.stopDistances.count};
+                              _stopDistances.bytes, _stopDwells.bytes, route.stopDistances.count, NULL, 0};
     return self;
 }
-@end
-
-static LSMotionParams LSParamsForOptions(LSPlaybackOptions *options, LSRoute *route) {
+// The params for these options, with each leg's own speed and physics written into the
+// legs the motion model reads. Every estimate and the live tick go through here, so they
+// all play the legs the same way.
+- (LSMotionParams)paramsForOptions:(LSPlaybackOptions *)options {
     LSMotionParams params = {0};
     params.cruiseSpeed = options.speedMetersPerSecond;
     params.paceMultiplier = options.paceMultiplier > 0 ? options.paceMultiplier : 1.0;
-    params.useRecordedPace = options.recordedPace && route.hasTiming;
+    params.useRecordedPace = options.recordedPace && self.route.hasTiming;
     // A recording already contains its own speeding up and slowing down.
     params.smooth = options.smooth && !params.useRecordedPace;
     params.defaultDwell = options.stopDwell;
-    double kmh = options.speedKmh;
-    LSTransportMode physics = options.mode;
-    if (physics == LSTransportModeCustom) physics = kmh <= 7 ? LSTransportModeWalking : (kmh <= 25 ? LSTransportModeCycling : LSTransportModeDriving);
-    switch (physics) {
-        case LSTransportModeWalking: params.acceleration = 0.6; params.deceleration = 1.0; params.lateralAcceleration = 1.5; params.minimumCornerSpeed = 0.8; break;
-        case LSTransportModeCycling: params.acceleration = 0.9; params.deceleration = 2.0; params.lateralAcceleration = 2.0; params.minimumCornerSpeed = 2.0; break;
-        default: params.acceleration = 2.2; params.deceleration = 3.0; params.lateralAcceleration = 2.8; params.minimumCornerSpeed = 3.0; break;
-    }
-    double scale = options.accelerationProfile == LSAccelerationGentle ? 0.6 : (options.accelerationProfile == LSAccelerationSporty ? 1.6 : 1.0);
-    double lateral = options.accelerationProfile == LSAccelerationGentle ? 0.85 : (options.accelerationProfile == LSAccelerationSporty ? 1.2 : 1.0);
-    params.acceleration *= scale;
-    params.deceleration *= scale;
-    params.lateralAcceleration *= lateral;
+    LSMotionKind routeKind = LSMotionKindForOptions(options);
+    LSMotionApplyPhysics(&params, routeKind, (int)options.accelerationProfile);
     params.substep = 0.1;
+
+    NSArray<LSRouteLeg *> *legs = self.route.legs;
+    // A recording plays at its own pace, which no leg setting changes.
+    if (params.useRecordedPace || legs.count < 2 || !self.route.hasLegSettings) {
+        _motion.legs = NULL;
+        _motion.legCount = 0;
+        return params;
+    }
+    NSUInteger count = legs.count;
+    NSMutableData *ends = [NSMutableData dataWithLength:sizeof(double) * count];
+    NSMutableData *speeds = [NSMutableData dataWithLength:sizeof(double) * count];
+    NSMutableData *paths = [NSMutableData dataWithLength:sizeof(unsigned long) * count];
+    for (NSUInteger index = 0; index < count; index++) {
+        ((double *)ends.mutableBytes)[index] = legs[index].endDistance;
+        ((double *)speeds.mutableBytes)[index] = legs[index].speedKmh;
+        ((unsigned long *)paths.mutableBytes)[index] = legs[index].transportType;
+    }
+    LSMotionLeg *motionLegs = self.legs.mutableBytes;
+    LSMotionFillLegs(motionLegs, count, ends.bytes, speeds.bytes, paths.bytes, routeKind, (int)options.accelerationProfile);
+    _motion.legs = motionLegs;
+    _motion.legCount = count;
     return params;
+}
+@end
+
+static LSMotionParams LSParamsForOptions(LSPlaybackOptions *options, LSMotionPlan *plan) {
+    return [plan paramsForOptions:options];
 }
 
 @interface LSRouteSimulator () {
@@ -179,7 +204,24 @@ static LSMotionParams LSParamsForOptions(LSPlaybackOptions *options, LSRoute *ro
     _options = [options copy];
     self.remainingDirty = YES;
 }
-- (LSTransportMode)transportMode { return self.options.mode; }
+// Where a leg has its own speed, the location moves (and reports accuracy) like that mode.
+- (LSTransportMode)transportMode {
+    LSRouteLeg *leg = [self currentLeg];
+    if (!leg.hasOwnSpeed || (self.options.recordedPace && self.route.hasTiming)) return self.options.mode;
+    return [LSPlaybackOptions optionsWithSpeedKmh:leg.speedKmh].mode;
+}
+- (nullable LSRouteLeg *)currentLeg {
+    NSArray<LSRouteLeg *> *legs = self.route.legs;
+    return legs.count ? legs[[self currentLegIndex]] : nil;
+}
+- (NSUInteger)currentLegIndex {
+    LSRoute *route = self.route;
+    return route ? MIN(route.legs.count ? route.legs.count - 1 : 0, [route legIndexAtDistance:_state.covered]) : 0;
+}
+- (BOOL)currentLegHasOwnSpeed {
+    return [self currentLeg].hasOwnSpeed && !(self.options.recordedPace && self.route.hasTiming);
+}
+- (double)setSpeedKmh { return self.currentLegHasOwnSpeed ? [self currentLeg].speedKmh : self.options.speedKmh; }
 - (double)customSpeedKmh { return self.options.customSpeedKmh; }
 - (double)totalDistance { return self.route.distance; }
 - (double)distanceCovered { return self.route ? _state.covered : 0.0; }
@@ -275,6 +317,17 @@ static LSMotionParams LSParamsForOptions(LSPlaybackOptions *options, LSRoute *ro
     return YES;
 }
 
+- (BOOL)replaceRouteKeepingProgress:(LSRoute *)route {
+    if (!self.isSimulating || ![route hasSamePathAs:self.route] || route.legs.count != self.route.legs.count) return NO;
+    LSMotionPlan *plan = [[LSMotionPlan alloc] initWithRoute:route];
+    if (!plan) return NO;
+    // Same points and stops, so the motion state carries over as it is.
+    self.route = route;
+    self.plan = plan;
+    self.remainingDirty = YES;
+    return YES;
+}
+
 - (void)pause {
     if (!self.isSimulating || self.isPaused) {
         return;
@@ -326,7 +379,7 @@ static LSMotionParams LSParamsForOptions(LSPlaybackOptions *options, LSRoute *ro
     // location far along the route; movement resumes at normal speed instead.
     NSTimeInterval elapsed = MIN(1.0, MAX(0.0, now - self.lastTickTime));
     self.lastTickTime = now;
-    LSMotionParams params = LSParamsForOptions(self.options, self.route);
+    LSMotionParams params = LSParamsForOptions(self.options, self.plan);
     LSMotionStep(&self.plan->_motion, &params, &_state, elapsed);
 
     CLLocationDirection heading = self.currentHeading;
@@ -358,7 +411,8 @@ static LSMotionParams LSParamsForOptions(LSPlaybackOptions *options, LSRoute *ro
 #pragma mark - Estimates
 
 static BOOL LSNeedsPlayback(LSMotionParams params, const LSMotionRoute *route) {
-    if (params.smooth || params.useRecordedPace) return YES;
+    // Legs at their own speeds are timed leg by leg; steady playback ends each step at a leg's end.
+    if (params.smooth || params.useRecordedPace || route->legCount) return YES;
     for (size_t index = 0; index < route->stopCount; index++) if (route->stopDwell[index] < 0 && params.defaultDwell > 0) return YES;
     return NO;
 }
@@ -387,7 +441,7 @@ static double LSRemainingFrom(const LSMotionRoute *route, LSMotionParams params,
         double passed = self.isPaused ? 0.0 : now - self.cachedRemainingAt;
         return MAX(0.0, self.cachedRemaining - passed);
     }
-    LSMotionParams params = LSParamsForOptions(self.options, self.route);
+    LSMotionParams params = LSParamsForOptions(self.options, self.plan);
     double remaining = LSRemainingFrom(&self.plan->_motion, params, _state);
     self.cachedRemaining = remaining;
     self.cachedRemainingAt = now;
@@ -400,7 +454,8 @@ static double LSRemainingFrom(const LSMotionRoute *route, LSMotionParams params,
     LSMotionPlan *plan = [[LSMotionPlan alloc] initWithRoute:route];
     LSMotionState state;
     LSMotionReset(&state);
-    return LSRemainingFrom(&plan->_motion, LSParamsForOptions(options, route), state);
+    LSMotionParams params = LSParamsForOptions(options, plan);
+    return LSRemainingFrom(&plan->_motion, params, state);
 }
 
 + (double)speedKmhForRoute:(LSRoute *)route options:(LSPlaybackOptions *)options finishingIn:(NSTimeInterval)seconds {
@@ -413,7 +468,8 @@ static double LSRemainingFrom(const LSMotionRoute *route, LSMotionParams params,
     LSMotionReset(&start);
     double (^durationAt)(double) = ^double(double kmh) {
         trial.customSpeedKmh = kmh;
-        return LSRemainingFrom(&plan->_motion, LSParamsForOptions(trial, route), start);
+        LSMotionParams params = LSParamsForOptions(trial, plan);
+        return LSRemainingFrom(&plan->_motion, params, start);
     };
     double fastest = durationAt(500.0);
     if (!isfinite(fastest) || fastest > seconds * 1.01) return NAN;
@@ -432,7 +488,7 @@ static double LSRemainingFrom(const LSMotionRoute *route, LSMotionParams params,
                            block:(void (^)(NSTimeInterval, CLLocationCoordinate2D, double, double, CLLocationDirection))block {
     if (!route || !block || !options.isValid) return;
     LSMotionPlan *plan = [[LSMotionPlan alloc] initWithRoute:route];
-    LSMotionParams params = LSParamsForOptions(options, route);
+    LSMotionParams params = LSParamsForOptions(options, plan);
     if (!(interval > 0) || !isfinite(interval)) interval = 1.0;
     NSTimeInterval estimate = LSRemainingFrom(&plan->_motion, params, (LSMotionState){.segment = 1});
     // Long trips are sampled less often so the files stay a reasonable size.

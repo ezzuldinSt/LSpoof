@@ -198,6 +198,16 @@ typedef NS_ENUM(NSInteger, LSEndpoint) { LSEndpointFrom, LSEndpointStop, LSEndpo
 @property (nonatomic, strong) LSRouteRailView *routeToRail;
 @property (nonatomic, strong) LSRouteRailView *routeAddRail;
 @property (nonatomic) BOOL routeHighlightQueued;
+// Legs (From to stop 1, …, the last stop to To): the row under each place that sets how the
+// next leg is travelled, and the directions already looked up per leg (both ends and the path
+// type), so changing one leg's path or one stop only looks up the legs that changed.
+@property (nonatomic, strong) UIView *routeFromRow;
+@property (nonatomic, strong) UIStackView *routeFirstLegStack;
+@property (nonatomic, copy, nullable) NSArray<UIButton *> *routeLegButtons;
+@property (nonatomic, copy, nullable) NSArray<LSRouteRailView *> *routeLegRails;
+@property (nonatomic, strong, nullable) NSMutableDictionary<NSString *, LSRouteLegPath *> *routeLegCache;
+// The leg whose lookup failed last, for the recovery button; -1 when none did.
+@property (nonatomic) NSInteger routeFailedLeg;
 // Status card: hint, busy, error and ready states.
 @property (nonatomic, strong) UIView *routeFeedbackWrap;
 @property (nonatomic, strong) UIImageView *routeFeedbackIcon;
