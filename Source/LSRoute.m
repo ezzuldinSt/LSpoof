@@ -468,8 +468,10 @@ static BOOL LSTransportUsable(MKDirectionsTransportType type) {
         [dwells addObject:@(seconds < 0 ? -1.0 : seconds)];
         if (route->_pauseData && seconds >= 0) {
             const double *cumulative = route.cumulativeDistances;
+            // Kept points are at least 5 cm apart, so a millimeter finds the right one even
+            // after the distance went through JSON text.
             for (NSUInteger index = 1; index + 1 < count; index++) {
-                if (fabs(cumulative[index] - meters) < 1e-6) { ((double *)route->_pauseData.mutableBytes)[index] = seconds; break; }
+                if (fabs(cumulative[index] - meters) < 1e-3) { ((double *)route->_pauseData.mutableBytes)[index] = seconds; break; }
             }
         }
     }
@@ -521,6 +523,54 @@ static BOOL LSTransportUsable(MKDirectionsTransportType type) {
         start = meters;
     }
     self.legs = legs;
+}
+
+#pragma mark - Archive
+
+- (LSRouteArchive *)archive {
+    LSRouteArchive *archive = [[LSRouteArchive alloc] init];
+    archive.name = [LSRouteArchive validName:self.name] ?: @"Route";
+    NSMutableArray<LSArchivedPlace *> *places = [NSMutableArray array];
+    for (LSRouteWaypoint *waypoint in self.waypoints) {
+        LSArchivedPlace *place = [LSArchivedPlace placeWithName:waypoint.name latitude:waypoint.coordinate.latitude longitude:waypoint.coordinate.longitude];
+        if (place) [places addObject:place];
+    }
+    // The planner allows 10 stops; anything past that keeps From, the first stops and To.
+    NSUInteger limit = LSRouteArchiveMaximumStops + 2;
+    if (places.count > limit) {
+        LSArchivedPlace *last = places.lastObject;
+        [places removeObjectsInRange:NSMakeRange(limit - 1, places.count - (limit - 1))];
+        [places addObject:last];
+    }
+    if (places.count < 2 && self.pointCount >= 2) {
+        CLLocationCoordinate2D start = self.coordinates[0], end = self.coordinates[self.pointCount - 1];
+        places = [@[[LSArchivedPlace placeWithName:@"Start" latitude:start.latitude longitude:start.longitude],
+                    [LSArchivedPlace placeWithName:@"End" latitude:end.latitude longitude:end.longitude]] mutableCopy];
+    }
+    archive.places = places;
+    archive.path = self.transportType == MKDirectionsTransportTypeAutomobile ? @"driving" : @"walking";
+    archive.fromTrack = self.fromTrack;
+    archive.coordinates = [_coordinateData copy];
+    archive.times = [_timeData copy];
+    NSMutableArray *stops = [NSMutableArray array];
+    for (NSUInteger index = 0; index < self.stopDistances.count; index++) [stops addObject:@[self.stopDistances[index], self.stopDwells[index]]];
+    archive.stops = stops;
+    archive.expectedTravelTime = isfinite(self.expectedTravelTime) ? self.expectedTravelTime : 0;
+    archive.recordedStartDate = self.recordedStartDate;
+    return archive;
+}
+
++ (instancetype)routeWithArchive:(LSRouteArchive *)archive {
+    if (![archive isKindOfClass:LSRouteArchive.class] || archive.pointCount < 2) return nil;
+    NSMutableArray *waypoints = [NSMutableArray array];
+    for (LSArchivedPlace *place in archive.places) [waypoints addObject:@{@"name":place.name, @"lat":@(place.latitude), @"lon":@(place.longitude)}];
+    MKDirectionsTransportType transport = [archive.path isEqualToString:@"driving"] ? MKDirectionsTransportTypeAutomobile : MKDirectionsTransportTypeWalking;
+    NSMutableDictionary *dictionary = [@{@"v":@1, @"name":archive.name, @"transport":@(transport), @"eta":@(archive.expectedTravelTime),
+                                         @"coords":archive.coordinates, @"stops":archive.stops ?: @[], @"waypoints":waypoints} mutableCopy];
+    if (archive.times) dictionary[@"times"] = archive.times;
+    if (archive.recordedStartDate) dictionary[@"start"] = @(archive.recordedStartDate.timeIntervalSince1970);
+    if (archive.fromTrack) dictionary[@"track"] = @YES;
+    return [self routeFromDictionary:dictionary];
 }
 
 @end

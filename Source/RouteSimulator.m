@@ -68,6 +68,26 @@ static const double kLSPresetSpeeds[] = {5, 15, 50};
     options.paceMultiplier = [values[@"paceMultiplier"] doubleValue];
     return options.isValid ? options : nil;
 }
+- (LSRoutePlayback *)playback {
+    LSRoutePlayback *playback = [[LSRoutePlayback alloc] init];
+    playback.speedKmh = self.speedKmh;
+    playback.recordedPace = self.recordedPace;
+    playback.paceMultiplier = self.paceMultiplier;
+    playback.smooth = self.smooth;
+    playback.acceleration = self.accelerationProfile;
+    playback.stopDwell = self.stopDwell;
+    return playback;
+}
++ (instancetype)optionsWithPlayback:(LSRoutePlayback *)playback {
+    if (![playback isKindOfClass:LSRoutePlayback.class] || !playback.isValid) return nil;
+    LSPlaybackOptions *options = [self optionsWithSpeedKmh:playback.speedKmh];
+    options.recordedPace = playback.recordedPace;
+    options.paceMultiplier = playback.paceMultiplier;
+    options.smooth = playback.smooth;
+    options.accelerationProfile = (LSAccelerationProfile)playback.acceleration;
+    options.stopDwell = playback.stopDwell;
+    return options.isValid ? options : nil;
+}
 @end
 
 // The kind of movement the route speed moves like; custom speeds like the nearest preset.
@@ -156,6 +176,24 @@ static LSMotionParams LSParamsForOptions(LSPlaybackOptions *options, LSMotionPla
     return [plan paramsForOptions:options];
 }
 
+// Places the state `covered` meters along. With wait > 0 it is back at the stop it was
+// waiting at, for the rest of that wait (never longer than the stop's own wait now).
+static void LSSeekState(LSMotionPlan *plan, LSMotionParams params, LSMotionState *state, double covered, double wait) {
+    const LSMotionRoute *route = &plan->_motion;
+    LSMotionSeek(route, state, covered);
+    if (!(wait > 0) || !isfinite(wait) || state->finished) return;
+    for (size_t index = state->nextStop; index > 0; index--) {
+        if (covered - route->stopDistance[index - 1] > 0.5) break;
+        double dwell = LSMotionDwellForStop(route, &params, index - 1);
+        if (dwell <= 0) continue;
+        state->nextStop = index - 1;
+        state->dwelling = true;
+        state->dwellRemaining = fmin(wait, dwell);
+        state->speed = 0;
+        return;
+    }
+}
+
 @interface LSRouteSimulator () {
     os_unfair_lock _coordLock;
     LSMotionState _state;
@@ -228,6 +266,7 @@ static LSMotionParams LSParamsForOptions(LSPlaybackOptions *options, LSMotionPla
 - (double)currentSpeed { return self.isSimulating && !self.isPaused ? _state.speed : 0.0; }
 - (BOOL)isWaitingAtStop { return self.isSimulating && _state.dwelling; }
 - (NSTimeInterval)waitRemaining { return _state.dwelling ? _state.dwellRemaining : 0.0; }
+- (NSUInteger)nextStopIndex { return self.route ? _state.nextStop : 0; }
 - (NSUInteger)plannedStopsReached {
     NSUInteger reached = 0;
     for (NSUInteger index = 0; index < self.route.stopDistances.count; index++) {
@@ -324,6 +363,18 @@ static LSMotionParams LSParamsForOptions(LSPlaybackOptions *options, LSMotionPla
     // Same points and stops, so the motion state carries over as it is.
     self.route = route;
     self.plan = plan;
+    self.remainingDirty = YES;
+    return YES;
+}
+
+- (BOOL)startWithRoute:(LSRoute *)route covered:(double)covered waitRemaining:(NSTimeInterval)wait {
+    if (![route isKindOfClass:LSRoute.class] || !isfinite(covered) || covered < 0 || !(covered < route.distance - 0.5)) return NO;
+    if (![self startWithRoute:route]) return NO;
+    LSSeekState(self.plan, LSParamsForOptions(self.options, route), &_state, covered, wait);
+    CLLocationDirection heading = self.currentHeading;
+    CLLocationCoordinate2D coordinate = [route coordinateAtDistance:_state.covered heading:&heading];
+    if (CLLocationCoordinate2DIsValid(coordinate)) self.currentCoordinate = coordinate;
+    if (isfinite(heading)) self.currentHeading = heading;
     self.remainingDirty = YES;
     return YES;
 }
@@ -455,6 +506,16 @@ static double LSRemainingFrom(const LSMotionRoute *route, LSMotionParams params,
     LSMotionState state;
     LSMotionReset(&state);
     LSMotionParams params = LSParamsForOptions(options, plan);
+    return LSRemainingFrom(&plan->_motion, params, state);
+}
+
++ (NSTimeInterval)remainingTimeForRoute:(LSRoute *)route options:(LSPlaybackOptions *)options
+                                covered:(double)covered waitRemaining:(NSTimeInterval)wait {
+    if (![route isKindOfClass:LSRoute.class] || !options.isValid || !isfinite(covered)) return NAN;
+    LSMotionPlan *plan = [[LSMotionPlan alloc] initWithRoute:route];
+    LSMotionParams params = LSParamsForOptions(options, route);
+    LSMotionState state;
+    LSSeekState(plan, params, &state, covered, wait);
     return LSRemainingFrom(&plan->_motion, params, state);
 }
 
