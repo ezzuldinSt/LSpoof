@@ -121,7 +121,10 @@ static BOOL LSTransportUsable(MKDirectionsTransportType type) {
                        stopMarkers:(NSArray<NSNumber *> *)markers {
     self = [super init];
     if (!self || !raw || count < 2) return nil;
-    NSUInteger stride = count > kLSMaximumPoints ? (count + kLSMaximumPoints - 1) / kLSMaximumPoints : 1;
+    // Thinning keeps every stride-th point plus the last one and each stop marker; leave room
+    // for those, or a long path kept a few points over the limit and could not be read back.
+    NSUInteger budget = kLSMaximumPoints - 1 - MIN(markers.count, kLSMaximumPoints / 2);
+    NSUInteger stride = count > kLSMaximumPoints ? (count + budget - 1) / budget : 1;
     BOOL timed = rawTimes != NULL;
     _coordinateData = [NSMutableData data];
     _cumulativeData = [NSMutableData data];
