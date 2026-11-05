@@ -15,6 +15,8 @@ NS_ASSUME_NONNULL_BEGIN
 //         "times": base64 of little-endian float64 seconds from the start (optional),
 //         "stops": [ [meters along, seconds] ],          -1 seconds: a planned stop
 //         "eta": seconds, "start": unix seconds (optional) },
+//     "legs": [ { "path", "speedKmh" (optional), "end" (optional), "eta" } ],   optional, one per
+//         pair of places: how each leg is travelled. "end" is meters along the stored path.
 //     "playback": { "speedKmh", "recordedPace", "paceMultiplier", "smooth", "acceleration", "stopDwell" } }
 // Readers ignore keys they don't know, so later versions can add fields without breaking v1.
 FOUNDATION_EXPORT const NSInteger LSRouteArchiveVersion;
@@ -33,6 +35,25 @@ FOUNDATION_EXPORT const NSUInteger LSRouteArchiveMaximumStops;
 - (NSString *)name;
 - (double)latitude;
 - (double)longitude;
+@end
+
+// One leg (From to the first stop, stop to stop, the last stop to To): its own path type and,
+// optionally, its own speed.
+@interface LSArchivedLeg : NSObject {
+@private
+    NSString *_path;
+    double _speedKmh;
+    double _end;
+    double _expectedTravelTime;
+}
+// "walking", "driving" or "transit"; another value from a later version is kept as it is.
++ (nullable instancetype)legWithPath:(NSString *)path speedKmh:(double)speedKmh end:(double)end expectedTravelTime:(double)eta;
+- (NSString *)path;
+// 1 to 500 km/h, or NAN to play the leg at the route speed.
+- (double)speedKmh;
+// Meters along the stored path where the leg ends, or NAN when unknown (no path).
+- (double)end;
+- (double)expectedTravelTime;
 @end
 
 // How the route plays: the same values as LSPlaybackOptions, kept apart from UIKit and MapKit.
@@ -70,6 +91,7 @@ FOUNDATION_EXPORT const NSUInteger LSRouteArchiveMaximumStops;
     double _expectedTravelTime;
     NSDate *_recordedStartDate;
     LSRoutePlayback *_playback;
+    NSArray<LSArchivedLeg *> *_legs;
     double _cachedDistance;
 }
 @property (nonatomic, copy) NSString *identifier;
@@ -88,6 +110,8 @@ FOUNDATION_EXPORT const NSUInteger LSRouteArchiveMaximumStops;
 @property (nonatomic) double expectedTravelTime;
 @property (nonatomic, strong, nullable) NSDate *recordedStartDate;
 @property (nonatomic, copy, nullable) LSRoutePlayback *playback;
+// Empty, or exactly one per pair of places.
+@property (nonatomic, copy) NSArray<LSArchivedLeg *> *legs;
 
 // A new route with a fresh identifier and today's date.
 - (instancetype)init;

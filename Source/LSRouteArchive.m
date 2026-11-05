@@ -66,6 +66,11 @@ static double LSArchiveHaversine(double lat1, double lon1, double lat2, double l
 
 #pragma mark - Place
 
+@interface LSArchivedLeg (LSArchiveCoding)
+- (NSDictionary *)dictionaryRepresentation;
++ (nullable instancetype)legFromDictionary:(id)dictionary;
+@end
+
 @interface LSArchivedPlace (LSArchiveCoding)
 - (NSDictionary *)dictionaryRepresentation;
 + (nullable instancetype)placeFromDictionary:(id)dictionary;
@@ -93,6 +98,38 @@ static double LSArchiveHaversine(double lat1, double lon1, double lat2, double l
     id lat = LSArchiveNumber(dictionary, @"lat"), lon = LSArchiveNumber(dictionary, @"lon");
     if (!lat || !lon) return nil;
     return [self placeWithName:[dictionary objectForKey:@"name"] latitude:[lat doubleValue] longitude:[lon doubleValue]];
+}
+@end
+
+#pragma mark - Leg
+
+@implementation LSArchivedLeg
++ (instancetype)legWithPath:(NSString *)path speedKmh:(double)speedKmh end:(double)end expectedTravelTime:(double)eta {
+    if (![path isKindOfClass:NSString.class] || ![path length] || [path length] > 32) return nil;
+    LSArchivedLeg *leg = [[self alloc] init];
+    leg->_path = [path copy];
+    leg->_speedKmh = isfinite(speedKmh) && speedKmh >= 1 && speedKmh <= 500 ? speedKmh : NAN;
+    leg->_end = isfinite(end) && end >= 0 ? end : NAN;
+    leg->_expectedTravelTime = isfinite(eta) && eta > 0 ? eta : 0;
+    return leg;
+}
+- (NSString *)path { return _path; }
+- (double)speedKmh { return _speedKmh; }
+- (double)end { return _end; }
+- (double)expectedTravelTime { return _expectedTravelTime; }
+- (NSDictionary *)dictionaryRepresentation {
+    NSMutableDictionary *dictionary = [NSMutableDictionary dictionary];
+    [dictionary setObject:_path forKey:@"path"];
+    if (isfinite(_speedKmh)) [dictionary setObject:@(_speedKmh) forKey:@"speedKmh"];
+    if (isfinite(_end)) [dictionary setObject:@(_end) forKey:@"end"];
+    [dictionary setObject:@(_expectedTravelTime) forKey:@"eta"];
+    return dictionary;
+}
++ (instancetype)legFromDictionary:(id)dictionary {
+    if (![dictionary isKindOfClass:NSDictionary.class]) return nil;
+    id speed = LSArchiveNumber(dictionary, @"speedKmh"), end = LSArchiveNumber(dictionary, @"end"), eta = LSArchiveNumber(dictionary, @"eta");
+    return [self legWithPath:[dictionary objectForKey:@"path"] speedKmh:speed ? [speed doubleValue] : NAN
+                         end:end ? [end doubleValue] : NAN expectedTravelTime:eta ? [eta doubleValue] : 0];
 }
 @end
 
@@ -155,7 +192,7 @@ static double LSArchiveHaversine(double lat1, double lon1, double lat2, double l
 @implementation LSRouteArchive
 @synthesize identifier = _identifier, name = _name, createdAt = _createdAt, places = _places, path = _path, fromTrack = _fromTrack,
     coordinates = _coordinates, times = _times, stops = _stops, expectedTravelTime = _expectedTravelTime,
-    recordedStartDate = _recordedStartDate, playback = _playback;
+    recordedStartDate = _recordedStartDate, playback = _playback, legs = _legs;
 
 - (instancetype)init {
     self = [super init];
@@ -166,6 +203,7 @@ static double LSArchiveHaversine(double lat1, double lon1, double lat2, double l
         self.places = @[];
         self.path = @"walking";
         self.stops = @[];
+        self.legs = @[];
         _cachedDistance = NAN;
     }
     return self;
@@ -185,6 +223,7 @@ static double LSArchiveHaversine(double lat1, double lon1, double lat2, double l
     copy.expectedTravelTime = _expectedTravelTime;
     copy.recordedStartDate = _recordedStartDate;
     copy.playback = _playback;
+    copy.legs = _legs;
     copy->_cachedDistance = _cachedDistance;
     return copy;
 }
@@ -246,6 +285,11 @@ static double LSArchiveHaversine(double lat1, double lon1, double lat2, double l
         [dictionary setObject:geometry forKey:@"geometry"];
     }
     if (_playback.isValid) [dictionary setObject:[_playback dictionaryRepresentation] forKey:@"playback"];
+    if (_legs.count && _legs.count + 1 == _places.count) {
+        NSMutableArray *legs = [NSMutableArray arrayWithCapacity:_legs.count];
+        for (LSArchivedLeg *leg in _legs) [legs addObject:[leg dictionaryRepresentation]];
+        [dictionary setObject:legs forKey:@"legs"];
+    }
     return dictionary;
 }
 
@@ -332,6 +376,17 @@ static double LSArchiveHaversine(double lat1, double lon1, double lat2, double l
     }
     if (archive.fromTrack && archive.pointCount < 2) { if (error) *error = @"The recorded track in the route is missing."; return nil; }
     archive.playback = [LSRoutePlayback playbackFromDictionary:[dictionary objectForKey:@"playback"]];
+    // Legs only count as a whole: one per pair of places, each readable. Their ends refer to the
+    // stored path, so without one they are dropped.
+    id legEntries = [dictionary objectForKey:@"legs"];
+    NSMutableArray<LSArchivedLeg *> *legs = [NSMutableArray array];
+    for (id entry in [legEntries isKindOfClass:NSArray.class] ? legEntries : @[]) {
+        LSArchivedLeg *leg = [LSArchivedLeg legFromDictionary:entry];
+        if (!leg) { [legs removeAllObjects]; break; }
+        if (archive.pointCount < 2) leg = [LSArchivedLeg legWithPath:leg.path speedKmh:leg.speedKmh end:NAN expectedTravelTime:leg.expectedTravelTime];
+        [legs addObject:leg];
+    }
+    archive.legs = legs.count + 1 == places.count ? legs : @[];
     return archive;
 }
 @end

@@ -370,7 +370,7 @@ static void LSSeekState(LSMotionPlan *plan, LSMotionParams params, LSMotionState
 - (BOOL)startWithRoute:(LSRoute *)route covered:(double)covered waitRemaining:(NSTimeInterval)wait {
     if (![route isKindOfClass:LSRoute.class] || !isfinite(covered) || covered < 0 || !(covered < route.distance - 0.5)) return NO;
     if (![self startWithRoute:route]) return NO;
-    LSSeekState(self.plan, LSParamsForOptions(self.options, route), &_state, covered, wait);
+    LSSeekState(self.plan, LSParamsForOptions(self.options, self.plan), &_state, covered, wait);
     CLLocationDirection heading = self.currentHeading;
     CLLocationCoordinate2D coordinate = [route coordinateAtDistance:_state.covered heading:&heading];
     if (CLLocationCoordinate2DIsValid(coordinate)) self.currentCoordinate = coordinate;
@@ -513,7 +513,7 @@ static double LSRemainingFrom(const LSMotionRoute *route, LSMotionParams params,
                                 covered:(double)covered waitRemaining:(NSTimeInterval)wait {
     if (![route isKindOfClass:LSRoute.class] || !options.isValid || !isfinite(covered)) return NAN;
     LSMotionPlan *plan = [[LSMotionPlan alloc] initWithRoute:route];
-    LSMotionParams params = LSParamsForOptions(options, route);
+    LSMotionParams params = LSParamsForOptions(options, plan);
     LSMotionState state;
     LSSeekState(plan, params, &state, covered, wait);
     return LSRemainingFrom(&plan->_motion, params, state);

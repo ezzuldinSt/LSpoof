@@ -19,6 +19,19 @@ static BOOL LSCoordinateUsable(CLLocationCoordinate2D coordinate) {
     return isfinite(coordinate.latitude) && isfinite(coordinate.longitude) && CLLocationCoordinate2DIsValid(coordinate);
 }
 
+NSString *LSArchivePathForTransportType(MKDirectionsTransportType type) {
+    if (type == MKDirectionsTransportTypeAutomobile) return @"driving";
+    if (type == MKDirectionsTransportTypeTransit) return @"transit";
+    return @"walking";
+}
+
+MKDirectionsTransportType LSTransportTypeForArchivePath(NSString *path, MKDirectionsTransportType fallback) {
+    if ([path isEqual:@"driving"]) return MKDirectionsTransportTypeAutomobile;
+    if ([path isEqual:@"walking"]) return MKDirectionsTransportTypeWalking;
+    if ([path isEqual:@"transit"]) return MKDirectionsTransportTypeTransit;
+    return fallback;
+}
+
 @implementation LSRouteWaypoint
 + (instancetype)waypointWithName:(NSString *)name coordinate:(CLLocationCoordinate2D)coordinate {
     LSRouteWaypoint *waypoint = [[self alloc] init];
@@ -552,7 +565,17 @@ static BOOL LSTransportUsable(MKDirectionsTransportType type) {
                     [LSArchivedPlace placeWithName:@"End" latitude:end.latitude longitude:end.longitude]] mutableCopy];
     }
     archive.places = places;
-    archive.path = self.transportType == MKDirectionsTransportTypeAutomobile ? @"driving" : @"walking";
+    archive.path = LSArchivePathForTransportType(self.transportType);
+    // Each leg's own path and speed (#28), when the legs still line up with the places.
+    if (self.legs.count && self.legs.count + 1 == places.count && self.legs.count + 1 == self.waypoints.count) {
+        NSMutableArray<LSArchivedLeg *> *legs = [NSMutableArray arrayWithCapacity:self.legs.count];
+        for (LSRouteLeg *leg in self.legs) {
+            LSArchivedLeg *saved = [LSArchivedLeg legWithPath:LSArchivePathForTransportType(leg.transportType) speedKmh:leg.speedKmh
+                                                          end:leg.endDistance expectedTravelTime:leg.expectedTravelTime];
+            if (saved) [legs addObject:saved];
+        }
+        archive.legs = legs.count == self.legs.count ? legs : @[];
+    }
     archive.fromTrack = self.fromTrack;
     archive.coordinates = [_coordinateData copy];
     archive.times = [_timeData copy];
@@ -568,13 +591,34 @@ static BOOL LSTransportUsable(MKDirectionsTransportType type) {
     if (![archive isKindOfClass:LSRouteArchive.class] || archive.pointCount < 2) return nil;
     NSMutableArray *waypoints = [NSMutableArray array];
     for (LSArchivedPlace *place in archive.places) [waypoints addObject:@{@"name":place.name, @"lat":@(place.latitude), @"lon":@(place.longitude)}];
-    MKDirectionsTransportType transport = [archive.path isEqualToString:@"driving"] ? MKDirectionsTransportTypeAutomobile : MKDirectionsTransportTypeWalking;
+    MKDirectionsTransportType transport = LSTransportTypeForArchivePath(archive.path, MKDirectionsTransportTypeWalking);
+    if (transport == MKDirectionsTransportTypeTransit) transport = MKDirectionsTransportTypeWalking;
     NSMutableDictionary *dictionary = [@{@"v":@1, @"name":archive.name, @"transport":@(transport), @"eta":@(archive.expectedTravelTime),
                                          @"coords":archive.coordinates, @"stops":archive.stops ?: @[], @"waypoints":waypoints} mutableCopy];
     if (archive.times) dictionary[@"times"] = archive.times;
     if (archive.recordedStartDate) dictionary[@"start"] = @(archive.recordedStartDate.timeIntervalSince1970);
     if (archive.fromTrack) dictionary[@"track"] = @YES;
-    return [self routeFromDictionary:dictionary];
+    // Legs in routeFromDictionary's form. It checks them against the path, and falls back to
+    // legs that follow the route.
+    NSArray<LSArchivedLeg *> *saved = archive.legs.count + 1 == archive.places.count ? archive.legs : @[];
+    NSMutableArray *legs = [NSMutableArray arrayWithCapacity:saved.count];
+    NSMutableArray<NSNumber *> *speeds = [NSMutableArray arrayWithCapacity:saved.count];
+    BOOL ends = saved.count > 0;
+    for (NSUInteger index = 0; index < saved.count; index++) {
+        LSArchivedLeg *leg = saved[index];
+        BOOL last = index + 1 == saved.count;
+        if (!last && !isfinite(leg.end)) ends = NO;
+        NSMutableDictionary *entry = [@{@"t":@(LSTransportTypeForArchivePath(leg.path, transport)), @"e":@(isfinite(leg.end) ? leg.end : 0),
+                                        @"eta":@(leg.expectedTravelTime)} mutableCopy];
+        if (isfinite(leg.speedKmh)) entry[@"s"] = @(leg.speedKmh);
+        [legs addObject:entry];
+        [speeds addObject:@(leg.speedKmh)];
+    }
+    if (ends) dictionary[@"legs"] = legs;
+    LSRoute *route = [self routeFromDictionary:dictionary];
+    // Without leg ends the legs follow the route; their speeds still apply.
+    if (route && !ends && speeds.count && speeds.count == route.legs.count) route = [route routeWithLegSpeeds:speeds] ?: route;
+    return route;
 }
 
 @end
