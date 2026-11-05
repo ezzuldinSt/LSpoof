@@ -15,7 +15,7 @@ Hold one spot, play a route at walking or driving speed, and keep the places you
 
 <a href="https://github.com/ezzuldinSt/LSpoof/releases/latest/download/LocationSpoofer.dylib"><img alt="Download LocationSpoofer.dylib" src="https://img.shields.io/badge/Download-LocationSpoofer.dylib-4f8bff?style=for-the-badge&logo=icloud&logoColor=white"></a>
 
-[**Get started**](#-get-started) &nbsp;·&nbsp; [**Guides**](#-guides) &nbsp;·&nbsp; [**How it works**](#%EF%B8%8F-how-it-works) &nbsp;·&nbsp; [**FAQ**](#-faq) &nbsp;·&nbsp; [**Build**](#%EF%B8%8F-build-from-source)
+[**Get started**](#-get-started) &nbsp;·&nbsp; [**Guides**](#-guides) &nbsp;·&nbsp; [**How it works**](#-how-it-works) &nbsp;·&nbsp; [**FAQ**](#-faq) &nbsp;·&nbsp; [**Build**](#-build-from-source)
 
 </div>
 
@@ -430,28 +430,25 @@ Tap the **gear** in the picker's header. Changes stay local until you tap **Save
 
 <br>
 
-## ⚙️ How it works
+## 🔧 How it works
 
 <p align="center"><img src="assets/readme/how-it-works.svg" width="100%" alt="Diagram: your app asks Core Location or MapKit where you are, LSpoof's hooks inside the app answer with the spot you chose, and when LSpoof is off iOS answers with your real location."></p>
 
 LSpoof loads into the app when it starts (it's added as an `LC_LOAD_DYLIB` load command). From inside the app, it answers the app's location requests with the spot or route you chose. Nothing outside that app changes: it isn't a device-wide GPS override.
 
+LSpoof is always in one of four states:
+
 ```mermaid
-stateDiagram-v2
-    direction LR
-    [*] --> Off
-    Off --> Holding: Apply location
-    Off --> Moving: Start route
-    Holding --> Moving: Start route
-    Moving --> Paused: Pause, or leave the app
-    Paused --> Moving: Resume
-    Moving --> Holding: Arrive, or Hold here
-    Holding --> Off: Turn off
-    Moving --> Off: Turn off
-    Paused --> Off: Turn off
+flowchart LR
+    Off(["Off"]) -- Apply location --> Holding(["Holding"])
+    Off -- Start route --> Moving(["Moving"])
+    Holding -- Start route --> Moving
+    Moving -- "Arrive, or Hold here" --> Holding
+    Moving -- "Pause, or leave the app" --> Paused(["Paused"])
+    Paused -- Resume --> Moving
 ```
 
-One session controller owns the state for as long as the app runs, and every location the app receives comes from a consistent snapshot of it. Opening or closing the picker never interrupts it.
+**Turn off** goes back to Off from any of them. One session controller owns the state for as long as the app runs, and every location the app receives comes from a consistent snapshot of it. Opening or closing the picker never interrupts it.
 
 <details>
 <summary><b>What LSpoof hooks</b></summary>
@@ -558,7 +555,7 @@ Those features depend on the app's original entitlements, which re-signing can c
 
 <br>
 
-## 🛠️ Build from source
+## 🧰 Build from source
 
 Install [Theos](https://theos.dev/docs/Installation-Linux.html) and set `THEOS` to its folder, then run:
 
