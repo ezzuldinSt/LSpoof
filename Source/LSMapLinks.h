@@ -61,6 +61,8 @@ typedef NS_ENUM(NSInteger, LSMapApp) {
 + (nullable LSMapLink *)parseString:(NSString *)text;
 // Places are origin, stops, destination. One place gives a pin link. Waze links only carry
 // the destination; legacy Apple links (before iOS 18.4) only carry origin and destination.
+// mode applies to the whole trip, as none of the apps takes one per leg: for a route whose
+// legs differ, the picker passes the first leg's and says so in the share menu.
 + (nullable NSURL *)URLForApp:(LSMapApp)app places:(NSArray<LSMapLinkPlace *> *)places mode:(nullable NSString *)mode legacyApple:(BOOL)legacyApple;
 // How many places (origin and destination included) a link for the app keeps.
 + (NSUInteger)maximumPlacesForApp:(LSMapApp)app legacyApple:(BOOL)legacyApple;
