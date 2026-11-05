@@ -257,8 +257,9 @@ NSNotificationName const LSSessionDidChangeNotification = @"LSSessionDidChange";
     // Something already replaced it (a scheduled start, say), and that keeps its own copy.
     if (self.retainedRoute || LSRouteSimulator.shared.isSimulating) return;
     LSRouteCheckpoint *checkpoint = [LSRouteCheckpoint checkpointFromDictionary:store.routeCheckpoint];
-    // A route only makes sense while its last point is the held location.
-    if (!checkpoint || self.snapshot.mode != LSSessionModeStatic) {
+    // A route only makes sense while its last point is the held location. One that arrived
+    // has nothing to resume, and a relaunch then starts as it always did.
+    if (!checkpoint || !checkpoint.isUnfinished || self.snapshot.mode != LSSessionModeStatic) {
         [store clearActiveRoute];
         return;
     }
@@ -273,7 +274,7 @@ NSNotificationName const LSSessionDidChangeNotification = @"LSSessionDidChange";
         dispatch_async(dispatch_get_main_queue(), ^{
             // The session changed meanwhile; whatever changed it kept or cleared the stored route.
             if (revision != self->_routeRevision || self.retainedRoute) return;
-            if (!route || self.snapshot.mode != LSSessionModeStatic) {
+            if (!route || !offer || self.snapshot.mode != LSSessionModeStatic) {
                 // Unreadable: fall back quietly to the held location.
                 [store clearActiveRoute];
                 return;
@@ -282,6 +283,8 @@ NSNotificationName const LSSessionDidChangeNotification = @"LSSessionDidChange";
             self->_activeRouteID = checkpoint.routeID;
             self->_checkpoint = checkpoint;
             self->_cachedOffer = offer;
+            // The planner shows, and Replay uses, the speed and motion the route had.
+            if (offer.options && !LSRouteSimulator.shared.isSimulating) LSRouteSimulator.shared.options = offer.options;
             // The floating button and an open picker pick up the offer.
             [NSNotificationCenter.defaultCenter postNotificationName:LSSessionDidChangeNotification object:self];
         });

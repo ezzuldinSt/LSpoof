@@ -185,6 +185,7 @@ static double LSArchiveHaversine(double lat1, double lon1, double lat2, double l
     copy.expectedTravelTime = _expectedTravelTime;
     copy.recordedStartDate = _recordedStartDate;
     copy.playback = _playback;
+    copy->_cachedDistance = _cachedDistance;
     return copy;
 }
 

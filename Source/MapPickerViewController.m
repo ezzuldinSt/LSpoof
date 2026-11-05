@@ -2602,13 +2602,14 @@ static void LSSetButtonRadius(UIButton *button, CGFloat radius) {
 
 #pragma mark - Saved table
 
-- (NSInteger)numberOfSectionsInTableView:(UITableView *)table { (void)table; return 2; }
+// Saved places, saved routes, recently applied.
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)table { (void)table; return 3; }
 - (NSInteger)tableView:(UITableView *)table numberOfRowsInSection:(NSInteger)section { (void)table; return [self savedRowsInSection:section]; }
 - (UITableViewCell *)tableView:(UITableView *)table cellForRowAtIndexPath:(NSIndexPath *)path { (void)table; return [self savedCell:path]; }
 - (void)tableView:(UITableView *)table didSelectRowAtIndexPath:(NSIndexPath *)path { [table deselectRowAtIndexPath:path animated:NO]; [self previewSavedPlace:path]; }
 - (BOOL)tableView:(UITableView *)table canEditRowAtIndexPath:(NSIndexPath *)path {
     (void)table;
-    return path.section == 0 ? self.savedPlaces.count > 0 : self.recents.count > 0;
+    return path.section == 0 ? self.savedPlaces.count > 0 : (path.section == 1 ? self.savedRoutes.count > 0 : self.recents.count > 0);
 }
 - (BOOL)tableView:(UITableView *)table canMoveRowAtIndexPath:(NSIndexPath *)path { (void)table; return path.section == 0 && self.savedPlaces.count > 1; }
 - (UITableViewCellEditingStyle)tableView:(UITableView *)table editingStyleForRowAtIndexPath:(NSIndexPath *)path { (void)table; (void)path; return UITableViewCellEditingStyleNone; }

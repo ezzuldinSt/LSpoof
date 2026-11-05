@@ -529,7 +529,8 @@ static BOOL LSTransportUsable(MKDirectionsTransportType type) {
 
 - (LSRouteArchive *)archive {
     LSRouteArchive *archive = [[LSRouteArchive alloc] init];
-    archive.name = [LSRouteArchive validName:self.name] ?: @"Route";
+    NSString *name = [self.name stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    archive.name = name.length ? (name.length > 120 ? [name substringToIndex:120] : name) : @"Route";
     NSMutableArray<LSArchivedPlace *> *places = [NSMutableArray array];
     for (LSRouteWaypoint *waypoint in self.waypoints) {
         LSArchivedPlace *place = [LSArchivedPlace placeWithName:waypoint.name latitude:waypoint.coordinate.latitude longitude:waypoint.coordinate.longitude];

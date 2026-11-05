@@ -25,7 +25,7 @@ Google sign-in, notifications and other entitlement-bound features can behave di
 
 ## How It Works
 
-The library is injected into a third-party iOS app via `LC_LOAD_DYLIB` (load-time Mach-O patching). A process-lifetime session controller owns Off, Holding location, Moving, and Paused state. Location wrappers consume a coherent session snapshot, and opening the picker preserves the active session.
+The library is injected into a third-party iOS app via `LC_LOAD_DYLIB` (load-time Mach-O patching). A process-lifetime session controller owns Off, Holding location, Moving, and Paused state. Location wrappers consume a coherent session snapshot, and opening the picker preserves the active session. A playing route is also kept on disk, so a relaunch can resume it (see [Resume after a relaunch](#resume-after-a-relaunch)).
 
 Supported hooking targets:
 
@@ -52,7 +52,7 @@ Tap the floating **Location** button. It is enabled by default and can be hidden
 
 The button shows the session at a glance: plain glass when off, and a coloured disc with its own symbol while holding, moving or paused. While a route plays, a ring around it fills with progress. Drag it anywhere, or throw it: it lands on the side you threw it toward and remembers its spot. Push or flick it into the left or right edge to **tuck** it away as a small tab (which still shows route progress), and tap the tab to bring it back. After a few seconds idle it fades back so it stays out of the way.
 
-**Touch and hold** the button for quick actions without opening the picker. The menu shows the live status, a **Slower · Pause · Faster** row while a route plays (it stays open so you can tap several times), **Stop and hold here**, **Apply last location** when off, **Open LSpoof**, **Tuck into edge**, and **Turn off** when on. VoiceOver offers the same actions, plus moving the button, as custom actions.
+**Touch and hold** the button for quick actions without opening the picker. The menu shows the live status, a **Slower · Pause · Faster** row while a route plays (it stays open so you can tap several times), **Stop and hold here**, **Resume route** after a route stopped part-way (with where it goes on from and the time left), **Apply last location** when off, **Open LSpoof**, **Tuck into edge**, and **Turn off** when on. VoiceOver offers the same actions, plus moving the button, as custom actions.
 
 The shortcut is **at least three fingers held for 0.8 seconds**. Releasing below three touches cancels the hold. Dismissing with fingers held does not immediately reopen the picker; the shortcut waits for release. Opener visibility and presentation are tracked per scene and survive a background/foreground cycle.
 
@@ -82,10 +82,15 @@ Coordinates and saved places remain usable when online search or directions are 
 6. **Wait at each stop** pauses at every stop for 15 seconds to 5 minutes, or a custom time.
 7. **Finish in** solves the speed for you: **Match Apple Maps** uses Apple's arrival estimate, **As recorded** keeps a track's own timing, and **Finish in…** takes a trip time in minutes (waits included). It changes the route speed; legs with their own speed keep it, and when every leg has its own speed there is nothing for it to change.
 8. **Start route** applies the preview. A new route draft leaves the applied session running; **Replace with this route** confirms replacement and starts at From.
+9. The bookmark button next to **Share** saves the route under a name, with each leg's path and speed (see [Saved routes](#saved-routes)).
 
 While a route plays, a card at the top of the Route tab shows the time left in large type, the current speed, the arrival time, distance done and to go, and a progress bar with the stops marked. The planner folds into one line (**Edit route** opens it again; **Done** folds it). On the map, a new route draws itself in, the part already travelled turns grey, and passed stops turn into checkmarks. Removing a stop can be undone. **Slower** and **Faster** change its speed live without restarting it (on a leg with its own speed they step that leg's speed, and the card says **on this leg**), and changes to motion, waits or speed apply to the route that is playing. The time left, **Finish in** and the exported files all time each leg at its own speed, the same way playback does. The applied position has its own marker. Progress shows remaining distance and estimated time, and counts down while waiting at a stop. **Pause/Resume**, **Hold here**, and **Turn off** have distinct effects. Route controls remain available from Location and Saved through a labeled menu.
 
-Paused samples report zero speed. Leaving the app pauses playback, and it resumes when you return; a route you paused yourself stays paused. With **Keep routes moving in the background** on in Settings, playback keeps going for as long as iOS keeps the app running in the background (for example, an app that has background location). iOS still suspends most apps, and a suspended route continues from where it was when the app wakes. Completion holds and persists the destination even with the picker closed. **Replay route** restarts its retained path during the process lifetime. Relaunch restores the last checkpoint as a held location, without resuming a route. Host callback frequency still depends on the host’s location-manager activity.
+Paused samples report zero speed. Leaving the app pauses playback, and it resumes when you return; a route you paused yourself stays paused. With **Keep routes moving in the background** on in Settings, playback keeps going for as long as iOS keeps the app running in the background (for example, an app that has background location). iOS still suspends most apps, and a suspended route continues from where it was when the app wakes. Completion holds and persists the destination even with the picker closed. **Replay route** restarts the retained path from From. Host callback frequency still depends on the host’s location-manager activity.
+
+### Resume after a relaunch
+
+When a route starts, LSpoof writes it to a file in the app's Application Support folder: its places, path, stops and name, in the versioned route format described in [`Source/LSRouteArchive.h`](Source/LSRouteArchive.h). Every five seconds, and on pause, it writes a checkpoint: the distance covered, the next stop, any wait left at a stop, and the speed, motion and waits. If the app quits or is closed partway through a route, the next launch still holds the last checkpoint as before, and also offers **Resume route** with where it goes on from and what is left ("From about 3.2 km · 12 min left"), on the Route tab (the picker opens on it) and in the floating button's touch-and-hold menu. Resuming continues from that point with the same speed, motion and waits, including the rest of a wait at a stop; **Replay route** starts it over from From. **Stop and hold here** leaves the same offer. A route that has arrived offers nothing to resume, and applying another location or **Turn off** clears the saved route. If the saved route can't be read, LSpoof keeps the held location and drops the route without a message.
 
 Search and directions requests are canceled and invalidated when inputs change, the workspace changes, the picker closes, or it backgrounds. An old response cannot overwrite a newer preview.
 
@@ -117,11 +122,22 @@ iOS only lets LSpoof act on time while the app is open, or running in the backgr
 - Recent history keeps up to five unique applied coordinates and uses a searched/saved name when available.
 - **Wander radius** in a place's menu sets how far that place may drift while held: the Settings radius, no drift, 10 to 250 m, or a custom value up to 1,000 m. Applying the place uses its radius, and the Location tab's **Wander** chip changes it while you preview a saved place.
 
+## Saved routes
+
+- Once a route is built or imported, the bookmark button next to **Share** on the Route tab asks for a name and saves the whole route: From, the stops and To, the walking or driving path with its streets (so it opens again without new directions, also offline), a recorded track and its timing, and the speed, motion and waits. The button fills once the route is saved; tapping it again offers to save another copy.
+- New saves stop at 50 with visible feedback; existing routes are never evicted.
+- Saved routes have their own section on the Saved tab, between saved places and recents, newest first. Each row shows the distance, the number of stops, the path type, when it was saved, and From → To.
+- Tap a route to open it in the Route planner as a draft. It doesn't start until you tap **Start route**. Opening it also sets the planner's speed and the motion and wait settings to the saved ones.
+- Swipe right to **Start** it (with a confirmation when it replaces what is applied), swipe left to rename or delete, and touch and hold for a map preview of the whole route and a menu with Start route, Open in Route planner (Preview), Rename, Share and Delete. Deleting offers **Undo**.
+- **Share** sends a planned route as an Apple Maps link through its places, and a recorded track as a GPX file.
+- The filter field matches route names and the names of the places they pass through. It appears once saved places and routes reach six.
+- Saved routes are stored in a JSON file in the app's Application Support folder rather than in the preferences, because a recorded track can be large.
+
 ## Settings and accessibility
 
 Settings contains altitude, course, held-position variation/radius, remembering, the optional real-location annotation, the floating opener, and **Keep routes moving in the background**. Held-position variation drifts slowly toward new points inside the radius at varying pace, with a little small-scale movement on top, instead of repeating one pattern. Edits stay local until **Save** in the top bar (enabled only when something changed), which explicitly updates the current session and preferences. Cancel or a swipe down with unsaved edits asks whether to save or discard them. Closing the picker leaves an applied session active and discards unapplied location/route drafts.
 
-**Backup** exports saved places, recent locations and settings as a JSON file or to the clipboard, and restores them from either. Restoring shows what the backup contains and asks whether to merge it with what you have or replace it.
+**Backup** exports saved places, saved routes, recent locations and settings as a JSON file or to the clipboard, and restores them from either. Restoring shows what the backup contains and asks whether to merge it with what you have or replace it. Saved routes are an extra `routes` list in the same version 1 backup format, so older LSpoof versions ignore them and still restore everything else, and a backup made before saved routes leaves your saved routes as they are, even with Replace. Routes with recorded tracks make backups larger; files up to 32 MB are accepted.
 
 The radius has a live preview: a small street map with the wander circle drawn to scale, which you can drag to resize, next to a slider and an exact-value field. Real location uses genuine existing permission and appears separately, with its own recenter button and unavailable message. Updates stop when the picker closes, backgrounds, or shows Saved.
 
@@ -142,7 +158,7 @@ make FINALPACKAGE=1 DEBUG=0
 
 Release output: `.theos/obj/LocationSpoofer.dylib` (optimized, stripped, and ad hoc signed). For a debug build, run `make DEBUG=1`; its output is `.theos/obj/debug/LocationSpoofer.dylib`.
 
-`Tests/run.sh` runs the host tests for the motion model, the track codecs, GPX/TCX/FIT reading and writing, and map links. The C tests need only a C compiler (`Tests/run.sh c`); the Objective-C tests use Foundation on macOS or GNUstep on Linux (`apt install clang gnustep-make libgnustep-base-dev libblocksruntime-dev`).
+`Tests/run.sh` runs the host tests for the motion model, the track codecs, GPX/TCX/FIT reading and writing, map links, and the saved route format and store. The C tests need only a C compiler (`Tests/run.sh c`); the Objective-C tests use Foundation on macOS or GNUstep on Linux (`apt install clang gnustep-make libgnustep-base-dev libblocksruntime-dev`).
 
 GitHub Actions runs the tests and the same release build on every push to `main`, every pull request and every `v*` tag, using the Theos revision, toolchain and SDK listed below. Each run's **LocationSpoofer.dylib** and **SHA256SUMS** are attached to the run as an artifact.
 

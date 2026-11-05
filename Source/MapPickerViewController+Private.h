@@ -3,6 +3,7 @@
 #import "BookmarksManager.h"
 #import "LSUI.h"
 #import "LSRoute.h"
+#import "LSRouteStore.h"
 #import <MapKit/MapKit.h>
 NS_ASSUME_NONNULL_BEGIN
 
@@ -153,6 +154,16 @@ typedef NS_ENUM(NSInteger, LSEndpoint) { LSEndpointFrom, LSEndpointStop, LSEndpo
 - (void)openTrackFile;
 - (void)importTrackAtURL:(NSURL *)url;
 - (nullable LSPlaybackOptions *)draftOptions;
+// Saved routes and resume (#20).
+- (void)saveCurrentRoute;
+// Fills the planner with a saved route as a draft; start also starts it (asking first when
+// that replaces what is applied).
+- (void)loadSavedRoute:(LSRouteArchive *)route start:(BOOL)start;
+- (void)resumeStoppedRoute;
+- (void)updateResumeButton;
+// The name prompt Save route and Rename share; save gets a valid name and says if it was kept.
+- (void)promptRouteName:(NSString *)name title:(NSString *)title button:(NSString *)button save:(BOOL (^)(NSString *name))save;
+- (void)nameNewRoute:(LSRoute *)route;
 @end
 
 @interface MapPickerViewController (LSBookmarksUI)
@@ -257,6 +268,17 @@ typedef NS_ENUM(NSInteger, LSEndpoint) { LSEndpointFrom, LSEndpointStop, LSEndpo
 - (nullable MKOverlayRenderer *)routeRendererForOverlay:(id<MKOverlay>)overlay;
 // Called after the default styling of a From, stop or To marker.
 - (void)styleRouteAnnotationView:(MKMarkerAnnotationView *)view;
+@end
+@interface MapPickerViewController () // Saved routes and resume (#20; MapPickerViewController+Route.m, +Bookmarks.m)
+@property (nonatomic, strong) UIButton *saveRouteButton;
+@property (nonatomic, strong) UIButton *resumeRouteButton;
+@property (nonatomic, copy, nullable) NSString *resumeButtonKey;
+// The drafted route that came from, or was saved as, this saved route.
+@property (nonatomic, weak, nullable) LSRoute *savedRouteSource;
+@property (nonatomic, copy, nullable) NSString *savedRouteSourceID;
+// Saved tab: the routes the filter lets through, and how many there are in all.
+@property (nonatomic, copy, nullable) NSArray<LSRouteArchive *> *savedRoutes;
+@property (nonatomic) NSUInteger allSavedRouteCount;
 @end
 @interface MapPickerViewController () // Saved places (MapPickerViewController+Bookmarks.m)
 // Every saved place; savedPlaces and recents hold only the rows the filter lets through.
