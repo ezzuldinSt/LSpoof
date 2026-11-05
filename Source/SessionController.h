@@ -35,7 +35,11 @@ FOUNDATION_EXPORT NSNotificationName const LSSessionDidChangeNotification;
 - (BOOL)startRoute:(LSRoute *)route options:(LSPlaybackOptions *)options;
 // Applies to the playing route right away: speed, motion style, waits.
 - (BOOL)updatePlaybackOptions:(LSPlaybackOptions *)options;
-// One step faster (direction > 0) or slower; recorded pace steps its multiplier.
+// The playing route again with other leg settings on the same path (LSRoute routeWithLegSpeeds:);
+// playback carries on from where it is.
+- (BOOL)updatePlayingRoute:(LSRoute *)route;
+// One step faster (direction > 0) or slower; recorded pace steps its multiplier, and a leg
+// with its own speed steps that speed.
 - (BOOL)nudgeSpeed:(NSInteger)direction;
 - (BOOL)saveSettings:(LSSettings *)settings;
 - (void)pause;

@@ -54,7 +54,12 @@ typedef NS_ENUM(NSInteger, LSAccelerationProfile) {
 @property (nonatomic, weak, nullable) id<LSRouteSimulatorDelegate> delegate;
 // Changes take effect on the next tick, so speed can be adjusted mid-route.
 @property (nonatomic, copy) LSPlaybackOptions *options;
+// The current leg's mode when it has its own speed, else the options' mode.
 @property (nonatomic, readonly) LSTransportMode transportMode;
+// The leg being played, and the speed set for it: its own, or the route's (options).
+@property (nonatomic, readonly) NSUInteger currentLegIndex;
+@property (nonatomic, readonly) BOOL currentLegHasOwnSpeed;
+@property (nonatomic, readonly) double setSpeedKmh;
 @property (nonatomic, readonly) double customSpeedKmh;
 @property (nonatomic, readonly) BOOL isSimulating;
 @property (nonatomic, readonly) BOOL isPaused;
@@ -73,6 +78,9 @@ typedef NS_ENUM(NSInteger, LSAccelerationProfile) {
 @property (nonatomic, readonly) NSUInteger plannedStopsReached;
 
 - (BOOL)startWithRoute:(LSRoute *)route;
+// Swaps in a route with the same path (LSRoute hasSamePathAs:), e.g. new leg speeds, and
+// carries on from where playback is. NO when nothing plays or the path differs.
+- (BOOL)replaceRouteKeepingProgress:(LSRoute *)route;
 - (void)pause;
 - (void)resume;
 - (void)stop;
@@ -83,6 +91,7 @@ typedef NS_ENUM(NSInteger, LSAccelerationProfile) {
 + (double)horizontalAccuracyForMode:(LSTransportMode)mode;
 + (NSTimeInterval)estimatedDurationForRoute:(LSRoute *)route options:(LSPlaybackOptions *)options;
 // The custom speed (km/h) that makes the trip take `seconds`, or NAN when 1–500 km/h cannot.
+// Legs with their own speed keep it; only the others change.
 + (double)speedKmhForRoute:(LSRoute *)route options:(LSPlaybackOptions *)options finishingIn:(NSTimeInterval)seconds;
 // Plays the route offline from t = 0, calling block every `interval` seconds and at arrival.
 + (void)enumerateSamplesForRoute:(LSRoute *)route options:(LSPlaybackOptions *)options interval:(NSTimeInterval)interval
