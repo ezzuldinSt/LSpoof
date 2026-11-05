@@ -615,6 +615,26 @@ static LSLinkKind LSKindOfURL(NSURL *url) {
     return LSLinkNone;
 }
 
+#ifndef GNUSTEP
+// Stops at the first redirect that already names a place, such as maps.google.com/?q=…,
+// so the full map page behind it (or a consent page in the EU) is never loaded.
+@interface LSLinkRedirectStopper : NSObject <NSURLSessionTaskDelegate>
+@property (atomic, strong) NSURL *stoppedAt;
+@end
+
+@implementation LSLinkRedirectStopper
+- (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task willPerformHTTPRedirection:(NSHTTPURLResponse *)response
+        newRequest:(NSURLRequest *)request completionHandler:(void (^)(NSURLRequest *))completionHandler {
+    if ([LSMapLinks resolvedLinkNamesPlace:request.URL]) {
+        self.stoppedAt = request.URL;
+        completionHandler(nil);
+        return;
+    }
+    completionHandler(request);
+}
+@end
+#endif
+
 #pragma mark - Public
 
 @implementation LSMapLinks
@@ -822,24 +842,31 @@ static NSString *LSUnescapeHTML(NSString *text) {
     return nil;
 }
 
++ (BOOL)resolvedLinkNamesPlace:(NSURL *)url {
+    return url && ![self needsResolving:url] && [self parseURL:url].places.count > 0;
+}
+
 #ifndef GNUSTEP
 + (void)resolveURL:(NSURL *)url completion:(void (^)(NSURL *, NSString *))completion {
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:12.0];
     request.HTTPMethod = @"GET";
-    // A desktop browser agent gets the plain web redirect instead of an app interstitial.
-    [request setValue:@"Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
-   forHTTPHeaderField:@"User-Agent"];
+    // No browser User-Agent: maps.app.goo.gl answers a desktop Safari agent with a script
+    // page that has no redirect and no place in it (#20), and the plain redirect otherwise.
     NSURLSessionConfiguration *configuration = NSURLSessionConfiguration.ephemeralSessionConfiguration;
     configuration.HTTPCookieStorage = nil;
     configuration.HTTPShouldSetCookies = NO;
     configuration.URLCache = nil;
-    NSURLSession *session = [NSURLSession sessionWithConfiguration:configuration];
+    LSLinkRedirectStopper *stopper = [[LSLinkRedirectStopper alloc] init];
+    NSURLSession *session = [NSURLSession sessionWithConfiguration:configuration delegate:stopper delegateQueue:nil];
     [[session dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-        NSURL *resolved = error ? nil : response.URL;
+        NSURL *resolved = stopper.stoppedAt;
         NSString *html = nil;
-        NSString *type = [response isKindOfClass:NSHTTPURLResponse.class] ? [((NSHTTPURLResponse *)response).allHeaderFields objectForKey:@"Content-Type"] : nil;
-        if (data.length && data.length <= kLSMapLinkMaximumHTML && [type.lowercaseString containsString:@"html"]) {
-            html = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+        if (!resolved) {
+            resolved = error ? nil : response.URL;
+            NSString *type = [response isKindOfClass:NSHTTPURLResponse.class] ? [((NSHTTPURLResponse *)response).allHeaderFields objectForKey:@"Content-Type"] : nil;
+            if (data.length && data.length <= kLSMapLinkMaximumHTML && [type.lowercaseString containsString:@"html"]) {
+                html = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+            }
         }
         [session finishTasksAndInvalidate];
         dispatch_async(dispatch_get_main_queue(), ^{ completion(resolved, html); });
