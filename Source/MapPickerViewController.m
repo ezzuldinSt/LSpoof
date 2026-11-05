@@ -662,6 +662,8 @@ static void LSSetButtonRadius(UIButton *button, CGFloat radius) {
     self.statusProgress = [[LSProgressCapsule alloc] initWithFrame:CGRectZero];
     self.statusProgress.hidden = YES;
     [self.brandLabel setContentCompressionResistancePriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
+    // Beside the chip in the landscape side panel, the name takes the spare width, not the chip.
+    [self.brandLabel setContentHuggingPriority:UILayoutPriorityDefaultLow - 1 forAxis:UILayoutConstraintAxisHorizontal];
     // Capsule above the name; side by side in the landscape side panel (applyStatusLineLayout).
     self.statusLine = [[UIStackView alloc] initWithArrangedSubviews:@[self.statusChip, self.brandLabel]];
     self.statusLine.axis = UILayoutConstraintAxisVertical;
