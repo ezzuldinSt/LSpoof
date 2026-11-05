@@ -1871,8 +1871,15 @@ static UIImage *LSSavedRenderPin(UIImage *glyph, UIColor *color, UIGraphicsImage
     if (route.distance > 0) [parts addObject:LSSavedDistance(route.distance, spoken)];
     NSUInteger stops = route.plannedStopCount;
     if (stops) [parts addObject:stops == 1 ? @"1 stop" : [NSString stringWithFormat:@"%lu stops", (unsigned long)stops]];
-    if (route.fromTrack) [parts addObject:spoken ? @"recorded track" : @"track"];
-    else [parts addObject:[route.path isEqualToString:@"driving"] ? @"driving path" : @"walking path"];
+    if (route.fromTrack) {
+        [parts addObject:spoken ? @"recorded track" : @"track"];
+    } else {
+        // Legs can each have their own path (#28): "driving and walking paths".
+        NSMutableOrderedSet<NSString *> *paths = [NSMutableOrderedSet orderedSetWithObject:route.path];
+        for (LSArchivedLeg *leg in route.legs) [paths addObject:leg.path];
+        NSString *names = [NSListFormatter localizedStringByJoiningStrings:paths.array];
+        [parts addObject:[NSString stringWithFormat:paths.count > 1 ? @"%@ paths" : @"%@ path", names]];
+    }
     NSString *ago = LSSavedAgo(route.createdAt);
     [parts addObject:spoken ? [NSString stringWithFormat:@"saved %@", ago] : ago];
     NSString *text = [parts componentsJoinedByString:spoken ? @", " : @" · "];

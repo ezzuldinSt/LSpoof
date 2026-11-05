@@ -185,9 +185,7 @@ NSNotificationName const LSSessionDidChangeNotification = @"LSSessionDidChange";
     store.simulationWasActive = YES;
     if (!routeID) {
         routeID = NSUUID.UUID.UUIDString;
-        LSRouteArchive *archive = route.archive;
-        archive.identifier = routeID;
-        [store storeActiveRoute:archive.dictionaryRepresentation];
+        [self persistRoute:route identifier:routeID];
     }
     _activeRouteID = routeID;
     [self saveCheckpoint:[self currentCheckpoint]];
@@ -197,6 +195,13 @@ NSNotificationName const LSSessionDidChangeNotification = @"LSSessionDidChange";
 }
 
 #pragma mark - Resume (#20)
+
+// The copy a relaunch resumes from. Written off the main thread.
+- (void)persistRoute:(LSRoute *)route identifier:(NSString *)identifier {
+    LSRouteArchive *archive = route.archive;
+    archive.identifier = identifier;
+    [[PersistenceManager shared] storeActiveRoute:archive.dictionaryRepresentation];
+}
 
 // Where the simulator is on the retained route right now.
 - (nullable LSRouteCheckpoint *)currentCheckpoint {
@@ -335,6 +340,11 @@ static double LSNextMultiplier(double multiplier, NSInteger direction) {
         updated = [simulator replaceRouteKeepingProgress:route];
         if (!updated) return;
         self.retainedRoute = route;
+        // The same run with new leg settings: a relaunch resumes it with them.
+        if (self->_activeRouteID) {
+            [self persistRoute:route identifier:self->_activeRouteID];
+            [self saveCheckpoint:[self currentCheckpoint]];
+        }
         [self publishMode:simulator.isPaused ? LSSessionModePaused : LSSessionModeMoving
               coordinate:simulator.currentCoordinate heading:simulator.currentHeading];
     }];

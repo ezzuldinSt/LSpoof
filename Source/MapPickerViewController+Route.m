@@ -3769,6 +3769,20 @@ static LSRoute *LSRouteFromTrackFile(NSURL *url, LSTrack **trackOut, NSString **
 
 #pragma mark - Saved routes and resume (#20)
 
+// A saved route with only its places: each leg's path and speed as saved, for the lookup.
+- (void)adoptLegsOfArchive:(LSRouteArchive *)archive {
+    NSArray<MKPointAnnotation *> *places = [self legDepartures];
+    if (archive.legs.count != places.count) return;
+    MKDirectionsTransportType routeType = [self routePathType];
+    for (NSUInteger leg = 0; leg < places.count; leg++) {
+        LSArchivedLeg *saved = archive.legs[leg];
+        MKDirectionsTransportType type = LSTransportTypeForArchivePath(saved.path, routeType);
+        LSLegChoice *choice = LSLegChoiceOf(places[leg]);
+        choice.transport = type != routeType ? type : 0;
+        choice.speedKmh = saved.speedKmh;
+    }
+}
+
 - (void)updateResumeButton {
     LSResumeOffer *offer = LSSessionController.shared.resumeOffer;
     // Only over the route it belongs to; another draft keeps the planner for itself.
@@ -3905,8 +3919,13 @@ static LSRoute *LSRouteFromTrackFile(NSURL *url, LSTrack **trackOut, NSString **
     [self renumberStops];
     [self.mapView addAnnotations:@[self.startPin, self.endPin]];
     [self.mapView addAnnotations:self.routeStops];
-    [self rebuildStopRows];
     self.profileSegment.selectedSegmentIndex = [archive.path isEqualToString:@"driving"] ? 1 : 0;
+    // Each leg's own path and speed, from the built route (whose leg directions are then known),
+    // or as saved when only the places survived.
+    LSRoute *route = [LSRoute routeWithArchive:archive];
+    if (route) [self adoptLegsOfRoute:route];
+    else [self adoptLegsOfArchive:archive];
+    [self rebuildStopRows];
     self.endpointSegment.selectedSegmentIndex = LSEndpointTo;
     self.endpoint = LSEndpointTo;
     // The planner's speed, and the motion and waits it shares with Settings, as saved.
@@ -3919,7 +3938,6 @@ static LSRoute *LSRouteFromTrackFile(NSURL *url, LSTrack **trackOut, NSString **
         store.accelerationProfile = options.accelerationProfile;
         store.stopDwell = options.stopDwell;
     }
-    LSRoute *route = [LSRoute routeWithArchive:archive];
     if (!route) {
         // Only its places survived: look the streets up again, as for a new draft.
         [self updateRouteUI];

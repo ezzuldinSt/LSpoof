@@ -57,6 +57,8 @@ static LSRouteArchive *SampleRoute(void) {
     playback.acceleration = 2;
     playback.stopDwell = 30;
     route.playback = playback;
+    route.legs = @[ [LSArchivedLeg legWithPath:@"driving" speedKmh:NAN end:80.123456789 expectedTravelTime:20],
+                    [LSArchivedLeg legWithPath:@"walking" speedKmh:4.5 end:NAN expectedTravelTime:40] ];
     return route;
 }
 
@@ -90,6 +92,13 @@ static void TestRoundTrip(void) {
     CHECK(playback && NEAR(playback.speedKmh, 37.5, 1e-9) && playback.recordedPace && NEAR(playback.paceMultiplier, 1.5, 1e-9) &&
           playback.smooth && playback.acceleration == 2 && NEAR(playback.stopDwell, 30, 1e-9), "playback kept");
     CHECK(NEAR(back.distance, route.distance, 1e-9) && back.distance > 100 && back.distance < 300, "distance %f", back.distance);
+    CHECK(back.legs.count == 2, "two legs kept");
+    if (back.legs.count == 2) {
+        LSArchivedLeg *drive = [back.legs objectAtIndex:0], *walk = [back.legs objectAtIndex:1];
+        CHECK([drive.path isEqualToString:@"driving"] && isnan(drive.speedKmh) && NEAR(drive.end, 80.123456789, 1e-9) && drive.expectedTravelTime == 20,
+              "a leg at the route speed keeps its path and end");
+        CHECK([walk.path isEqualToString:@"walking"] && NEAR(walk.speedKmh, 4.5, 1e-9) && isnan(walk.end), "a leg with its own speed keeps it");
+    }
     LSRouteArchive *copy = [back copy];
     CHECK(copy != back && [copy.identifier isEqualToString:back.identifier] && [copy.coordinates isEqualToData:back.coordinates], "copies are equal");
 }
@@ -175,6 +184,33 @@ static void TestDamage(void) {
     CHECK(minimal && minimal.speedKmh == 12 && minimal.paceMultiplier == 1 && minimal.acceleration == 1 && !minimal.smooth, "missing playback values take defaults");
     [dictionary setObject:@{ @"speedKmh": @12, @"acceleration": @1.5 } forKey:@"playback"];
     CHECK([[LSRouteArchive archiveFromDictionary:dictionary error:NULL] playback] == nil, "a fractional motion profile is refused");
+}
+
+static void TestLegs(void) {
+    NSMutableDictionary *dictionary = Mutable(SampleRoute());
+    NSMutableArray *legs = [dictionary objectForKey:@"legs"];
+    CHECK(legs.count == 2 && ![[legs objectAtIndex:0] objectForKey:@"speedKmh"], "a leg at the route speed writes no speed");
+    [legs removeLastObject];
+    CHECK([[LSRouteArchive archiveFromDictionary:dictionary error:NULL] legs].count == 0, "legs that don't match the places are dropped together");
+    dictionary = Mutable(SampleRoute());
+    [[[dictionary objectForKey:@"legs"] objectAtIndex:1] setObject:@3 forKey:@"path"];
+    LSRouteArchive *unreadable = [LSRouteArchive archiveFromDictionary:dictionary error:NULL];
+    CHECK(unreadable && unreadable.legs.count == 0 && unreadable.places.count == 3, "an unreadable leg drops the legs, not the route");
+    dictionary = Mutable(SampleRoute());
+    [[[dictionary objectForKey:@"legs"] objectAtIndex:1] setObject:@900 forKey:@"speedKmh"];
+    [[[dictionary objectForKey:@"legs"] objectAtIndex:0] setObject:@"bicycle" forKey:@"path"];
+    LSRouteArchive *odd = [LSRouteArchive archiveFromDictionary:dictionary error:NULL];
+    CHECK(odd.legs.count == 2 && isnan([[odd.legs objectAtIndex:1] speedKmh]) && [[[odd.legs objectAtIndex:0] path] isEqualToString:@"bicycle"],
+          "an out-of-range speed plays at the route speed; an unknown path is kept");
+    dictionary = Mutable(SampleRoute());
+    [dictionary removeObjectForKey:@"geometry"];
+    LSRouteArchive *planned = [LSRouteArchive archiveFromDictionary:dictionary error:NULL];
+    CHECK(planned.legs.count == 2 && isnan([[planned.legs objectAtIndex:0] end]) && [[[planned.legs objectAtIndex:0] path] isEqualToString:@"driving"],
+          "without a path the legs keep their modes, not their ends");
+    dictionary = Mutable(SampleRoute());
+    [dictionary removeObjectForKey:@"legs"];
+    CHECK([[LSRouteArchive archiveFromDictionary:dictionary error:NULL] legs].count == 0, "a route from before legs has none");
+    CHECK([LSArchivedLeg legWithPath:@"" speedKmh:5 end:1 expectedTravelTime:1] == nil, "a leg needs a path");
 }
 
 static void TestPlacesAndNames(void) {
@@ -313,6 +349,7 @@ int main(void) {
         TestByteOrder();
         TestVersionsAndUnknownKeys();
         TestDamage();
+        TestLegs();
         TestPlacesAndNames();
         TestCheckpoint();
         TestStore();
