@@ -392,6 +392,10 @@ static BOOL LSMapDragTaught;
 @property (nonatomic, strong) UIButton *undoButton;
 @property (nonatomic, strong) NSLayoutConstraint *mapLimit;
 @property (nonatomic, strong) NSLayoutConstraint *mapLimitLarge;
+// Portrait: the preview above the fields. Landscape on a phone: the preview beside them.
+@property (nonatomic, strong) NSMutableArray<NSLayoutConstraint *> *stackedLayout;
+@property (nonatomic, strong) NSMutableArray<NSLayoutConstraint *> *sideLayout;
+@property (nonatomic) BOOL usesSideLayout;
 @property (nonatomic, strong) UIScrollView *scroll;
 @property (nonatomic, strong) UIView *smartCard;
 @property (nonatomic, strong) UIStackView *smartRow;
@@ -863,14 +867,19 @@ static UIView *LSEntryHeader(NSString *text) {
     [self.footer addSubview:action];
     [NSLayoutConstraint activateConstraints:@[
         [fade.topAnchor constraintEqualToAnchor:self.footer.topAnchor constant:-LSSpaceXL],
-        [fade.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
         [fade.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
         [fade.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
         [action.topAnchor constraintEqualToAnchor:self.footer.topAnchor constant:LSSpaceS],
         [action.bottomAnchor constraintEqualToAnchor:self.footer.bottomAnchor constant:-LSSpaceS],
-        [action.leadingAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.leadingAnchor constant:LSSpaceL],
         [action.trailingAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.trailingAnchor constant:-LSSpaceL]
     ]];
+    // Full width under the preview; in landscape only under the fields (installConstraints).
+    self.stackedLayout = [NSMutableArray arrayWithObjects:
+        [fade.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [action.leadingAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.leadingAnchor constant:LSSpaceL], nil];
+    self.sideLayout = [NSMutableArray arrayWithObjects:
+        [fade.leadingAnchor constraintEqualToAnchor:self.scroll.leadingAnchor],
+        [action.leadingAnchor constraintEqualToAnchor:self.scroll.leadingAnchor constant:LSSpaceL], nil];
 }
 
 - (void)installConstraints {
@@ -887,18 +896,33 @@ static UIView *LSEntryHeader(NSString *text) {
     [NSLayoutConstraint activateConstraints:@[
         [self.mapCard.topAnchor constraintEqualToAnchor:safe.topAnchor constant:LSSpaceS],
         [self.mapCard.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor constant:LSSpaceL],
-        [self.mapCard.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor constant:-LSSpaceL],
-        preferred, self.mapLimit,
-        [self.scroll.topAnchor constraintEqualToAnchor:self.mapCard.bottomAnchor constant:LSSpaceXS],
-        [self.scroll.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor],
-        [self.scroll.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor],
         // A bottom constraint is active from the first layout (keyboard or not); the footer
         // floats over the end of the content, which is inset by its height.
         [self.scroll.bottomAnchor constraintEqualToAnchor:keyboard.topAnchor],
-        [self.footer.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [self.scroll.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor],
         [self.footer.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
         [self.footer.bottomAnchor constraintEqualToAnchor:keyboard.topAnchor]
     ]];
+    // Portrait: the sticky preview over the fields, a share of the room the keyboard leaves.
+    [self.stackedLayout addObjectsFromArray:@[
+        [self.mapCard.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor constant:-LSSpaceL],
+        preferred,
+        [self.scroll.topAnchor constraintEqualToAnchor:self.mapCard.bottomAnchor constant:LSSpaceXS],
+        [self.scroll.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor],
+        [self.footer.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor]
+    ]];
+    // Landscape on a phone: the share of a short screen left the preview a sliver, so it sits
+    // beside the fields at full height (down to the keyboard) and the button floats under them.
+    NSLayoutConstraint *sideBottom = [self.mapCard.bottomAnchor constraintEqualToAnchor:keyboard.topAnchor constant:-LSSpaceS];
+    sideBottom.priority = 999; // A very tall keyboard pushes the readout under it, not the layout apart.
+    [self.sideLayout addObjectsFromArray:@[
+        [self.mapCard.widthAnchor constraintEqualToAnchor:safe.widthAnchor multiplier:0.44 constant:-LSSpaceL],
+        sideBottom,
+        [self.scroll.topAnchor constraintEqualToAnchor:safe.topAnchor],
+        [self.scroll.leadingAnchor constraintEqualToAnchor:self.mapCard.trailingAnchor constant:LSSpaceXS],
+        [self.footer.leadingAnchor constraintEqualToAnchor:self.scroll.leadingAnchor]
+    ]];
+    [NSLayoutConstraint activateConstraints:self.stackedLayout];
 }
 
 #pragma mark Layout
@@ -950,9 +974,20 @@ static UIView *LSEntryHeader(NSString *text) {
     self.dragHintAllowed = !large;
     if (!self.dragHintAllowed) self.dragHint.alpha = 0;
     else if (self.mapShowsPreview && !LSMapDragTaught) self.dragHint.alpha = 1;
-    // Deactivate before activating so the two limits never apply together.
-    if (large) { self.mapLimit.active = NO; self.mapLimitLarge.active = YES; }
-    else { self.mapLimitLarge.active = NO; self.mapLimit.active = YES; }
+    BOOL side = self.traitCollection.verticalSizeClass == UIUserInterfaceSizeClassCompact;
+    if (side != self.usesSideLayout && self.sideLayout.count) {
+        self.usesSideLayout = side;
+        [NSLayoutConstraint deactivateConstraints:side ? self.stackedLayout : self.sideLayout];
+        [NSLayoutConstraint activateConstraints:side ? self.sideLayout : self.stackedLayout];
+        // Centre the preview again once the map has its new size.
+        if (self.hasPreview) self.needsMapRefresh = YES;
+        [self.view setNeedsLayout];
+    }
+    // Deactivate before activating so the two limits never apply together. Beside the fields
+    // the preview is sized by the screen instead.
+    self.mapLimit.active = NO;
+    self.mapLimitLarge.active = NO;
+    if (!side) (large ? self.mapLimitLarge : self.mapLimit).active = YES;
     BOOL contrast = self.traitCollection.accessibilityContrast == UIAccessibilityContrastHigh;
     self.mapCard.layer.borderWidth = contrast ? 1 : 0;
     self.mapCard.layer.borderColor = [UIColor.separatorColor resolvedColorWithTraitCollection:self.traitCollection].CGColor;

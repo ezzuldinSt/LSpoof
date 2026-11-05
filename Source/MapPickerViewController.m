@@ -440,6 +440,17 @@ static void LSSetButtonRadius(UIButton *button, CGFloat radius) {
 @property (nonatomic, strong) NSLayoutConstraint *savedBottom;
 @property (nonatomic, strong) NSLayoutConstraint *scrollTop;
 @property (nonatomic, strong) NSLayoutConstraint *scrollBottom;
+// Landscape on a phone: the header, the place card, the planner and Saved share a side panel on
+// the leading edge, the map fills the rest and the footer floats at its bottom.
+@property (nonatomic) BOOL sideLayout;
+@property (nonatomic, strong) NSMutableArray<NSLayoutConstraint *> *columnLayout;
+@property (nonatomic, copy) NSArray<NSLayoutConstraint *> *sideConstraints;
+@property (nonatomic, strong) NSLayoutConstraint *sideWidth;
+@property (nonatomic, strong) NSLayoutConstraint *sideGuideBottom;
+@property (nonatomic, strong) UILayoutGuide *sideGuide;
+@property (nonatomic, strong) UIScrollView *sideScroll;
+@property (nonatomic, strong) UIStackView *sideStack;
+@property (nonatomic, strong) UIStackView *statusLine;
 @property (nonatomic, strong) UIStackView *placeStatusRow;
 @property (nonatomic, strong) UIImageView *placeStatusIcon;
 @property (nonatomic, strong) UILabel *placeStatusLabel;
@@ -597,6 +608,7 @@ static void LSSetButtonRadius(UIButton *button, CGFloat radius) {
     // At accessibility sizes text wraps instead of shrinking or truncating.
     BOOL large = UIContentSizeCategoryIsAccessibilityCategory(self.traitCollection.preferredContentSizeCategory);
     self.brandLabel.numberOfLines = large ? 0 : 1;
+    [self applyStatusLineLayout];
     self.appliedLabel.numberOfLines = large ? 0 : 1;
     self.appliedLabel.adjustsFontSizeToFitWidth = !large;
     self.placeLabel.numberOfLines = large ? 0 : 3;
@@ -622,8 +634,8 @@ static void LSSetButtonRadius(UIButton *button, CGFloat radius) {
     // What is happening now leads: status capsule and the applied place in large type. A playing
     // route adds its progress line and bar. No branding competes with it.
     self.statusChip = [[LSStatusChip alloc] init];
-    UIStackView *chipRow = LSStack(@[self.statusChip], 0);
-    chipRow.alignment = UIStackViewAlignmentLeading;
+    [self.statusChip setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+    [self.statusChip setContentCompressionResistancePriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
     self.brandLabel = LSLabel(@"", UIFontTextStyleTitle3);
     self.brandLabel.font = LSFont(UIFontTextStyleTitle3, UIFontWeightBold, 30);
     self.brandLabel.numberOfLines = 1;
@@ -649,8 +661,13 @@ static void LSSetButtonRadius(UIButton *button, CGFloat radius) {
     [self.brandLabel addInteraction:[[UIContextMenuInteraction alloc] initWithDelegate:self.heldMenu]];
     self.statusProgress = [[LSProgressCapsule alloc] initWithFrame:CGRectZero];
     self.statusProgress.hidden = YES;
-    self.statusStack = LSStack(@[chipRow, self.brandLabel, self.appliedLabel, self.statusProgress], 2);
-    [self.statusStack setCustomSpacing:6 afterView:chipRow];
+    [self.brandLabel setContentCompressionResistancePriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
+    // Capsule above the name; side by side in the landscape side panel (applyStatusLineLayout).
+    self.statusLine = [[UIStackView alloc] initWithArrangedSubviews:@[self.statusChip, self.brandLabel]];
+    self.statusLine.axis = UILayoutConstraintAxisVertical;
+    self.statusLine.alignment = UIStackViewAlignmentLeading;
+    self.statusLine.spacing = 6;
+    self.statusStack = LSStack(@[self.statusLine, self.appliedLabel, self.statusProgress], 2);
     [self.statusStack setCustomSpacing:6 afterView:self.appliedLabel];
     self.statusStack.isAccessibilityElement = YES;
     [self.statusStack setContentHuggingPriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
@@ -680,6 +697,7 @@ static void LSSetButtonRadius(UIButton *button, CGFloat radius) {
     return chrome;
 }
 - (void)buildInterface {
+    self.columnLayout = [NSMutableArray array];
     self.scroll = [[UIScrollView alloc] init];
     self.scroll.translatesAutoresizingMaskIntoConstraints = NO;
     self.scroll.alwaysBounceVertical = YES;
@@ -712,7 +730,13 @@ static void LSSetButtonRadius(UIButton *button, CGFloat radius) {
     // between them and never shows behind or around them (constants set with the layout).
     self.scrollTop = [self.scroll.topAnchor constraintEqualToAnchor:self.view.topAnchor];
     self.scrollBottom = [self.scroll.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor];
-    NSMutableArray<NSLayoutConstraint *> *constraints = [NSMutableArray arrayWithArray:LSColumnConstraints(chrome, safe)];
+    NSArray<NSLayoutConstraint *> *savedColumn = @[
+        [self.savedTable.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor],
+        [self.savedTable.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor]
+    ];
+    [self.columnLayout addObjectsFromArray:LSColumnConstraints(chrome, safe)];
+    [self.columnLayout addObjectsFromArray:savedColumn];
+    NSMutableArray<NSLayoutConstraint *> *constraints = [NSMutableArray arrayWithArray:self.columnLayout];
     [constraints addObjectsFromArray:@[
         [chrome.topAnchor constraintEqualToAnchor:safe.topAnchor constant:14],
         self.scrollTop, self.scrollBottom,
@@ -724,14 +748,100 @@ static void LSSetButtonRadius(UIButton *button, CGFloat radius) {
         [self.contentStack.bottomAnchor constraintEqualToAnchor:self.scroll.contentLayoutGuide.bottomAnchor],
         [self.contentStack.widthAnchor constraintEqualToAnchor:self.scroll.frameLayoutGuide.widthAnchor],
         [self.savedTable.topAnchor constraintEqualToAnchor:chrome.bottomAnchor constant:6],
-        [self.savedTable.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor],
-        [self.savedTable.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor],
         self.savedBottom
     ]];
     [NSLayoutConstraint activateConstraints:constraints];
     // The overlays pin to the view's safe area, so the map has to be in the hierarchy first.
     [self installMapOverlays];
+    [self installSideLayout];
     [self contentSizeChanged:nil];
+}
+// The landscape side panel: a guide under the header, a scroll view for the planner, and the
+// constraints that replace the centred column. They are only active in that layout.
+- (void)installSideLayout {
+    UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
+    UIView *chrome = self.chromeView;
+    UILayoutGuide *side = [[UILayoutGuide alloc] init];
+    [self.view addLayoutGuide:side];
+    self.sideGuide = side;
+    UIScrollView *scroll = [[UIScrollView alloc] init];
+    scroll.translatesAutoresizingMaskIntoConstraints = NO;
+    scroll.hidden = YES;
+    scroll.alwaysBounceVertical = YES;
+    scroll.keyboardDismissMode = UIScrollViewKeyboardDismissModeOnDrag;
+    scroll.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentNever;
+    // A solid sheet behind the planner cards, as on the Route tab in portrait.
+    scroll.backgroundColor = UIColor.systemGroupedBackgroundColor;
+    scroll.layer.cornerRadius = LSRadiusL;
+    scroll.layer.cornerCurve = kCACornerCurveContinuous;
+    [self.view insertSubview:scroll aboveSubview:self.scroll];
+    UIStackView *stack = LSStack(@[], 0);
+    [scroll addSubview:stack];
+    self.sideScroll = scroll;
+    self.sideStack = stack;
+    self.sideGuideBottom = [side.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor constant:-12];
+    [NSLayoutConstraint activateConstraints:@[
+        [side.topAnchor constraintEqualToAnchor:chrome.bottomAnchor constant:kLSFloatGap],
+        [side.leadingAnchor constraintEqualToAnchor:chrome.leadingAnchor],
+        [side.trailingAnchor constraintEqualToAnchor:chrome.trailingAnchor],
+        self.sideGuideBottom,
+        [scroll.topAnchor constraintEqualToAnchor:side.topAnchor],
+        [scroll.leadingAnchor constraintEqualToAnchor:side.leadingAnchor],
+        [scroll.trailingAnchor constraintEqualToAnchor:side.trailingAnchor],
+        [scroll.bottomAnchor constraintEqualToAnchor:side.bottomAnchor],
+        [stack.topAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.topAnchor],
+        [stack.leadingAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.leadingAnchor],
+        [stack.trailingAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.trailingAnchor],
+        [stack.bottomAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.bottomAnchor],
+        [stack.widthAnchor constraintEqualToAnchor:scroll.frameLayoutGuide.widthAnchor]
+    ]];
+    self.sideWidth = [chrome.widthAnchor constraintEqualToConstant:360];
+    self.sideConstraints = @[
+        [chrome.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor constant:12],
+        self.sideWidth,
+        // The footer floats over the map at the bottom, beside the panel.
+        [self.footerView.leadingAnchor constraintEqualToAnchor:chrome.trailingAnchor constant:12],
+        [self.footerView.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor constant:-12],
+        // The place card sits under the header and scrolls inside itself when it is taller.
+        [self.locationDetails.leadingAnchor constraintEqualToAnchor:side.leadingAnchor],
+        [self.locationDetails.trailingAnchor constraintEqualToAnchor:side.trailingAnchor],
+        [self.locationDetails.topAnchor constraintEqualToAnchor:side.topAnchor],
+        [self.locationDetails.bottomAnchor constraintLessThanOrEqualToAnchor:side.bottomAnchor],
+        [self.savedTable.leadingAnchor constraintEqualToAnchor:side.leadingAnchor],
+        [self.savedTable.trailingAnchor constraintEqualToAnchor:side.trailingAnchor],
+        // Map controls, hints and centring use the map beside the panel.
+        [self.mapVisibleGuide.leadingAnchor constraintGreaterThanOrEqualToAnchor:chrome.trailingAnchor constant:12]
+    ];
+}
+- (void)applySideLayout:(BOOL)side {
+    if (!self.sideConstraints) return;
+    self.sideLayout = side;
+    // Off first, so the two layouts never fight for a moment. The map stops ending at the place
+    // card before the card moves into the panel.
+    if (side) [self setMapGuideForLocation:NO];
+    if (side) {
+        [NSLayoutConstraint deactivateConstraints:self.columnLayout];
+        [NSLayoutConstraint activateConstraints:self.sideConstraints];
+    } else {
+        [NSLayoutConstraint deactivateConstraints:self.sideConstraints];
+        [NSLayoutConstraint activateConstraints:self.columnLayout];
+    }
+    // The planner moves into the panel and back; the map stays where it is.
+    UIStackView *home = side ? self.sideStack : self.contentStack;
+    if (self.panelsStack.superview != home) {
+        [self.panelsStack removeFromSuperview];
+        [home addArrangedSubview:self.panelsStack];
+    }
+    self.panelsStack.directionalLayoutMargins = side ? NSDirectionalEdgeInsetsMake(12, 12, 12, 12) : NSDirectionalEdgeInsetsMake(14, 0, 24, 0);
+    [self applyStatusLineLayout];
+    [self applyWorkspaceLayout];
+}
+- (void)applyStatusLineLayout {
+    BOOL large = UIContentSizeCategoryIsAccessibilityCategory(self.traitCollection.preferredContentSizeCategory);
+    BOOL inlined = self.sideLayout && !large;
+    self.statusLine.axis = inlined ? UILayoutConstraintAxisHorizontal : UILayoutConstraintAxisVertical;
+    self.statusLine.alignment = inlined ? UIStackViewAlignmentCenter : UIStackViewAlignmentLeading;
+    self.statusLine.spacing = inlined ? 8 : 6;
 }
 - (void)buildFooter {
     self.primaryButton = LSButton(@"Apply location", @"checkmark.circle.fill", YES);
@@ -782,7 +892,9 @@ static void LSSetButtonRadius(UIButton *button, CGFloat radius) {
     // Floats just into the home indicator area, but never closer than 12 pt to the edge.
     NSLayoutConstraint *bottom = [footer.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor constant:10];
     bottom.priority = 999;
-    [NSLayoutConstraint activateConstraints:LSColumnConstraints(footer, safe)];
+    NSArray<NSLayoutConstraint *> *column = LSColumnConstraints(footer, safe);
+    [self.columnLayout addObjectsFromArray:column];
+    [NSLayoutConstraint activateConstraints:column];
     [NSLayoutConstraint activateConstraints:@[
         [footer.bottomAnchor constraintLessThanOrEqualToAnchor:self.view.bottomAnchor constant:-12],
         bottom
@@ -872,7 +984,26 @@ static void LSSetButtonRadius(UIButton *button, CGFloat radius) {
     self.realNoticeLabel.hidden = YES;
     UIStackView *stack = LSStack(@[search, info, self.locationActions, self.realNoticeLabel], 14);
     [stack setCustomSpacing:16 afterView:search];
-    UIView *card = LSGlassPanel(stack, LSRadiusL, 16);
+    stack.directionalLayoutMargins = NSDirectionalEdgeInsetsMake(16, 16, 16, 16);
+    stack.layoutMarginsRelativeArrangement = YES;
+    // The card is as tall as its content and scrolls inside itself when there is less room
+    // (landscape, very large text), instead of squeezing its rows into a sliver.
+    UIScrollView *cardScroll = [[UIScrollView alloc] init];
+    cardScroll.translatesAutoresizingMaskIntoConstraints = NO;
+    cardScroll.showsHorizontalScrollIndicator = NO;
+    cardScroll.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentNever;
+    [cardScroll addSubview:stack];
+    NSLayoutConstraint *fit = [cardScroll.heightAnchor constraintEqualToAnchor:stack.heightAnchor];
+    fit.priority = 998;
+    [NSLayoutConstraint activateConstraints:@[
+        [stack.topAnchor constraintEqualToAnchor:cardScroll.contentLayoutGuide.topAnchor],
+        [stack.leadingAnchor constraintEqualToAnchor:cardScroll.contentLayoutGuide.leadingAnchor],
+        [stack.trailingAnchor constraintEqualToAnchor:cardScroll.contentLayoutGuide.trailingAnchor],
+        [stack.bottomAnchor constraintEqualToAnchor:cardScroll.contentLayoutGuide.bottomAnchor],
+        [stack.widthAnchor constraintEqualToAnchor:cardScroll.frameLayoutGuide.widthAnchor],
+        fit
+    ]];
+    UIView *card = LSGlassPanel(cardScroll, LSRadiusL, 0);
     card.translatesAutoresizingMaskIntoConstraints = NO;
     self.locationDetails = card;
     [self installPlaceActions];
@@ -1026,7 +1157,10 @@ static void LSSetButtonRadius(UIButton *button, CGFloat radius) {
         stateWidth, stateCenter,
         self.cardBottom
     ]];
-    [NSLayoutConstraint activateConstraints:LSColumnConstraints(self.locationDetails, safe)];
+    NSArray<NSLayoutConstraint *> *cardColumn = LSColumnConstraints(self.locationDetails, safe);
+    [self.columnLayout addObjectsFromArray:cardColumn];
+    [self.columnLayout addObject:self.cardBottom];
+    [NSLayoutConstraint activateConstraints:cardColumn];
     [self installCompass];
 }
 - (void)installCompass {
@@ -1102,29 +1236,42 @@ static void LSSetButtonRadius(UIButton *button, CGFloat radius) {
     if (height <= 0 || !self.chromeView.superview || !self.mapGuideTop) return;
     BOOL location = self.tab == LSPickerTabLocation;
     UIEdgeInsets safe = self.view.safeAreaInsets;
+    // A phone on its side has no room for a header, a card and a footer stacked over the map,
+    // so they move into a side panel and the map fills the rest.
+    BOOL side = size.width > height && height < 500;
+    if (side != self.sideLayout) [self applySideLayout:side];
     CGFloat top = CGRectGetMaxY(self.chromeView.frame) + kLSFloatGap;
     CGFloat bottom = !self.footerShown ? 0 : MAX(0, height - CGRectGetMinY(self.footerView.frame)) + kLSFloatGap;
+    // The footer's own rule: just into the home indicator area, never closer than 12 pt.
+    CGFloat edge = MAX(12, safe.bottom - 10);
+    if (side) {
+        CGFloat usable = size.width - safe.left - safe.right;
+        LSSetConstant(self.sideWidth, MIN(380, MAX(330, floor((usable - 36) / 2))));
+    }
+    LSSetConstant(self.sideGuideBottom, -edge);
     LSSetConstant(self.cardBottom, -MAX(bottom, safe.bottom + 12));
-    LSSetConstant(self.savedBottom, -bottom);
+    LSSetConstant(self.savedBottom, side ? -edge : -bottom);
     LSSetConstant(self.mapMinimumVisible, height < 500 ? 90 : 150);
-    // Location: the map is the whole sheet, under the floating header and footer. Route: the
-    // scroll view sits between them, so nothing scrolls behind the header, peeks out around it
-    // or shows below the footer buttons.
-    LSSetConstant(self.scrollTop, location ? 0 : top);
-    LSSetConstant(self.scrollBottom, location ? 0 : -bottom);
-    LSSetConstant(self.mapGuideTop, location ? top : 12);
+    // Location (and the side layout): the map is the whole sheet, under the floating surfaces.
+    // Route: the scroll view sits between the header and the footer, so nothing scrolls behind
+    // the header, peeks out around it or shows below the footer buttons.
+    BOOL fullMap = location || side;
+    LSSetConstant(self.scrollTop, fullMap ? 0 : top);
+    LSSetConstant(self.scrollBottom, fullMap ? 0 : -bottom);
+    LSSetConstant(self.mapGuideTop, side ? safe.top + 12 : (location ? top : 12));
+    LSSetConstant(self.mapGuideToBottom, side ? -MAX(bottom, edge) : -12);
     // Route: the map is a card in the same column as the planner below it.
     CGFloat column = MAX(16, (size.width - kLSColumnWidth) / 2);
-    CGFloat leading = location ? 0 : MAX(column, safe.left + 16), trailing = location ? 0 : MAX(column, safe.right + 16);
+    CGFloat leading = fullMap ? 0 : MAX(column, safe.left + 16), trailing = fullMap ? 0 : MAX(column, safe.right + 16);
     NSDirectionalEdgeInsets margins = NSDirectionalEdgeInsetsMake(0, leading, 0, trailing);
     NSDirectionalEdgeInsets current = self.contentStack.directionalLayoutMargins;
     if (current.leading != margins.leading || current.trailing != margins.trailing) self.contentStack.directionalLayoutMargins = margins;
-    CGFloat available = height - (location ? 0 : top + bottom);
-    LSSetConstant(self.mapHeight, location ? height : MIN(400, MAX(220, available * 0.45)));
+    CGFloat available = height - (fullMap ? 0 : top + bottom);
+    LSSetConstant(self.mapHeight, fullMap ? height : MIN(400, MAX(220, available * 0.45)));
     // With the footer hidden the content still clears the home indicator.
-    UIEdgeInsets inset = UIEdgeInsetsMake(0, 0, location || bottom > 0 ? 0 : safe.bottom, 0);
+    UIEdgeInsets inset = UIEdgeInsetsMake(0, 0, fullMap || bottom > 0 ? 0 : safe.bottom, 0);
     if (!UIEdgeInsetsEqualToEdgeInsets(self.scroll.contentInset, inset)) self.scroll.contentInset = inset;
-    UIEdgeInsets indicators = location ? UIEdgeInsetsMake(top, 0, bottom, 0) : UIEdgeInsetsZero;
+    UIEdgeInsets indicators = location && !side ? UIEdgeInsetsMake(top, 0, bottom, 0) : UIEdgeInsetsZero;
     if (!UIEdgeInsetsEqualToEdgeInsets(self.scroll.verticalScrollIndicatorInsets, indicators)) self.scroll.verticalScrollIndicatorInsets = indicators;
 }
 - (void)mapContainerDidLayout {
@@ -1243,14 +1390,17 @@ static void LSSetButtonRadius(UIButton *button, CGFloat radius) {
     if (gesture.state != UIGestureRecognizerStateEnded) return;
     CLLocationCoordinate2D coordinate = [self.mapView convertPoint:[gesture locationInView:self.mapView] toCoordinateFromView:self.mapView];
     if (!CLLocationCoordinate2DIsValid(coordinate)) return;
-    if (self.tab == LSPickerTabRoute) { LSHapticSelection(); [self assignMapEndpoint:coordinate]; }
-    else [self dropPinAt:coordinate save:NO];
+    if (self.tab == LSPickerTabRoute) { LSHapticSelection(); [self assignMapEndpoint:coordinate]; return; }
+    // Beside the landscape side panel the map shows on Saved too; a tap there picks a spot.
+    if (self.tab == LSPickerTabSaved) [self showTab:LSPickerTabLocation animated:YES];
+    [self dropPinAt:coordinate save:NO];
 }
 - (void)mapHeld:(UILongPressGestureRecognizer *)gesture {
     if (gesture.state != UIGestureRecognizerStateBegan) return;
     CLLocationCoordinate2D coordinate = [self.mapView convertPoint:[gesture locationInView:self.mapView] toCoordinateFromView:self.mapView];
     if (!CLLocationCoordinate2DIsValid(coordinate)) return;
     if (self.tab == LSPickerTabRoute) { LSHapticSelection(); [self assignMapEndpoint:coordinate]; return; }
+    if (self.tab == LSPickerTabSaved) [self showTab:LSPickerTabLocation animated:YES];
     [self dropPinAt:coordinate save:YES];
 }
 - (void)dropPinAt:(CLLocationCoordinate2D)coordinate save:(BOOL)save {
@@ -1424,14 +1574,9 @@ static void LSSetButtonRadius(UIButton *button, CGFloat radius) {
     self.routeEndpointsPanel.hidden = !route;
     self.routeDetailsPanel.hidden = !route;
     self.panelsStack.hidden = !route;
-    self.mapContainer.hidden = saved;
     self.savedTable.hidden = !saved;
-    self.scroll.hidden = saved;
-    self.scroll.alwaysBounceVertical = !location;
     self.mapView.showsScale = !route;
-    // On Route the map is a card like the planner below it; on Location it runs edge to edge.
-    self.mapContainer.layer.cornerRadius = route ? LSRadiusM : 0;
-    [self setMapGuideForLocation:location];
+    [self applyWorkspaceLayout];
     // A renamed saved place shows its new name in the header.
     self.appliedName = nil;
     [self syncMapWorkspace];
@@ -1449,6 +1594,22 @@ static void LSSetButtonRadius(UIButton *button, CGFloat radius) {
     [self updateStatusForSnapshot:LSSessionController.shared.snapshot];
     if (saved) self.savedHeaderDirty = YES;
     [self.view setNeedsLayout];
+}
+// What depends on both the tab and the layout (portrait column or landscape side panel).
+- (void)applyWorkspaceLayout {
+    BOOL location = self.tab == LSPickerTabLocation, route = self.tab == LSPickerTabRoute, saved = self.tab == LSPickerTabSaved;
+    BOOL side = self.sideLayout;
+    // Beside the side panel the map stays in view on every tab, Saved included.
+    self.mapContainer.hidden = saved && !side;
+    self.scroll.hidden = saved && !side;
+    self.scroll.alwaysBounceVertical = !location && !side;
+    self.sideScroll.hidden = !(side && route);
+    // On Route in portrait the map is a card like the planner below it; otherwise it runs edge
+    // to edge. In the side panel, Saved is a rounded sheet like the planner.
+    self.mapContainer.layer.cornerRadius = route && !side ? LSRadiusM : 0;
+    self.savedTable.layer.cornerRadius = side ? LSRadiusL : 0;
+    self.savedTable.layer.cornerCurve = kCACornerCurveContinuous;
+    [self setMapGuideForLocation:location && !side];
 }
 - (void)updateMapHint {
     BOOL location = self.tab == LSPickerTabLocation;
@@ -1485,6 +1646,7 @@ static void LSSetButtonRadius(UIButton *button, CGFloat radius) {
     [self updateWorkspace];
     [self updateRealLocation];
     [self.scroll setContentOffset:CGPointZero animated:NO];
+    [self.sideScroll setContentOffset:CGPointZero animated:NO];
     [self revealWorkspaceFrom:animated ? previous : tab];
 }
 - (void)revealWorkspaceFrom:(LSPickerTab)previous {

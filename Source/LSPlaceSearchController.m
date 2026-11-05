@@ -735,6 +735,8 @@ typedef NS_OPTIONS(NSUInteger, LSSearchOptions) {
     NSMutableArray<UIButton *> *chips = [NSMutableArray array];
     for (NSUInteger index = 0; index < definitions.count; index++) {
         UIButton *chip = LSChipButton(definitions[index][0], definitions[index][1]);
+        // The row scrolls, so a chip keeps its whole title on one line at every text size.
+        LSSetChipOneLine(chip);
         chip.tag = (NSInteger)index;
         [chip addTarget:self action:@selector(chipTapped:) forControlEvents:UIControlEventTouchUpInside];
         [self tintChip:chip tone:(LSTone)[definitions[index][4] integerValue] symbol:definitions[index][1]];
