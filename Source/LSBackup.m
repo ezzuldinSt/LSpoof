@@ -7,7 +7,10 @@
 
 static NSString * const kLSBackupFormat = @"lspoof-backup";
 static const NSInteger kLSBackupVersion = 1;
-static const NSUInteger kLSBackupMaximumBytes = 32 * 1024 * 1024;
+// Big enough for the largest backup the caps allow, so anything exported can be restored: 50
+// saved routes of up to 50,000 points with timing are about 1.6 MB each as base64 (about 80 MB),
+// plus 500 places and the settings.
+static const NSUInteger kLSBackupMaximumBytes = 128 * 1024 * 1024;
 
 @implementation LSBackupSummary
 @end

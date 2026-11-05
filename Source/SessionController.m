@@ -203,6 +203,8 @@ NSNotificationName const LSSessionDidChangeNotification = @"LSSessionDidChange";
     LSRouteSimulator *simulator = [LSRouteSimulator shared];
     LSRoute *route = self.retainedRoute;
     if (!route || simulator.route != route || !_activeRouteID) return nil;
+    // After stop the engine is back at zero; only a playing or arrived route knows where it is.
+    if (!simulator.isSimulating && simulator.distanceCovered < route.distance - 0.5) return nil;
     LSRouteCheckpoint *checkpoint = [[LSRouteCheckpoint alloc] init];
     checkpoint.routeID = _activeRouteID;
     checkpoint.total = route.distance;
