@@ -44,7 +44,6 @@ typedef NS_ENUM(NSInteger, LSEndpoint) { LSEndpointFrom, LSEndpointStop, LSEndpo
 @property (nonatomic, strong) UILabel *placeLabel;
 @property (nonatomic, strong) UILabel *coordinateLabel;
 @property (nonatomic, strong) UIButton *savePlaceButton;
-@property (nonatomic, strong) UIButton *radiusChip;
 @property (nonatomic, strong) UIButton *scheduleButton;
 @property (nonatomic, strong) UIView *scheduleBanner;
 @property (nonatomic, strong) UILabel *scheduleLabel;
@@ -193,15 +192,13 @@ typedef NS_ENUM(NSInteger, LSEndpoint) { LSEndpointFrom, LSEndpointStop, LSEndpo
 @end
 @class LSRouteRailView, LSRouteInstrumentView, LSRouteStatView;
 @interface MapPickerViewController () // Route planner and playback (MapPickerViewController+Route.m)
-// Planner card: From, stops and To on one connected rail, and the chips for what a map tap sets
-// (endpointSegment stays the model the shell writes; it is not on screen).
+// Planner card: From, stops and To on one connected rail, and endpointSegment for what a map
+// tap sets.
 @property (nonatomic, strong) LSRouteRailView *routeFromRail;
 @property (nonatomic, strong) LSRouteRailView *routeToRail;
 @property (nonatomic, strong) LSRouteRailView *routeAddRail;
-@property (nonatomic, copy) NSArray<UIButton *> *routeTargetChips;
 @property (nonatomic) BOOL routeHighlightQueued;
-// Status card: empty, busy, error and ready states.
-@property (nonatomic, strong) UIView *routeEmptyState;
+// Status card: hint, busy, error and ready states.
 @property (nonatomic, strong) UIView *routeFeedbackWrap;
 @property (nonatomic, strong) UIImageView *routeFeedbackIcon;
 @property (nonatomic) NSInteger routeFeedbackTone;
