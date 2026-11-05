@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Runs the host tests for the parts of LSpoof that don't need UIKit: the motion
-# model, the track codecs, GPX/TCX/FIT reading and writing, and map links.
+# model, the track codecs, GPX/TCX/FIT reading and writing, map links, and the saved
+# route format.
 #
 #   Tests/run.sh          # all tests
 #   Tests/run.sh c        # only the C tests (no Objective-C toolchain needed)
@@ -62,5 +63,7 @@ build_objc "$OUT/trackio_tests" Tests/trackio_tests.m Source/LSTrackIO.m Source/
 run trackio_tests
 build_objc "$OUT/maplinks_tests" Tests/maplinks_tests.m Source/LSMapLinks.m
 run maplinks_tests
+build_objc "$OUT/routearchive_tests" Tests/routearchive_tests.m Source/LSRouteArchive.m Source/LSRouteStore.m
+run routearchive_tests
 
 exit "$FAILED"

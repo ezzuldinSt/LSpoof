@@ -1263,11 +1263,26 @@ static LSRoute *LSRouteFromTrackFile(NSURL *url, LSTrack **trackOut, NSString **
     self.finishButton.accessibilityHint = @"Sets the speed so the trip takes the time you choose, such as another app's arrival estimate.";
     self.shareButton = LSMenuChip(@"Share", @"square.and.arrow.up");
     self.shareButton.accessibilityLabel = @"Share or export the route";
-    UIStackView *tools = LSRow(@[self.finishButton, self.shareButton], 8);
+    // A bookmark, like Share an icon people know; it fills once the route is saved (#20).
+    self.saveRouteButton = LSChipButton(@"Save", @"bookmark");
+    UIButtonConfiguration *saveConfig = self.saveRouteButton.configuration;
+    saveConfig.title = nil;
+    self.saveRouteButton.configuration = saveConfig;
+    self.saveRouteButton.accessibilityLabel = @"Save route";
+    self.saveRouteButton.accessibilityHint = @"Names this route and keeps it on the Saved tab.";
+    self.saveRouteButton.showsLargeContentViewer = YES;
+    self.saveRouteButton.largeContentTitle = @"Save route";
+    [self.saveRouteButton addTarget:self action:@selector(saveCurrentRoute) forControlEvents:UIControlEventTouchUpInside];
+    UIStackView *tools = LSRow(@[self.finishButton, self.shareButton, self.saveRouteButton], 8);
     UIStackView *toolsWrap = LSStack(@[tools], 0);
     toolsWrap.alignment = UIStackViewAlignmentLeading;
     self.routeToolsWrap = LSRouteCollapsible(toolsWrap);
-    UIStackView *status = LSStack(@[self.routeStatsWrap, self.routeSummary, self.routeFeedbackWrap,
+    // Shown over a route that stopped part-way: after a relaunch, or Stop and hold (#20).
+    self.resumeRouteButton = LSButton(@"Resume route", @"play.fill", NO);
+    self.resumeRouteButton.hidden = YES;
+    self.resumeRouteButton.accessibilityHint = @"Goes on from where the route stopped, with the speed and motion it had.";
+    [self.resumeRouteButton addTarget:self action:@selector(resumeStoppedRoute) forControlEvents:UIControlEventTouchUpInside];
+    UIStackView *status = LSStack(@[self.routeStatsWrap, self.routeSummary, self.routeFeedbackWrap, self.resumeRouteButton,
                                     self.buildRouteButton, self.routeRecoveryButton, self.routeToolsWrap], 12);
     [status setCustomSpacing:4 afterView:self.routeStatsWrap];
     UIView *statusCard = LSInsetPanel(status);
@@ -1390,7 +1405,8 @@ static LSRoute *LSRouteFromTrackFile(NSURL *url, LSTrack **trackOut, NSString **
     [self.mapView addAnnotations:self.routeStops];
     [self addRouteOverlays];
     [self focusMapOnRect:self.routePolyline.boundingMapRect animated:NO];
-    [self setRouteFeedback:LSRouteSimulator.shared.isSimulating ? @"The applied route keeps moving when you close the picker." : @"Route retained. Replay it when you’re ready."
+    NSString *held = session.resumeOffer ? @"Stopped part-way. Resume where it left off, or replay it from the start." : @"Route retained. Replay it when you’re ready.";
+    [self setRouteFeedback:LSRouteSimulator.shared.isSimulating ? @"The applied route keeps moving when you close the picker." : held
                       tone:LSRouteToneInfo];
     [self rebuildStopRows];
     [self updateRouteUI];
@@ -3353,7 +3369,16 @@ static LSRoute *LSRouteFromTrackFile(NSURL *url, LSTrack **trackOut, NSString **
     }
     self.finishButton.hidden = route == nil;
     self.shareButton.hidden = !both;
+    self.saveRouteButton.hidden = route == nil;
+    LSRouteArchive *saved = route && self.savedRouteSource == route && self.savedRouteSourceID ? [LSRouteStore.shared routeWithID:self.savedRouteSourceID] : nil;
+    UIButtonConfiguration *saveConfig = self.saveRouteButton.configuration;
+    UIImage *bookmark = [UIImage systemImageNamed:saved ? @"bookmark.fill" : @"bookmark"];
+    if (saveConfig.image != bookmark) { saveConfig.image = bookmark; self.saveRouteButton.configuration = saveConfig; }
+    self.saveRouteButton.accessibilityLabel = saved ? @"Saved route" : @"Save route";
+    self.saveRouteButton.accessibilityValue = saved.name;
+    self.saveRouteButton.largeContentTitle = saved ? [NSString stringWithFormat:@"Saved as “%@”", saved.name] : @"Save route";
     self.routeToolsWrap.hidden = self.finishButton.hidden && self.shareButton.hidden;
+    [self updateResumeButton];
 }
 
 - (void)startDraftRoute {
@@ -3486,6 +3511,7 @@ static LSRoute *LSRouteFromTrackFile(NSURL *url, LSTrack **trackOut, NSString **
     [self syncRouteCasing];
     [self updateRouteTraveled:NO];
     if (show) [self renderInstrumentActive:active complete:complete];
+    [self updateResumeButton];
 }
 
 - (void)openRouteEditor {
@@ -3739,6 +3765,195 @@ static LSRoute *LSRouteFromTrackFile(NSURL *url, LSTrack **trackOut, NSString **
         if ([view isKindOfClass:MKMarkerAnnotationView.class]) [self styleRouteAnnotationView:view];
     }
     [self refreshStopRails];
+}
+
+#pragma mark - Saved routes and resume (#20)
+
+// A saved route with only its places: each leg's path and speed as saved, for the lookup.
+- (void)adoptLegsOfArchive:(LSRouteArchive *)archive {
+    NSArray<MKPointAnnotation *> *places = [self legDepartures];
+    if (archive.legs.count != places.count) return;
+    MKDirectionsTransportType routeType = [self routePathType];
+    for (NSUInteger leg = 0; leg < places.count; leg++) {
+        LSArchivedLeg *saved = archive.legs[leg];
+        MKDirectionsTransportType type = LSTransportTypeForArchivePath(saved.path, routeType);
+        LSLegChoice *choice = LSLegChoiceOf(places[leg]);
+        choice.transport = type != routeType ? type : 0;
+        choice.speedKmh = saved.speedKmh;
+    }
+}
+
+- (void)updateResumeButton {
+    LSResumeOffer *offer = LSSessionController.shared.resumeOffer;
+    // Only over the route it belongs to; another draft keeps the planner for itself.
+    BOOL show = offer && self.fetchedRoute == offer.route && !self.routeDraftChanged && !self.directions;
+    NSString *summary = show ? LSResumeSummary(offer, NO) : @"";
+    NSString *key = [NSString stringWithFormat:@"%d|%@", show, summary];
+    if ([key isEqualToString:self.resumeButtonKey]) return;
+    self.resumeButtonKey = key;
+    if (show) {
+        UIButtonConfiguration *config = self.resumeRouteButton.configuration;
+        config.subtitle = summary;
+        self.resumeRouteButton.configuration = config;
+        self.resumeRouteButton.accessibilityLabel = @"Resume route";
+        self.resumeRouteButton.accessibilityValue = LSResumeSummary(offer, YES);
+    }
+    self.resumeRouteButton.hidden = !show;
+}
+
+- (void)resumeStoppedRoute {
+    LSResumeOffer *offer = LSSessionController.shared.resumeOffer;
+    if (!offer || self.closed) { [self updateResumeButton]; return; }
+    if ([LSSessionController.shared resumeRoute]) {
+        // The planner shows this route, so it is the one playing again.
+        if (self.fetchedRoute == offer.route) self.routeDraftChanged = NO;
+        [self setRouteFeedback:@"Route resumed where it stopped." tone:LSRouteToneSuccess];
+        LSHapticApplied();
+        [self showMessage:@"Route resumed." symbol:@"location.north.line.fill"];
+        [self refreshSession];
+        [self updateRouteUI];
+        [self springAppliedMarker];
+    } else {
+        [self setRouteFeedback:@"The route could not be resumed. Replay it, or build it again." tone:LSRouteToneError];
+        [self updateRouteStatus];
+        LSHapticWarning();
+    }
+    LSAnnounce(self.routeFeedback.text);
+}
+
+- (void)promptRouteName:(NSString *)name title:(NSString *)title button:(NSString *)button save:(BOOL (^)(NSString *name))save {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:title message:@"Choose a name from 1 to 120 characters." preferredStyle:UIAlertControllerStyleAlert];
+    NSString *initial = name.length > 120 ? [name substringToIndex:120] : (name ?: @"");
+    [alert addTextFieldWithConfigurationHandler:^(UITextField *field) {
+        field.text = initial;
+        field.placeholder = @"Route name";
+        field.accessibilityLabel = @"Route name";
+        field.autocapitalizationType = UITextAutocapitalizationTypeWords;
+        field.clearButtonMode = UITextFieldViewModeWhileEditing;
+    }];
+    __weak UIAlertController *weakAlert = alert;
+    UIAlertAction *confirm = [UIAlertAction actionWithTitle:button style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
+        NSString *entered = [LSRouteArchive validName:weakAlert.textFields.firstObject.text];
+        if (entered) save(entered);
+    }];
+    confirm.enabled = [LSRouteArchive validName:initial] != nil;
+    __weak UIAlertAction *weakConfirm = confirm;
+    [alert.textFields.firstObject addAction:[UIAction actionWithHandler:^(__unused UIAction *action) {
+        BOOL valid = [LSRouteArchive validName:weakAlert.textFields.firstObject.text] != nil;
+        weakConfirm.enabled = valid;
+        weakAlert.message = valid ? @"This name identifies your saved route." : @"Enter a name from 1 to 120 characters.";
+    }] forControlEvents:UIControlEventEditingChanged];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:confirm];
+    alert.preferredAction = confirm;
+    [self presentViewController:alert animated:LSMapAnimationsEnabled() completion:nil];
+}
+
+- (void)saveCurrentRoute {
+    LSRoute *route = self.fetchedRoute;
+    if (!route || self.directions || self.closed) return;
+    LSRouteArchive *existing = self.savedRouteSource == route && self.savedRouteSourceID ? [LSRouteStore.shared routeWithID:self.savedRouteSourceID] : nil;
+    __weak typeof(self) weakSelf = self;
+    if (existing) {
+        [self confirmAction:@"Already saved" message:[NSString stringWithFormat:@"This route is saved as “%@”.", existing.name] button:@"Save another copy" action:^{
+            [weakSelf nameNewRoute:route];
+        }];
+        return;
+    }
+    [self nameNewRoute:route];
+}
+
+- (void)nameNewRoute:(LSRoute *)route {
+    if (LSRouteStore.shared.count >= LSRouteStore.capacity) {
+        UIAlertController *limit = [UIAlertController alertControllerWithTitle:@"50 saved routes maximum" message:@"Delete a saved route before adding another." preferredStyle:UIAlertControllerStyleAlert];
+        [limit addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleCancel handler:nil]];
+        [self presentViewController:limit animated:LSMapAnimationsEnabled() completion:nil];
+        LSHapticWarning();
+        return;
+    }
+    __weak typeof(self) weakSelf = self;
+    [self promptRouteName:route.name title:@"Save route" button:@"Save" save:^BOOL(NSString *name) {
+        typeof(self) self = weakSelf;
+        if (!self) return NO;
+        // The whole definition: places, path, and the speed, motion and waits it plays with.
+        LSRouteArchive *archive = route.archive;
+        archive.name = name;
+        archive.playback = (self.fetchedRoute == route ? [self draftOptions] : LSRouteSimulator.shared.options).playback;
+        BOOL saved = [LSRouteStore.shared addRoute:archive];
+        if (saved) {
+            self.savedRouteSource = route;
+            self.savedRouteSourceID = archive.identifier;
+            LSHapticSuccess();
+        } else {
+            LSHapticWarning();
+        }
+        [self showMessage:saved ? @"Route saved. It’s on the Saved tab." : @"Could not save. Check the name and the 50-route limit."
+                   symbol:saved ? @"bookmark.fill" : @"exclamationmark.triangle.fill"];
+        if (saved) LSBump(self.saveRouteButton);
+        [self updateRouteStatus];
+        [self reloadSavedPlaces];
+        return saved;
+    }];
+}
+
+- (void)loadSavedRoute:(LSRouteArchive *)archive start:(BOOL)start {
+    if (![archive isKindOfClass:LSRouteArchive.class] || archive.places.count < 2 || self.closed) return;
+    [self showTab:LSPickerTabRoute animated:YES];
+    [self clearRouteDraft];
+    NSArray<LSArchivedPlace *> *places = archive.places;
+    LSArchivedPlace *first = places.firstObject, *last = places.lastObject;
+    self.startPin = [[LSStartAnnotation alloc] init];
+    self.startPin.coordinate = CLLocationCoordinate2DMake(first.latitude, first.longitude);
+    self.startPin.title = @"From";
+    self.startPin.subtitle = first.name;
+    self.endPin = [[LSDestinationAnnotation alloc] init];
+    self.endPin.coordinate = CLLocationCoordinate2DMake(last.latitude, last.longitude);
+    self.endPin.title = @"To";
+    self.endPin.subtitle = last.name;
+    for (NSUInteger index = 1; index + 1 < places.count && self.routeStops.count < kLSMaximumStops; index++) {
+        LSStopAnnotation *stop = [[LSStopAnnotation alloc] init];
+        stop.coordinate = CLLocationCoordinate2DMake(places[index].latitude, places[index].longitude);
+        stop.subtitle = places[index].name;
+        [self.routeStops addObject:stop];
+    }
+    [self renumberStops];
+    [self.mapView addAnnotations:@[self.startPin, self.endPin]];
+    [self.mapView addAnnotations:self.routeStops];
+    self.profileSegment.selectedSegmentIndex = [archive.path isEqualToString:@"driving"] ? 1 : 0;
+    // Each leg's own path and speed, from the built route (whose leg directions are then known),
+    // or as saved when only the places survived.
+    LSRoute *route = [LSRoute routeWithArchive:archive];
+    if (route) [self adoptLegsOfRoute:route];
+    else [self adoptLegsOfArchive:archive];
+    [self rebuildStopRows];
+    self.endpointSegment.selectedSegmentIndex = LSEndpointTo;
+    self.endpoint = LSEndpointTo;
+    // The planner's speed, and the motion and waits it shares with Settings, as saved.
+    LSPlaybackOptions *options = [LSPlaybackOptions optionsWithPlayback:archive.playback];
+    if (options) {
+        self.draftSpeedKmh = options.speedKmh;
+        self.draftPaceMultiplier = options.paceMultiplier;
+        PersistenceManager *store = PersistenceManager.shared;
+        store.smoothMotion = options.smooth;
+        store.accelerationProfile = options.accelerationProfile;
+        store.stopDwell = options.stopDwell;
+    }
+    if (!route) {
+        // Only its places survived: look the streets up again, as for a new draft.
+        [self updateRouteUI];
+        [self fetchRoute];
+        LSAnnounce([NSString stringWithFormat:@"Loaded %@. Building the route.", archive.name]);
+        return;
+    }
+    [self showDraftRoute:route];
+    self.draftRecordedPace = options.recordedPace && route.hasTiming;
+    self.savedRouteSource = route;
+    self.savedRouteSourceID = archive.identifier;
+    [self setRouteFeedback:[NSString stringWithFormat:@"Loaded “%@”. Tap Start route when you’re ready.", archive.name] tone:LSRouteToneSuccess];
+    [self routeWasBuilt];
+    [self updateRouteUI];
+    if (start) [self startDraftRoute];
+    else LSAnnounce([NSString stringWithFormat:@"Loaded %@. Start it when you’re ready.", archive.name]);
 }
 @end
 

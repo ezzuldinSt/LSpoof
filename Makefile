@@ -19,6 +19,8 @@ LocationSpoofer_FILES = \
 	Source/RouteGeometry.c \
 	Source/RouteMotion.c \
 	Source/LSRoute.m \
+	Source/LSRouteArchive.m \
+	Source/LSRouteStore.m \
 	Source/LSTrackCodec.c \
 	Source/LSTrackIO.m \
 	Source/LSMapLinks.m \

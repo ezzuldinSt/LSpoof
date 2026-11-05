@@ -2,9 +2,13 @@
 #import "PersistenceManager.h"
 #import "LSMapLinks.h"
 #import "LSPlaceSearchController.h"
+#import "LSTrackIO.h"
 
 // Row identities, so list changes animate as inserts, deletes and moves instead of a reload.
-// "s|" is a saved place, "r|" a recent location, "p|" a placeholder row.
+// "s|" is a saved place, "t|" a saved route, "r|" a recent location, "p|" a placeholder row.
+// Sections: saved places, saved routes (#20, only when there are some), recently applied.
+static const NSInteger LSSavedRoutesSection = 1;
+static const NSInteger LSSavedSectionCount = 3;
 static NSString * const LSSavedEmptyKey = @"p|saved";
 static NSString * const LSRecentsEmptyKey = @"p|recents";
 static NSString * const LSSavedNoMatchKey = @"p|nomatch";
@@ -63,6 +67,12 @@ static BOOL LSSavedKeysUnique(NSArray<NSArray<NSString *> *> *keys) {
 }
 static BOOL LSSavedMatches(NSString *name, CLLocationCoordinate2D coordinate, NSString *filter) {
     return [name localizedStandardContainsString:filter] || [LSCoordinateText(coordinate) containsString:filter];
+}
+// A route matches by its name or the name of any place it runs through.
+static BOOL LSSavedRouteMatches(LSRouteArchive *route, NSString *filter) {
+    if ([route.name localizedStandardContainsString:filter]) return YES;
+    for (LSArchivedPlace *place in route.places) if ([place.name localizedStandardContainsString:filter]) return YES;
+    return NO;
 }
 // Where the filter matched, found the way LSSavedMatches compares (names ignore case and accents).
 static NSRange LSSavedMatchRange(NSString *text, NSString *filter, BOOL localized) {
@@ -188,8 +198,13 @@ static UIImage *LSSavedRenderPin(UIImage *glyph, UIColor *color, UIGraphicsImage
 - (instancetype)initWithName:(NSString *)name detail:(NSString *)detail pill:(nullable NSString *)pill pillColor:(nullable UIColor *)pillColor
                   coordinate:(CLLocationCoordinate2D)coordinate radius:(double)radius
                       symbol:(NSString *)symbol tint:(UIColor *)tint traits:(UITraitCollection *)traits width:(CGFloat)width;
+// A saved route: its whole path, fitted above the caption, with From and To marked.
+- (instancetype)initWithName:(NSString *)name detail:(NSString *)detail route:(LSRouteArchive *)route
+                      traits:(UITraitCollection *)traits width:(CGFloat)width;
 @end
 @implementation LSSavedPreviewController {
+    NSData *_routePath;
+    NSString *_routeKey;
     NSString *_symbol;
     CLLocationCoordinate2D _coordinate;
     double _radius;
@@ -241,6 +256,30 @@ static UIImage *LSSavedRenderPin(UIImage *glyph, UIColor *color, UIGraphicsImage
     _captionHeight = ceil(fit.height) + 20;
     CGFloat height = MAX(round(width * 0.66), round(width * 0.46 + _captionHeight));
     self.preferredContentSize = CGSizeMake(round(width), MIN(height, round(width * 1.3)));
+    return self;
+}
+- (instancetype)initWithName:(NSString *)name detail:(NSString *)detail route:(LSRouteArchive *)route
+                      traits:(UITraitCollection *)traits width:(CGFloat)width {
+    LSArchivedPlace *first = route.places.firstObject;
+    self = [self initWithName:name detail:detail pill:nil pillColor:nil coordinate:CLLocationCoordinate2DMake(first.latitude, first.longitude) radius:0
+                       symbol:@"mappin" tint:LSRouteColor() traits:traits width:width];
+    if (!self) return nil;
+    NSMutableData *path = [NSMutableData data];
+    if (route.pointCount >= 2) {
+        // A few hundred points draw the same line as fifty thousand.
+        NSUInteger count = route.pointCount, stride = MAX((NSUInteger)1, count / 400);
+        const CLLocationCoordinate2D *points = route.coordinates.bytes;
+        for (NSUInteger index = 0; index < count; index += stride) [path appendBytes:&points[index] length:sizeof(CLLocationCoordinate2D)];
+        if ((count - 1) % stride) [path appendBytes:&points[count - 1] length:sizeof(CLLocationCoordinate2D)];
+    } else {
+        // Only its places: straight lines from one to the next.
+        for (LSArchivedPlace *place in route.places) {
+            CLLocationCoordinate2D point = CLLocationCoordinate2DMake(place.latitude, place.longitude);
+            [path appendBytes:&point length:sizeof point];
+        }
+    }
+    _routePath = path;
+    _routeKey = [NSString stringWithFormat:@"%@|%lu", route.identifier, (unsigned long)route.pointCount];
     return self;
 }
 - (void)dealloc { [_snapshotter cancel]; }
@@ -316,7 +355,79 @@ static UIImage *LSSavedRenderPin(UIImage *glyph, UIColor *color, UIGraphicsImage
     [_snapshotter cancel];
     _snapshotter = nil;
 }
+- (void)loadRouteSnapshot {
+    CGSize size = self.preferredContentSize;
+    CGFloat scale = _traits.displayScale > 0 ? _traits.displayScale : 2;
+    BOOL dark = _traits.userInterfaceStyle == UIUserInterfaceStyleDark;
+    NSString *key = [NSString stringWithFormat:@"route|%@|%d|%.0fx%.0f@%.0f", _routeKey, dark, size.width, size.height, scale];
+    NSCache<NSString *, LSSavedPreviewImages *> *cache = LSSavedSnapshotCache();
+    LSSavedPreviewImages *cached = [cache objectForKey:key];
+    if (cached) { [self showImages:cached animated:NO]; return; }
+    NSData *path = _routePath;
+    NSUInteger count = path.length / sizeof(CLLocationCoordinate2D);
+    if (count < 2) { [self showFallback]; return; }
+    const CLLocationCoordinate2D *coordinates = path.bytes;
+    MKMapRect bounds = [MKPolyline polylineWithCoordinates:coordinates count:count].boundingMapRect;
+    CGFloat margin = 28;
+    CGFloat width = MAX(size.width - 2 * margin, 40), height = MAX(size.height - _captionHeight - 2 * margin, 40);
+    double minimum = 400 * MKMapPointsPerMeterAtLatitude(coordinates[0].latitude);
+    double perPoint = MAX(MAX(bounds.size.width / width, bounds.size.height / height), minimum / width);
+    MKMapPoint center = MKMapPointMake(MKMapRectGetMidX(bounds), MKMapRectGetMidY(bounds));
+    MKMapSnapshotOptions *options = [[MKMapSnapshotOptions alloc] init];
+    options.mapRect = MKMapRectMake(center.x - size.width / 2 * perPoint, center.y - (margin + height / 2) * perPoint, size.width * perPoint, size.height * perPoint);
+    options.size = size;
+    UITraitCollection *traits = [UITraitCollection traitCollectionWithTraitsFromCollections:@[_traits, [UITraitCollection traitCollectionWithDisplayScale:scale]]];
+    options.traitCollection = traits;
+    UIColor *line = [LSRouteColor() resolvedColorWithTraitCollection:traits];
+    UIColor *from = [LSFillColor(LSSuccessColor()) resolvedColorWithTraitCollection:traits];
+    UIColor *to = [LSFillColor(LSErrorColor()) resolvedColorWithTraitCollection:traits];
+    UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat preferredFormat];
+    format.scale = scale;
+    _snapshotter = [[MKMapSnapshotter alloc] initWithOptions:options];
+    __weak typeof(self) weakSelf = self;
+    [_snapshotter startWithCompletionHandler:^(MKMapSnapshot *snapshot, NSError *error) {
+        LSSavedPreviewController *strongSelf = weakSelf;
+        if (!strongSelf) return;
+        strongSelf->_snapshotter = nil;
+        if (!snapshot || error) { [strongSelf showFallback]; return; }
+        UIImage *map = snapshot.image;
+        UIBezierPath *trace = [UIBezierPath bezierPath];
+        for (NSUInteger index = 0; index < count; index++) {
+            CGPoint point = [snapshot pointForCoordinate:coordinates[index]];
+            if (index == 0) [trace moveToPoint:point]; else [trace addLineToPoint:point];
+        }
+        CGPoint start = [snapshot pointForCoordinate:coordinates[0]], end = [snapshot pointForCoordinate:coordinates[count - 1]];
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:map.size format:format];
+            UIImage *drawn = [renderer imageWithActions:^(__unused UIGraphicsImageRendererContext *context) {
+                [map drawAtPoint:CGPointZero];
+                trace.lineCapStyle = kCGLineCapRound;
+                trace.lineJoinStyle = kCGLineJoinRound;
+                trace.lineWidth = 7;
+                [[UIColor colorWithWhite:1 alpha:0.85] setStroke];
+                [trace stroke];
+                trace.lineWidth = 4.5;
+                [line setStroke];
+                [trace stroke];
+                for (NSUInteger end_ = 0; end_ < 2; end_++) {
+                    CGPoint point = end_ ? end : start;
+                    [UIColor.whiteColor setFill];
+                    [[UIBezierPath bezierPathWithArcCenter:point radius:8 startAngle:0 endAngle:2 * M_PI clockwise:YES] fill];
+                    [end_ ? to : from setFill];
+                    [[UIBezierPath bezierPathWithArcCenter:point radius:5.5 startAngle:0 endAngle:2 * M_PI clockwise:YES] fill];
+                }
+            }];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                LSSavedPreviewImages *images = [[LSSavedPreviewImages alloc] init];
+                images.map = drawn;
+                [cache setObject:images forKey:key cost:LSSavedImageCost(drawn)];
+                [weakSelf showImages:images animated:YES];
+            });
+        });
+    }];
+}
 - (void)loadSnapshot {
+    if (_routePath) { [self loadRouteSnapshot]; return; }
     CGSize size = self.preferredContentSize;
     CGFloat scale = _traits.displayScale > 0 ? _traits.displayScale : 2;
     BOOL dark = _traits.userInterfaceStyle == UIUserInterfaceStyleDark;
@@ -666,7 +777,11 @@ static UIImage *LSSavedRenderPin(UIImage *glyph, UIColor *color, UIGraphicsImage
     self.savedClearButton.accessibilityLabel = @"Clear recent locations";
     self.savedClearButton.accessibilityUserInputLabels = @[@"Clear recents", @"Clear"];
     [self.savedClearButton addTarget:self action:@selector(clearRecents) forControlEvents:UIControlEventTouchUpInside];
+    // Saved routes have no header button; a hidden one keeps the header the same height.
+    UIButton *noButton = LSTextButton(@"", nil);
+    noButton.hidden = YES;
     self.savedSectionHeaders = @[[[LSSavedSectionHeader alloc] initWithTitle:@"Saved places" button:self.editSavedButton],
+                                 [[LSSavedSectionHeader alloc] initWithTitle:@"Saved routes" button:noButton],
                                  [[LSSavedSectionHeader alloc] initWithTitle:@"Recently applied" button:self.savedClearButton]];
 
     self.savedEmptyHolder = [[UIView alloc] init];
@@ -747,12 +862,17 @@ static UIImage *LSSavedRenderPin(UIImage *glyph, UIColor *color, UIGraphicsImage
 - (void)reloadSavedPlaces { [self reloadSavedPlacesAnimated:NO]; }
 - (void)reloadSavedPlacesAnimated:(BOOL)animated {
     NSArray<LSBookmark *> *all = BookmarksManager.shared.allBookmarks;
+    NSArray<LSRouteArchive *> *allRoutes = LSRouteStore.shared.allRoutes;
     NSArray<NSDictionary *> *allRecents = PersistenceManager.shared.recentLocations;
     NSString *filter = [self savedFilterText];
     BOOL filtering = filter.length > 0;
     NSArray<LSBookmark *> *places = all;
+    NSArray<LSRouteArchive *> *routes = allRoutes;
     NSArray<NSDictionary *> *recents = allRecents;
     if (filtering) {
+        routes = [allRoutes filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(LSRouteArchive *route, __unused NSDictionary *bindings) {
+            return LSSavedRouteMatches(route, filter);
+        }]];
         places = [all filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(LSBookmark *place, __unused NSDictionary *bindings) {
             return LSSavedMatches(place.name, place.coordinate, filter);
         }]];
@@ -761,29 +881,35 @@ static UIImage *LSSavedRenderPin(UIImage *glyph, UIColor *color, UIGraphicsImage
         }]];
     }
     // With nothing at all, the empty state above the sections does the teaching.
-    BOOL nothing = !all.count && !allRecents.count;
-    NSMutableArray<NSString *> *savedKeys = [NSMutableArray array], *recentKeys = [NSMutableArray array];
+    BOOL nothing = !all.count && !allRecents.count && !allRoutes.count;
+    NSMutableArray<NSString *> *savedKeys = [NSMutableArray array], *routeKeys = [NSMutableArray array], *recentKeys = [NSMutableArray array];
     if (!nothing) {
         for (LSBookmark *place in places) [savedKeys addObject:[@"s|" stringByAppendingString:place.identifier]];
+        // No placeholder: the section only shows once a route is saved.
+        for (LSRouteArchive *route in routes) [routeKeys addObject:[@"t|" stringByAppendingString:route.identifier]];
         for (NSDictionary *entry in recents) [recentKeys addObject:LSRecentKey(entry)];
-        if (filtering) { if (!savedKeys.count && !recentKeys.count) [savedKeys addObject:LSSavedNoMatchKey]; }
+        if (filtering) { if (!savedKeys.count && !routeKeys.count && !recentKeys.count) [savedKeys addObject:LSSavedNoMatchKey]; }
         else {
             if (!savedKeys.count) [savedKeys addObject:LSSavedEmptyKey];
             if (!recentKeys.count) [recentKeys addObject:LSRecentsEmptyKey];
         }
     }
-    NSArray<NSArray<NSString *> *> *keys = @[[savedKeys copy], [recentKeys copy]];
+    NSArray<NSArray<NSString *> *> *keys = @[[savedKeys copy], [routeKeys copy], [recentKeys copy]];
     NSArray<NSArray<NSString *> *> *old = self.savedRowKeys;
     // Reordering only makes sense on the whole list.
     if (self.savedTable.editing && (places.count < 2 || filtering)) [self.savedTable setEditing:NO animated:NO];
     // Make the table read its counts while the model is unchanged, so a batch update is
     // compared with what is on screen rather than with a reload still pending.
-    BOOL synced = animated && old.count == 2 && self.savedTable.window && !self.savedTable.hidden &&
-        LSSavedKeysUnique(old) && LSSavedKeysUnique(keys) && [self.savedTable numberOfSections] == 2 &&
-        [self.savedTable numberOfRowsInSection:0] == (NSInteger)old[0].count && [self.savedTable numberOfRowsInSection:1] == (NSInteger)old[1].count;
+    BOOL synced = animated && old.count == LSSavedSectionCount && self.savedTable.window && !self.savedTable.hidden &&
+        LSSavedKeysUnique(old) && LSSavedKeysUnique(keys) && [self.savedTable numberOfSections] == LSSavedSectionCount;
+    for (NSInteger section = 0; synced && section < LSSavedSectionCount; section++) {
+        synced = [self.savedTable numberOfRowsInSection:section] == (NSInteger)old[section].count;
+    }
     self.allSavedPlaces = all;
     self.allRecentCount = allRecents.count;
+    self.allSavedRouteCount = allRoutes.count;
     self.savedPlaces = places;
+    self.savedRoutes = routes;
     self.recents = recents;
     self.savedRowKeys = keys;
     [self updateSavedSessionState];
@@ -799,7 +925,7 @@ static UIImage *LSSavedRenderPin(UIImage *glyph, UIColor *color, UIGraphicsImage
     UITableViewRowAnimation animation = LSMapAnimationsEnabled() ? UITableViewRowAnimationAutomatic : UITableViewRowAnimationFade;
     __weak typeof(self) weakSelf = self;
     [table performBatchUpdates:^{
-        for (NSInteger section = 0; section < 2; section++) {
+        for (NSInteger section = 0; section < LSSavedSectionCount; section++) {
             NSArray<NSString *> *from = old[section], *to = keys[section];
             NSMutableArray<NSIndexPath *> *deleted = [NSMutableArray array], *inserted = [NSMutableArray array];
             [from enumerateObjectsUsingBlock:^(NSString *key, NSUInteger index, __unused BOOL *stop) {
@@ -900,7 +1026,13 @@ static UIImage *LSSavedRenderPin(UIImage *glyph, UIColor *color, UIGraphicsImage
 
 - (void)updateSavedChromeFiltering:(BOOL)filtering nothing:(BOOL)nothing {
     LSSavedSectionHeader *savedHeader = (LSSavedSectionHeader *)self.savedSectionHeaders.firstObject;
+    LSSavedSectionHeader *routeHeader = (LSSavedSectionHeader *)self.savedSectionHeaders[LSSavedRoutesSection];
     LSSavedSectionHeader *recentHeader = (LSSavedSectionHeader *)self.savedSectionHeaders.lastObject;
+    unsigned long routes = self.allSavedRouteCount, routeCapacity = LSRouteStore.capacity;
+    NSString *routeCount = filtering ? [NSString stringWithFormat:@"%lu of %lu", (unsigned long)self.savedRoutes.count, routes]
+        : (routes >= routeCapacity * 4 / 5 ? [NSString stringWithFormat:@"%lu of %lu", routes, routeCapacity] : [NSString stringWithFormat:@"%lu", routes]);
+    [routeHeader setCountText:routes ? routeCount : @""];
+    routeHeader.heading.accessibilityLabel = routes ? [NSString stringWithFormat:@"Saved routes, %@%@", routeCount, filtering ? @" match" : @""] : @"Saved routes";
     unsigned long total = self.allSavedPlaces.count, visible = self.savedPlaces.count, capacity = BookmarksManager.capacity;
     // The limit only matters once it is near.
     BOOL nearLimit = total >= capacity * 4 / 5;
@@ -920,7 +1052,8 @@ static UIImage *LSSavedRenderPin(UIImage *glyph, UIColor *color, UIGraphicsImage
     // Nothing to clear means no Clear button, rather than one that explains itself after a tap.
     self.savedClearButton.hidden = self.allRecentCount == 0 || filtering;
     [self updateEditButton];
-    BOOL showFilter = total >= LSSavedFilterThreshold || filtering;
+    BOOL showFilter = total + routes >= LSSavedFilterThreshold || filtering;
+    self.savedFilterField.placeholder = routes ? @"Filter places and routes" : @"Filter places";
     if (!showFilter && self.savedFilterField.isFirstResponder) [self.savedFilterField resignFirstResponder];
     self.savedFilterField.hidden = !showFilter;
     self.savedTip.hidden = nothing || ls_savedTipDone;
@@ -939,7 +1072,7 @@ static UIImage *LSSavedRenderPin(UIImage *glyph, UIColor *color, UIGraphicsImage
     action.accessibilityHint = save ? @"Names the spot selected on the Location tab and saves it." : @"Opens the Location tab, where you can drop a pin.";
     [action addTarget:self action:save ? @selector(saveSelectedPlace) : @selector(showLocationTabFromSaved) forControlEvents:UIControlEventTouchUpInside];
     UIView *empty = LSEmptyState(@"bookmark", @"No saved places yet",
-                                 @"Save spots you use often and apply them in one tap. Drop a pin and tap Save, or touch and hold anywhere on the map.", action);
+                                 @"Save spots you use often and apply them in one tap. Drop a pin and tap Save, or touch and hold anywhere on the map. Routes you save on the Route tab show up here too.", action);
     empty.translatesAutoresizingMaskIntoConstraints = NO;
     [self.savedEmptyHolder addSubview:empty];
     NSLayoutConstraint *bottom = [empty.bottomAnchor constraintEqualToAnchor:self.savedEmptyHolder.bottomAnchor];
@@ -980,11 +1113,11 @@ static UIImage *LSSavedRenderPin(UIImage *glyph, UIColor *color, UIGraphicsImage
         if (!strongSelf || revision != strongSelf.savedFilterRevision || strongSelf.closed || strongSelf.tab != LSPickerTabSaved) return;
         if (![strongSelf savedFilterText].length) {
             // Cleared: everything is back.
-            unsigned long all = strongSelf.allSavedPlaces.count + strongSelf.allRecentCount;
+            unsigned long all = strongSelf.allSavedPlaces.count + strongSelf.allSavedRouteCount + strongSelf.allRecentCount;
             if (all) LSAnnounce(all == 1 ? @"Showing 1 place." : [NSString stringWithFormat:@"Showing all %lu places.", all]);
             return;
         }
-        unsigned long count = strongSelf.savedPlaces.count + strongSelf.recents.count;
+        unsigned long count = strongSelf.savedPlaces.count + strongSelf.savedRoutes.count + strongSelf.recents.count;
         LSAnnounce(count == 0 ? @"No matches." : (count == 1 ? @"1 place matches." : [NSString stringWithFormat:@"%lu places match.", count]));
     });
 }
@@ -1042,6 +1175,8 @@ static UIImage *LSSavedRenderPin(UIImage *glyph, UIColor *color, UIGraphicsImage
     NSString *key = [self savedKeyAtPath:path] ?: LSSavedEmptyKey;
     BOOL large = [self savedUsesLargeText];
     [cell applyLarge:large traits:self.savedTable.traitCollection];
+    LSRouteArchive *route = [self savedRouteAtPath:path];
+    if (route) { [self configureSavedRouteCell:cell route:route key:key]; return; }
     NSString *name = nil;
     CLLocationCoordinate2D coordinate = kCLLocationCoordinate2DInvalid;
     NSDate *date = nil;
@@ -1205,6 +1340,8 @@ static UIImage *LSSavedRenderPin(UIImage *glyph, UIColor *color, UIGraphicsImage
 }
 - (void)previewSavedPlace:(NSIndexPath *)path {
     if ([[self savedKeyAtPath:path] isEqualToString:LSSavedNoMatchKey]) { [self searchPlacesForSavedFilter]; return; }
+    LSRouteArchive *route = [self savedRouteAtPath:path];
+    if (route) { [self openSavedRoute:route start:NO]; return; }
     NSString *name = nil;
     CLLocationCoordinate2D coordinate;
     NSDate *date = nil;
@@ -1359,6 +1496,8 @@ static UIImage *LSSavedRenderPin(UIImage *glyph, UIColor *color, UIGraphicsImage
 - (UIMenu *)menuForPath:(NSIndexPath *)path {
     __weak typeof(self) weakSelf = self;
     NSString *key = [self savedKeyAtPath:path];
+    LSRouteArchive *route = [self savedRouteAtPath:path];
+    if (route) return [self menuForSavedRoute:route];
     NSString *name = nil;
     CLLocationCoordinate2D coordinate = kCLLocationCoordinate2DInvalid;
     NSDate *date = nil;
@@ -1416,6 +1555,17 @@ static UIImage *LSSavedRenderPin(UIImage *glyph, UIColor *color, UIGraphicsImage
 }
 - (UIContextMenuConfiguration *)savedMenu:(NSIndexPath *)path {
     NSString *key = [self savedKeyAtPath:path];
+    LSRouteArchive *route = [self savedRouteAtPath:path];
+    if (route) {
+        if (self.savedTable.editing) return nil;
+        UIMenu *menu = [self menuForSavedRoute:route];
+        UITraitCollection *traits = self.savedTable.traitCollection;
+        CGFloat width = MIN(MAX(self.savedTable.bounds.size.width - 40, 260), 420);
+        NSString *detail = [self savedRouteSummary:route spoken:NO];
+        return [UIContextMenuConfiguration configurationWithIdentifier:key previewProvider:^UIViewController *{
+            return [[LSSavedPreviewController alloc] initWithName:route.name detail:detail route:route traits:traits width:width];
+        } actionProvider:^UIMenu *(__unused NSArray<UIMenuElement *> *suggested) { return menu; }];
+    }
     NSString *name = nil;
     CLLocationCoordinate2D coordinate = kCLLocationCoordinate2DInvalid;
     NSDate *date = nil;
@@ -1442,6 +1592,8 @@ static UIImage *LSSavedRenderPin(UIImage *glyph, UIColor *color, UIGraphicsImage
 }
 - (UISwipeActionsConfiguration *)savedSwipeActions:(NSIndexPath *)path leading:(BOOL)leading {
     NSString *key = [self savedKeyAtPath:path];
+    LSRouteArchive *route = [self savedRouteAtPath:path];
+    if (route) return self.savedTable.editing ? nil : [self savedRouteSwipeActions:route leading:leading];
     NSString *name = nil;
     CLLocationCoordinate2D coordinate;
     NSDate *date = nil;
@@ -1519,7 +1671,7 @@ static UIImage *LSSavedRenderPin(UIImage *glyph, UIColor *color, UIGraphicsImage
 - (void)moveSavedPlace:(NSIndexPath *)source to:(NSIndexPath *)destination {
     __weak typeof(self) weakSelf = self;
     NSArray<NSArray<NSString *> *> *keys = self.savedRowKeys;
-    BOOL valid = source.section == 0 && destination.section == 0 && keys.count == 2 &&
+    BOOL valid = source.section == 0 && destination.section == 0 && keys.count == LSSavedSectionCount &&
         source.row < (NSInteger)self.savedPlaces.count && destination.row < (NSInteger)self.savedPlaces.count &&
         (NSInteger)keys[0].count == (NSInteger)self.savedPlaces.count;
     if (!valid) {
@@ -1541,7 +1693,9 @@ static UIImage *LSSavedRenderPin(UIImage *glyph, UIColor *color, UIGraphicsImage
     [rowKeys removeObjectAtIndex:source.row];
     [rowKeys insertObject:movedKey atIndex:destination.row];
     self.savedPlaces = places;
-    self.savedRowKeys = @[rowKeys, keys[1]];
+    NSMutableArray<NSArray<NSString *> *> *allKeys = [keys mutableCopy];
+    allKeys[0] = rowKeys;
+    self.savedRowKeys = allKeys;
     if (targetIndex != NSNotFound) [BookmarksManager.shared moveBookmarkWithID:sourceID toIndex:targetIndex];
     LSHapticImpact(UIImpactFeedbackStyleLight);
     // Next turn: picks up the stored order (normally identical) and refreshes Move menus.
@@ -1698,5 +1852,230 @@ static UIImage *LSSavedRenderPin(UIImage *glyph, UIColor *color, UIGraphicsImage
     [alert addAction:save];
     alert.preferredAction = save;
     [self presentViewController:alert animated:LSMapAnimationsEnabled() completion:nil];
+}
+
+#pragma mark - Saved routes (#20)
+
+- (nullable LSRouteArchive *)savedRouteAtPath:(NSIndexPath *)path {
+    if (path.section != LSSavedRoutesSection || ![[self savedKeyAtPath:path] hasPrefix:@"t|"]) return nil;
+    return path.row >= 0 && path.row < (NSInteger)self.savedRoutes.count ? self.savedRoutes[path.row] : nil;
+}
+- (NSString *)savedRouteKey:(LSRouteArchive *)route { return [@"t|" stringByAppendingString:route.identifier]; }
+- (NSUInteger)savedRouteIndexOfID:(NSString *)identifier {
+    NSArray<LSRouteArchive *> *routes = LSRouteStore.shared.allRoutes;
+    return [routes indexOfObjectPassingTest:^BOOL(LSRouteArchive *route, __unused NSUInteger i, __unused BOOL *stop) { return [route.identifier isEqualToString:identifier]; }];
+}
+// "8.5 km · 2 stops · saved 3 days ago"
+- (NSString *)savedRouteSummary:(LSRouteArchive *)route spoken:(BOOL)spoken {
+    NSMutableArray<NSString *> *parts = [NSMutableArray array];
+    if (route.distance > 0) [parts addObject:LSSavedDistance(route.distance, spoken)];
+    NSUInteger stops = route.plannedStopCount;
+    if (stops) [parts addObject:stops == 1 ? @"1 stop" : [NSString stringWithFormat:@"%lu stops", (unsigned long)stops]];
+    if (route.fromTrack) {
+        [parts addObject:spoken ? @"recorded track" : @"track"];
+    } else {
+        // Legs can each have their own path (#28): "driving and walking paths".
+        NSMutableOrderedSet<NSString *> *paths = [NSMutableOrderedSet orderedSetWithObject:route.path];
+        for (LSArchivedLeg *leg in route.legs) [paths addObject:leg.path];
+        NSString *names = [NSListFormatter localizedStringByJoiningStrings:paths.array];
+        [parts addObject:[NSString stringWithFormat:paths.count > 1 ? @"%@ paths" : @"%@ path", names]];
+    }
+    NSString *ago = LSSavedAgo(route.createdAt);
+    [parts addObject:spoken ? [NSString stringWithFormat:@"saved %@", ago] : ago];
+    NSString *text = [parts componentsJoinedByString:spoken ? @", " : @" · "];
+    return LSSavedCapitalized(text);
+}
+- (NSString *)savedRouteEnds:(LSRouteArchive *)route rtl:(BOOL)rtl {
+    return [NSString stringWithFormat:@"%@ %@ %@", route.places.firstObject.name, rtl ? @"←" : @"→", route.places.lastObject.name];
+}
+- (void)configureSavedRouteCell:(LSSavedRowCell *)cell route:(LSRouteArchive *)route key:(NSString *)key {
+    NSString *symbol = route.fromTrack ? @"point.topleft.down.to.point.bottomright.curvepath" : ([route.path isEqualToString:@"driving"] ? @"car.fill" : @"figure.walk");
+    [cell setBadgeSymbol:symbol color:LSRouteColor() muted:NO];
+    NSString *filter = [self savedFilterText];
+    [cell setTitle:route.name color:UIColor.labelColor match:LSSavedMatchRange(route.name, filter, YES)];
+    cell.detailLabel.text = [self savedRouteSummary:route spoken:NO];
+    cell.detailLabel.textColor = UIColor.secondaryLabelColor;
+    cell.detailLabel.hidden = NO;
+    // Where it runs, in place of a place's coordinates.
+    BOOL rtl = cell.effectiveUserInterfaceLayoutDirection == UIUserInterfaceLayoutDirectionRightToLeft;
+    NSString *ends = [self savedRouteEnds:route rtl:rtl];
+    UIFont *font = LSFont(UIFontTextStyleCaption1, UIFontWeightRegular, 24);
+    NSRange match = LSSavedMatchRange(ends, filter, YES);
+    if (match.location == NSNotFound) {
+        cell.coordinateLabel.font = font;
+        cell.coordinateLabel.textColor = UIColor.secondaryLabelColor;
+        cell.coordinateLabel.text = ends;
+    } else {
+        cell.coordinateLabel.attributedText = LSSavedHighlighted(ends, match, font, LSFont(UIFontTextStyleCaption1, UIFontWeightSemibold, 24));
+    }
+    cell.coordinateLabel.hidden = NO;
+    cell.appliedPill.hidden = YES;
+    cell.savedPill.hidden = YES;
+    cell.moreButton.menu = [self menuForSavedRoute:route];
+    cell.moreButton.accessibilityLabel = [NSString stringWithFormat:@"Actions for %@", route.name];
+    cell.accessoryView = cell.moreButton;
+    cell.accessoryType = UITableViewCellAccessoryNone;
+    cell.showsReorderControl = NO;
+    cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+    cell.accessibilityLabel = route.name;
+    cell.accessibilityValue = [NSString stringWithFormat:@"Route from %@ to %@. %@", route.places.firstObject.name, route.places.lastObject.name,
+                               [self savedRouteSummary:route spoken:YES]];
+    cell.accessibilityHint = @"Opens it in the Route planner.";
+    cell.accessibilityTraits = UIAccessibilityTraitButton;
+    __weak typeof(self) weakSelf = self;
+    UIAccessibilityCustomAction *(^make)(NSString *, dispatch_block_t) = ^UIAccessibilityCustomAction *(NSString *title, dispatch_block_t block) {
+        return [[UIAccessibilityCustomAction alloc] initWithName:title actionHandler:^BOOL(__unused UIAccessibilityCustomAction *action) { block(); return YES; }];
+    };
+    cell.accessibilityCustomActions = @[
+        make(@"Start route", ^{ [weakSelf openSavedRoute:route start:YES]; }),
+        make(@"Rename", ^{ [weakSelf renameSavedRoute:route]; }),
+        make(@"Share", ^{ [weakSelf shareSavedRoute:route]; }),
+        make(@"Delete", ^{ [weakSelf deleteSavedRoute:route]; })
+    ];
+    (void)key;
+}
+- (UIMenu *)menuForSavedRoute:(LSRouteArchive *)route {
+    __weak typeof(self) weakSelf = self;
+    UIAction *start = [UIAction actionWithTitle:@"Start route" image:[UIImage systemImageNamed:@"play.fill"] identifier:nil handler:^(__unused UIAction *action) {
+        [weakSelf openSavedRoute:route start:YES];
+    }];
+    UIAction *open = [UIAction actionWithTitle:@"Open in Route planner" image:[UIImage systemImageNamed:@"map"] identifier:nil handler:^(__unused UIAction *action) {
+        [weakSelf openSavedRoute:route start:NO];
+    }];
+    open.subtitle = @"As a draft, without starting it";
+    UIAction *rename = [UIAction actionWithTitle:@"Rename" image:[UIImage systemImageNamed:@"pencil"] identifier:nil handler:^(__unused UIAction *action) {
+        [weakSelf renameSavedRoute:route];
+    }];
+    UIAction *share = [UIAction actionWithTitle:@"Share…" image:[UIImage systemImageNamed:@"square.and.arrow.up"] identifier:nil handler:^(__unused UIAction *action) {
+        [weakSelf shareSavedRoute:route];
+    }];
+    share.subtitle = route.fromTrack ? @"As a GPX file" : @"As an Apple Maps link";
+    UIAction *remove = [UIAction actionWithTitle:@"Delete" image:[UIImage systemImageNamed:@"trash"] identifier:nil handler:^(__unused UIAction *action) {
+        [weakSelf deleteSavedRoute:route];
+    }];
+    remove.attributes = UIMenuElementAttributesDestructive;
+    UIMenu *primary = [UIMenu menuWithTitle:@"" image:nil identifier:nil options:UIMenuOptionsDisplayInline children:@[start, open]];
+    UIMenu *edit = [UIMenu menuWithTitle:@"" image:nil identifier:nil options:UIMenuOptionsDisplayInline children:@[rename, share]];
+    UIMenu *danger = [UIMenu menuWithTitle:@"" image:nil identifier:nil options:UIMenuOptionsDisplayInline children:@[remove]];
+    return [UIMenu menuWithTitle:route.name children:@[primary, edit, danger]];
+}
+- (UISwipeActionsConfiguration *)savedRouteSwipeActions:(LSRouteArchive *)route leading:(BOOL)leading {
+    __weak typeof(self) weakSelf = self;
+    if (leading) {
+        UIContextualAction *start = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleNormal title:@"Start" handler:^(__unused UIContextualAction *action, __unused UIView *view, void (^done)(BOOL)) {
+            done(YES);
+            dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf openSavedRoute:route start:YES]; });
+        }];
+        start.image = [UIImage systemImageNamed:@"play.fill"];
+        // Green, like Apply now on a place.
+        start.backgroundColor = LSFillColor(LSSuccessColor());
+        UISwipeActionsConfiguration *configuration = [UISwipeActionsConfiguration configurationWithActions:@[start]];
+        configuration.performsFirstActionWithFullSwipe = YES;
+        return configuration;
+    }
+    UIContextualAction *remove = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleDestructive title:@"Delete" handler:^(__unused UIContextualAction *action, __unused UIView *view, void (^done)(BOOL)) {
+        [weakSelf deleteSavedRoute:route];
+        done(YES);
+    }];
+    remove.image = [UIImage systemImageNamed:@"trash.fill"];
+    remove.backgroundColor = LSFillColor(LSErrorColor());
+    UIContextualAction *rename = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleNormal title:@"Rename" handler:^(__unused UIContextualAction *action, __unused UIView *view, void (^done)(BOOL)) {
+        done(YES);
+        dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf renameSavedRoute:route]; });
+    }];
+    rename.image = [UIImage systemImageNamed:@"pencil"];
+    rename.backgroundColor = LSFillColor(UIColor.systemGrayColor);
+    // Full swipe deletes: Undo makes that safe.
+    UISwipeActionsConfiguration *configuration = [UISwipeActionsConfiguration configurationWithActions:@[remove, rename]];
+    configuration.performsFirstActionWithFullSwipe = YES;
+    return configuration;
+}
+// The stored copy, which a rename may have changed since the row was built.
+- (void)openSavedRoute:(LSRouteArchive *)route start:(BOOL)start {
+    LSRouteArchive *current = [LSRouteStore.shared routeWithID:route.identifier] ?: route;
+    [self.savedFilterField resignFirstResponder];
+    if (!ls_savedTipDone) ls_savedTipDone = YES;
+    LSHapticSelection();
+    [self loadSavedRoute:current start:start];
+}
+- (void)renameSavedRoute:(LSRouteArchive *)route {
+    LSRouteArchive *current = [LSRouteStore.shared routeWithID:route.identifier];
+    if (!current) { [self reloadSavedPlacesAnimated:YES]; return; }
+    __weak typeof(self) weakSelf = self;
+    [self promptRouteName:current.name title:@"Rename route" button:@"Save" save:^BOOL(NSString *name) {
+        typeof(self) self = weakSelf;
+        BOOL renamed = [LSRouteStore.shared renameRouteWithID:current.identifier name:name];
+        if (renamed) LSHapticSuccess(); else LSHapticWarning();
+        [self showMessage:renamed ? @"Route renamed." : @"The route could not be renamed." symbol:renamed ? @"bookmark.fill" : @"exclamationmark.triangle.fill"];
+        if (renamed) self.savedPulseKey = [self savedRouteKey:current];
+        [self reloadSavedPlacesAnimated:YES];
+        return renamed;
+    }];
+}
+- (void)deleteSavedRoute:(LSRouteArchive *)route {
+    NSUInteger index = [self savedRouteIndexOfID:route.identifier];
+    LSRouteArchive *stored = [LSRouteStore.shared routeWithID:route.identifier];
+    if (index == NSNotFound || !stored || ![LSRouteStore.shared removeRouteWithID:route.identifier]) { [self reloadSavedPlacesAnimated:YES]; return; }
+    // Immediate, with Undo, as for places.
+    LSHapticImpact(UIImpactFeedbackStyleMedium);
+    [self reloadSavedPlacesAnimated:YES];
+    __weak typeof(self) weakSelf = self;
+    LSShowActionToast(self.view, [self savedToastAnchorView], [NSString stringWithFormat:@"Deleted “%@”", stored.name], @"trash.fill", @"Undo", ^{
+        typeof(self) self = weakSelf;
+        if (![LSRouteStore.shared insertRoute:stored atIndex:index]) {
+            LSHapticWarning();
+            [self showMessage:@"The route could not be restored." symbol:@"exclamationmark.triangle.fill"];
+            return;
+        }
+        LSHapticSuccess();
+        self.savedPulseKey = [self savedRouteKey:stored];
+        [self reloadSavedPlacesAnimated:YES];
+        if (self.tab == LSPickerTabRoute) [self updateRouteUI];
+        LSAnnounce([NSString stringWithFormat:@"Restored %@.", stored.name]);
+    });
+    if (self.tab == LSPickerTabRoute) [self updateRouteUI];
+}
+// A planned route shares as an Apple Maps link through its places; a recorded track as GPX.
+- (void)shareSavedRoute:(LSRouteArchive *)route {
+    NSIndexPath *path = [self savedPathForKey:[self savedRouteKey:route]];
+    UIView *source = (path ? [self.savedTable cellForRowAtIndexPath:path] : nil) ?: self.savedTable;
+    if (!route.fromTrack) {
+        NSMutableArray<LSMapLinkPlace *> *places = [NSMutableArray array];
+        for (LSArchivedPlace *place in route.places) [places addObject:[LSMapLinkPlace placeWithLatitude:place.latitude longitude:place.longitude name:place.name]];
+        // @available needs a compiler-rt helper the Linux toolchain doesn't ship.
+        BOOL modernApple = [NSProcessInfo.processInfo isOperatingSystemAtLeastVersion:(NSOperatingSystemVersion){18, 4, 0}];
+        NSURL *url = [LSMapLinks URLForApp:LSMapAppApple places:places mode:[route.path isEqualToString:@"driving"] ? @"driving" : @"walking"
+                               legacyApple:!modernApple && places.count <= 2];
+        NSMutableArray<NSString *> *names = [NSMutableArray array];
+        for (LSArchivedPlace *place in route.places) [names addObject:place.name];
+        NSString *text = [NSString stringWithFormat:@"%@: %@", route.name, [names componentsJoinedByString:@" → "]];
+        [self presentShareItems:url ? @[text, url] : @[text] from:source];
+        return;
+    }
+    LSRouteArchive *copy = [route copy];
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSUInteger count = copy.pointCount;
+        const double *values = copy.coordinates.bytes, *times = copy.times.bytes;
+        double start = copy.recordedStartDate ? copy.recordedStartDate.timeIntervalSince1970 : NAN;
+        NSMutableData *points = [NSMutableData dataWithLength:count * sizeof(LSTrackPoint)];
+        LSTrackPoint *point = points.mutableBytes;
+        for (NSUInteger index = 0; index < count; index++) {
+            double time = times && isfinite(start) ? start + times[index] : NAN;
+            point[index] = (LSTrackPoint){ time, values[2 * index], values[2 * index + 1], NAN, NAN, NAN };
+        }
+        NSString *activity = [copy.path isEqualToString:@"driving"] ? @"driving" : nil;
+        NSData *data = count >= 2 ? [LSTrackIO GPXDataForPoints:points.bytes count:count name:copy.name activity:activity] : nil;
+        NSURL *folder = [NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:@"LSpoof Export"] isDirectory:YES];
+        [NSFileManager.defaultManager createDirectoryAtURL:folder withIntermediateDirectories:YES attributes:nil error:NULL];
+        NSURL *file = [folder URLByAppendingPathComponent:[LSTrackIO safeFileName:copy.name extension:@"gpx"]];
+        BOOL written = data && [data writeToURL:file atomically:YES];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            typeof(self) self = weakSelf;
+            if (!self || self.closed) return;
+            if (!written) { LSHapticWarning(); [self showMessage:@"The route could not be exported." symbol:@"exclamationmark.triangle.fill"]; return; }
+            [self presentShareItems:@[file] from:source];
+        });
+    });
 }
 @end
