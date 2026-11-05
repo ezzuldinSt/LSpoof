@@ -922,29 +922,10 @@ static void LSSetChipSubtitle(UIButton *chip, NSString *subtitle) {
     chip.configuration = config;
 }
 
-// What a map tap sets, coloured like the markers it places. Selected chips are filled with the
-// marker colour; the shared chip styling adds the ring and, with Differentiate Without Color,
-// the checkmark.
+// Marker symbols and colours for From, a stop and To.
 static NSString *const kLSTargetSymbols[] = {@"circle.circle.fill", @"plus.circle.fill", @"mappin.circle.fill"};
 static UIColor *LSTargetColor(NSInteger target) {
     return target == LSEndpointFrom ? LSSuccessColor() : (target == LSEndpointStop ? LSWarningColor() : LSErrorColor());
-}
-static UIButton *LSTargetChip(NSString *title, NSInteger target) {
-    UIButton *chip = LSChipButton(title, kLSTargetSymbols[MAX(0, MIN(2, target))]);
-    chip.tag = target;
-    UIButtonConfiguration *config = chip.configuration;
-    config.preferredSymbolConfigurationForImage = [UIImageSymbolConfiguration configurationWithTextStyle:UIFontTextStyleSubheadline scale:UIImageSymbolScaleMedium];
-    chip.configuration = config;
-    // Idle, the symbol keeps its marker colour (through taps too); selected, it turns white.
-    LSSetChipIconColor(chip, LSFillColor(LSTargetColor(target)));
-    return chip;
-}
-static void LSSetTargetChip(UIButton *chip, BOOL selected) {
-    LSSetChipSelected(chip, selected);
-    UIButtonConfiguration *config = chip.configuration;
-    config.baseBackgroundColor = selected ? LSFillColor(LSTargetColor(chip.tag)) : UIColor.tertiarySystemFillColor;
-    chip.configuration = config;
-    [chip setNeedsUpdateConfiguration];
 }
 
 #pragma mark - Map drawing
@@ -1099,23 +1080,15 @@ static LSRoute *LSRouteFromTrackFile(NSURL *url, LSTrack **trackOut, NSString **
     [self.swapButton addTarget:self action:@selector(swapEndpoints) forControlEvents:UIControlEventTouchUpInside];
     UIStackView *endpointRow = LSRow(@[list, self.swapButton], 8);
 
-    // endpointSegment is the shared model for what a map tap sets (the shell moves it to To
-    // after From is tapped); people see and use the marker-coloured chips instead.
+    // What a map tap sets: a plain segmented control (the shell also moves it to To after From
+    // is tapped). The rail beside From, the stops and To highlights the same choice.
     self.endpointSegment = [[UISegmentedControl alloc] initWithItems:@[@"From", @"Stop", @"To"]];
+    self.endpointSegment.translatesAutoresizingMaskIntoConstraints = NO;
     self.endpointSegment.selectedSegmentIndex = LSEndpointFrom;
-    [self.endpointSegment addTarget:self action:@selector(endpointChanged) forControlEvents:UIControlEventValueChanged];
-    NSArray *targetTitles = @[@"From", @"Stop", @"To"];
-    NSArray *targetHints = @[@"Map taps set From.", @"Map taps add a stop.", @"Map taps set To."];
-    NSMutableArray<UIButton *> *targetChips = [NSMutableArray array];
-    for (NSInteger index = 0; index < 3; index++) {
-        UIButton *chip = LSTargetChip(targetTitles[index], index);
-        chip.accessibilityHint = targetHints[index];
-        [chip addTarget:self action:@selector(targetChipTapped:) forControlEvents:UIControlEventTouchUpInside];
-        [targetChips addObject:chip];
-    }
-    self.routeTargetChips = targetChips;
-    LSTraitStack *targets = LSRouteRow(targetChips, 8, UIStackViewAlignmentFill, UIContentSizeCategoryExtraExtraLarge);
-    targets.distribution = UIStackViewDistributionFillEqually;
+    self.endpointSegment.accessibilityLabel = @"Map taps set";
+    [self.endpointSegment.heightAnchor constraintGreaterThanOrEqualToConstant:44].active = YES;
+    [self.endpointSegment addTarget:self action:@selector(endpointSegmentTapped) forControlEvents:UIControlEventValueChanged];
+    UIView *targets = self.endpointSegment;
     UILabel *targetTitle = LSSectionLabel(@"Map taps set");
     self.importButton = LSMenuChip(@"Import", @"square.and.arrow.down");
     self.importButton.accessibilityLabel = @"Import a route";
@@ -1158,9 +1131,8 @@ static LSRoute *LSRouteFromTrackFile(NSURL *url, LSTrack **trackOut, NSString **
     self.routeTripCard.hidden = YES;
     self.routeEndpointsPanel = LSRouteCollapsible(LSStack(@[self.progressPanel, self.routeTripCard, self.routeEndpointsCard], 14));
 
-    // Status card: empty state, progress of the lookup, errors with a way out, and the result.
-    self.routeEmptyState = LSRouteCollapsible(LSEmptyState(@"point.topleft.down.to.point.bottomright.curvepath", @"Plan a route",
-        @"Set From and To above, or tap the map. Add stops on the way, or import a map link or a GPX file.", nil));
+    // Status card: one line of guidance, progress of the lookup, errors with a way out, and the
+    // result. The planner and the map hint already teach, so there is no large empty state.
     self.routeFeedbackIcon = [[UIImageView alloc] init];
     self.routeFeedbackIcon.preferredSymbolConfiguration = [UIImageSymbolConfiguration configurationWithTextStyle:UIFontTextStyleSubheadline scale:UIImageSymbolScaleMedium];
     [self.routeFeedbackIcon setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
@@ -1195,7 +1167,7 @@ static LSRoute *LSRouteFromTrackFile(NSURL *url, LSTrack **trackOut, NSString **
     UIStackView *toolsWrap = LSStack(@[tools], 0);
     toolsWrap.alignment = UIStackViewAlignmentLeading;
     self.routeToolsWrap = LSRouteCollapsible(toolsWrap);
-    UIStackView *status = LSStack(@[self.routeEmptyState, self.routeStatsWrap, self.routeSummary, self.routeFeedbackWrap,
+    UIStackView *status = LSStack(@[self.routeStatsWrap, self.routeSummary, self.routeFeedbackWrap,
                                     self.buildRouteButton, self.routeRecoveryButton, self.routeToolsWrap], 12);
     [status setCustomSpacing:4 afterView:self.routeStatsWrap];
     UIView *statusCard = LSInsetPanel(status);
@@ -1546,10 +1518,8 @@ static LSRoute *LSRouteFromTrackFile(NSURL *url, LSTrack **trackOut, NSString **
     [self endpointChanged];
 }
 
-- (void)targetChipTapped:(UIButton *)chip {
-    if (chip.tag < 0 || chip.tag > LSEndpointTo) return;
+- (void)endpointSegmentTapped {
     LSHapticSelection();
-    self.endpointSegment.selectedSegmentIndex = chip.tag;
     [self endpointChanged];
 }
 
@@ -1573,7 +1543,6 @@ static LSRoute *LSRouteFromTrackFile(NSURL *url, LSTrack **trackOut, NSString **
     self.routeFromRail.active = target == LSEndpointFrom;
     self.routeAddRail.active = target == LSEndpointStop;
     self.routeToRail.active = target == LSEndpointTo;
-    for (UIButton *chip in self.routeTargetChips) LSSetTargetChip(chip, chip.tag == target);
     self.fromButton.accessibilityValue = target == LSEndpointFrom ? @"Map taps set this" : nil;
     self.toButton.accessibilityValue = target == LSEndpointTo ? @"Map taps set this" : nil;
 }
@@ -1698,6 +1667,7 @@ static LSRoute *LSRouteFromTrackFile(NSURL *url, LSTrack **trackOut, NSString **
 - (NSString *)routeHint {
     BOOL applied = LSSessionController.shared.snapshot.mode != LSSessionModeOff;
     NSString *keeps = applied ? @" The applied session continues until you replace it." : @"";
+    if (!self.startPin && !self.endPin && !self.fetchedRoute) return [@"Choose From and To above, or tap the map. Import takes a map link or a GPX file." stringByAppendingString:keeps];
     if (self.startPin && !self.endPin) return [@"Now choose To: search above or tap the map." stringByAppendingString:keeps];
     if (!self.startPin && self.endPin) return [@"Now choose From: search above or tap the map." stringByAppendingString:keeps];
     if (applied) return @"Editing a new route. The applied session continues until you replace it.";
@@ -2769,7 +2739,7 @@ static LSRoute *LSRouteFromTrackFile(NSURL *url, LSTrack **trackOut, NSString **
     for (UIButton *button in @[self.fromButton, self.toButton]) {
         MKPointAnnotation *pin = button == self.fromButton ? self.startPin : self.endPin;
         NSString *name = button == self.fromButton ? @"From" : @"To";
-        NSString *place = pin ? (pin.subtitle.length ? pin.subtitle : LSCoordinateText(pin.coordinate)) : @"Search, pick a saved place, or tap the map";
+        NSString *place = pin ? (pin.subtitle.length ? pin.subtitle : LSCoordinateText(pin.coordinate)) : (button == self.fromButton ? @"Choose a starting point" : @"Choose a destination");
         LSSetEndpointText(button, place, pin == nil);
         button.accessibilityLabel = pin ? [NSString stringWithFormat:@"%@: %@", name, place] : [NSString stringWithFormat:@"%@: not set", name];
         button.accessibilityHint = @"Choose a place or enter coordinates for this endpoint.";
@@ -2824,9 +2794,6 @@ static LSRoute *LSRouteFromTrackFile(NSURL *url, LSTrack **trackOut, NSString **
     BOOL both = self.startPin && self.endPin;
     BOOL error = self.routeFeedbackTone == LSRouteToneError;
     if (self.routeFeedbackIsHint) self.routeFeedback.text = [self routeHint];
-    BOOL empty = !self.startPin && !self.endPin && !route && self.routeFeedbackIsHint && !self.routeSpinner.isAnimating;
-    self.routeEmptyState.hidden = !empty;
-    self.routeFeedbackWrap.hidden = empty;
     [self applyFeedbackTone];
 
     // Build route doubles as the lookup's progress and as the retry after an error.

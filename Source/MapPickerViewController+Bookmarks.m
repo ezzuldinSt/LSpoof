@@ -223,7 +223,7 @@ static UIImage *LSSavedRenderPin(UIImage *glyph, UIColor *color, UIGraphicsImage
     // Same pills as the row: whether the place is the applied one, or already saved.
     if (pill.length) [heading addArrangedSubview:LSPillLabel(pill, pillColor ?: LSAccentTextColor())];
     heading.axis = large ? UILayoutConstraintAxisVertical : UILayoutConstraintAxisHorizontal;
-    heading.alignment = large ? UIStackViewAlignmentLeading : UIStackViewAlignmentFirstBaseline;
+    heading.alignment = large ? UIStackViewAlignmentLeading : UIStackViewAlignmentCenter;
     if (large) [title.widthAnchor constraintEqualToAnchor:heading.widthAnchor].active = YES;
     UILabel *line = LSLabel(detail, UIFontTextStyleCaption1);
     line.font = LSMonospacedFont(UIFontTextStyleCaption1);
@@ -447,7 +447,9 @@ static UIImage *LSSavedRenderPin(UIImage *glyph, UIColor *color, UIGraphicsImage
     }
     _titleRow = [[UIStackView alloc] initWithArrangedSubviews:@[_titleLabel, _appliedPill, _savedPill]];
     _titleRow.spacing = LSSpaceS;
-    _titleRow.alignment = UIStackViewAlignmentFirstBaseline;
+    // Centred, not on the baseline: the pill draws its text inset, so baseline alignment let it
+    // hang below the row into the line under it.
+    _titleRow.alignment = UIStackViewAlignmentCenter;
     // Stacked at accessibility sizes: the name keeps the full width so it wraps instead of clipping.
     _titleFullWidth = [_titleLabel.widthAnchor constraintEqualToAnchor:_titleRow.widthAnchor];
     _detailLabel = LSLabel(@"", UIFontTextStyleSubheadline);
@@ -537,7 +539,7 @@ static UIImage *LSSavedRenderPin(UIImage *glyph, UIColor *color, UIGraphicsImage
     // At accessibility sizes the text gets the full width; the badge is decorative.
     self.badgeHolder.hidden = large;
     self.titleRow.axis = large ? UILayoutConstraintAxisVertical : UILayoutConstraintAxisHorizontal;
-    self.titleRow.alignment = large ? UIStackViewAlignmentLeading : UIStackViewAlignmentFirstBaseline;
+    self.titleRow.alignment = large ? UIStackViewAlignmentLeading : UIStackViewAlignmentCenter;
     self.titleFullWidth.active = large;
     // The badge grows a little with the text, like the icons in Settings.
     CGFloat size = MIN(48, round([[UIFontMetrics metricsForTextStyle:UIFontTextStyleBody] scaledValueForValue:40 compatibleWithTraitCollection:traits]));
@@ -566,63 +568,77 @@ static UIImage *LSSavedRenderPin(UIImage *glyph, UIColor *color, UIGraphicsImage
 
 #pragma mark - Section header
 
-// A changed count cross-dissolves instead of jumping. Appearing or clearing is left to layout.
-static void LSSavedSetCount(UILabel *label, NSString *text) {
-    NSString *old = label.text ?: @"";
-    if ([old isEqualToString:text]) return;
-    if (!label.window || !old.length || !text.length) { label.text = text; return; }
-    [UIView transitionWithView:label duration:0.2 options:UIViewAnimationOptionTransitionCrossDissolve | UIViewAnimationOptionAllowUserInteraction
-                    animations:^{ label.text = text; } completion:nil];
-}
-
+// Section title in the same style as the sections in Settings, an optional count after it in
+// quieter text, and an optional text button (Reorder, Clear) at the trailing edge. One label and
+// one button in a plain row: nothing aligns on the baseline of a label that may be empty.
 @interface LSSavedSectionHeader : UITableViewHeaderFooterView
 @property (nonatomic, strong) UILabel *heading;
-@property (nonatomic, strong) UILabel *countLabel;
-@property (nonatomic, strong) UIStackView *titles;
 @property (nonatomic, strong) UIStackView *row;
-@property (nonatomic, strong) UIView *spacer;
+@property (nonatomic, copy) NSString *lsTitle;
+@property (nonatomic, copy) NSString *lsCount;
 - (instancetype)initWithTitle:(NSString *)title button:(UIButton *)button;
+- (void)setCountText:(NSString *)count;
 - (void)applyLarge:(BOOL)large;
 @end
 @implementation LSSavedSectionHeader
 - (instancetype)initWithTitle:(NSString *)title button:(UIButton *)button {
     self = [super initWithReuseIdentifier:nil];
     if (!self) return nil;
-    _heading = LSLabel(title, UIFontTextStyleTitle3);
-    _heading.font = LSFont(UIFontTextStyleTitle3, UIFontWeightBold, 32);
-    _heading.accessibilityTraits = UIAccessibilityTraitHeader;
-    _countLabel = LSLabel(@"", UIFontTextStyleFootnote);
-    _countLabel.font = LSFont(UIFontTextStyleFootnote, UIFontWeightSemibold, 22);
-    _countLabel.textColor = UIColor.secondaryLabelColor;
-    _countLabel.isAccessibilityElement = NO;
-    [_countLabel setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
-    _titles = LSRow(@[_heading, _countLabel], LSSpaceS);
-    _titles.alignment = UIStackViewAlignmentFirstBaseline;
-    _spacer = [[UIView alloc] init];
-    [_spacer setContentHuggingPriority:1 forAxis:UILayoutConstraintAxisHorizontal];
+    _lsTitle = [title copy];
+    _lsCount = @"";
+    _heading = LSSectionLabel(title);
+    _heading.numberOfLines = 1;
+    [_heading setContentHuggingPriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
+    [_heading setContentCompressionResistancePriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
     [button setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
     [button setContentCompressionResistancePriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
-    _row = LSRow(@[_titles, _spacer, button], LSSpaceS);
+    _row = LSRow(@[_heading, button], LSSpaceS);
     [self.contentView addSubview:_row];
     UILayoutGuide *margins = self.contentView.layoutMarginsGuide;
     NSLayoutConstraint *bottom = [_row.bottomAnchor constraintEqualToAnchor:self.contentView.bottomAnchor constant:-2];
     bottom.priority = 999;
+    // The same height with or without its button, so sections line up.
+    NSLayoutConstraint *height = [_row.heightAnchor constraintGreaterThanOrEqualToConstant:44];
+    height.priority = 999;
     [NSLayoutConstraint activateConstraints:@[
         [_row.topAnchor constraintEqualToAnchor:self.contentView.topAnchor constant:LSSpaceS],
         [_row.leadingAnchor constraintEqualToAnchor:margins.leadingAnchor],
         [_row.trailingAnchor constraintEqualToAnchor:margins.trailingAnchor],
-        bottom
+        bottom, height
     ]];
+    [self renderHeading];
     return self;
 }
+// A changed count cross-dissolves instead of jumping.
+- (void)setCountText:(NSString *)count {
+    NSString *text = count ?: @"";
+    if ([text isEqualToString:_lsCount]) return;
+    BOOL animate = self.heading.window && _lsCount.length && text.length;
+    _lsCount = [text copy];
+    if (!animate) { [self renderHeading]; return; }
+    [UIView transitionWithView:self.heading duration:0.2 options:UIViewAnimationOptionTransitionCrossDissolve | UIViewAnimationOptionAllowUserInteraction
+                    animations:^{ [self renderHeading]; } completion:nil];
+}
+- (void)renderHeading {
+    NSMutableAttributedString *text = [[NSMutableAttributedString alloc] initWithString:self.lsTitle attributes:@{
+        NSFontAttributeName: LSFont(UIFontTextStyleSubheadline, UIFontWeightSemibold, 28), NSForegroundColorAttributeName: UIColor.secondaryLabelColor}];
+    if (self.lsCount.length) {
+        [text appendAttributedString:[[NSAttributedString alloc] initWithString:[@"  " stringByAppendingString:self.lsCount] attributes:@{
+            NSFontAttributeName: LSFont(UIFontTextStyleSubheadline, UIFontWeightRegular, 28), NSForegroundColorAttributeName: UIColor.tertiaryLabelColor}]];
+    }
+    self.heading.attributedText = text;
+}
+- (void)traitCollectionDidChange:(UITraitCollection *)previous {
+    [super traitCollectionDidChange:previous];
+    // Attributed text keeps the fonts it was built with; rebuild it at the new text size.
+    if (![previous.preferredContentSizeCategory isEqualToString:self.traitCollection.preferredContentSizeCategory]) [self renderHeading];
+}
 - (void)applyLarge:(BOOL)large {
+    self.heading.numberOfLines = large ? 0 : 1;
     UILayoutConstraintAxis axis = large ? UILayoutConstraintAxisVertical : UILayoutConstraintAxisHorizontal;
     if (self.row.axis == axis) return;
     self.row.axis = axis;
     self.row.alignment = large ? UIStackViewAlignmentLeading : UIStackViewAlignmentCenter;
-    self.titles.axis = axis;
-    self.titles.alignment = large ? UIStackViewAlignmentLeading : UIStackViewAlignmentFirstBaseline;
-    self.spacer.hidden = large;
 }
 @end
 
@@ -818,14 +834,14 @@ static void LSSavedSetCount(UILabel *label, NSString *text) {
         [self configureSavedCell:cell path:path];
         if (!wasApplied) [cell revealPill:cell.appliedPill];
         if (!wasSaved) [cell revealPill:cell.savedPill];
-        if (resize || [shape isEqualToString:[cell layoutShape]]) continue;
-        // New text can change a row's height; the table only re-lays out when one did.
-        CGSize fitting = CGSizeMake(cell.bounds.size.width, UILayoutFittingCompressedSize.height);
-        CGFloat height = [cell systemLayoutSizeFittingSize:fitting withHorizontalFittingPriority:UILayoutPriorityRequired
-                                     verticalFittingPriority:UILayoutPriorityFittingSizeLevel].height;
-        resize = fabs(height - cell.bounds.size.height) > 0.5;
+        if (![shape isEqualToString:[cell layoutShape]]) resize = YES;
     }
-    if (resize && !table.editing) [table performBatchUpdates:nil completion:nil];
+    // New text or a line shown or hidden can change a row's height. Let the table measure the
+    // rows again: measuring a cell by hand reads back the height the table already gave it, so a
+    // row that gained a line kept its old height and its lines overlapped.
+    if (resize && !table.editing) {
+        [UIView performWithoutAnimation:^{ [table performBatchUpdates:nil completion:nil]; }];
+    }
 }
 - (void)pulseSavedKey:(NSString *)key {
     NSIndexPath *path = [self savedPathForKey:key];
@@ -889,15 +905,15 @@ static void LSSavedSetCount(UILabel *label, NSString *text) {
     // The limit only matters once it is near.
     BOOL nearLimit = total >= capacity * 4 / 5;
     if (filtering) {
-        LSSavedSetCount(savedHeader.countLabel, [NSString stringWithFormat:@"%lu of %lu", visible, total]);
+        [savedHeader setCountText:[NSString stringWithFormat:@"%lu of %lu", visible, total]];
         savedHeader.heading.accessibilityLabel = [NSString stringWithFormat:@"Saved places, %lu of %lu match", visible, total];
     } else {
-        LSSavedSetCount(savedHeader.countLabel, total == 0 ? @"" : (nearLimit ? [NSString stringWithFormat:@"%lu of %lu", total, capacity] : [NSString stringWithFormat:@"%lu", total]));
+        [savedHeader setCountText:total == 0 ? @"" : (nearLimit ? [NSString stringWithFormat:@"%lu of %lu", total, capacity] : [NSString stringWithFormat:@"%lu", total])];
         savedHeader.heading.accessibilityLabel = total == 0 ? @"Saved places" : (nearLimit ? [NSString stringWithFormat:@"Saved places, %lu of %lu", total, capacity]
                                                                                        : [NSString stringWithFormat:@"Saved places, %lu", total]);
     }
     NSString *recentCount = filtering && self.allRecentCount ? [NSString stringWithFormat:@"%lu of %lu", (unsigned long)self.recents.count, (unsigned long)self.allRecentCount] : @"";
-    LSSavedSetCount(recentHeader.countLabel, recentCount);
+    [recentHeader setCountText:recentCount];
     recentHeader.heading.accessibilityLabel = recentCount.length ? [NSString stringWithFormat:@"Recently applied, %@ match", recentCount] : @"Recently applied";
     self.editSavedButton.hidden = total < 2;
     self.editSavedButton.enabled = visible > 1 && !filtering;
@@ -940,12 +956,19 @@ static void LSSavedSetCount(UILabel *label, NSString *text) {
     if (self.savedTable.editing) {
         text = @"Drag the handles to reorder, then tap Done.";
         spoken = @"Reordering. Use the Move up and Move down actions on each place, then Done.";
-    } else if (CLLocationCoordinate2DIsValid(self.savedReferenceCoordinate) && self.savedRowKeys.firstObject.count + self.savedRowKeys.lastObject.count > 0) {
+    } else if ([self savedShowsDistances]) {
         text = @"Distances are from the applied location.";
     }
     self.savedHint.text = text;
     self.savedHint.accessibilityLabel = spoken ?: text;
     self.savedHint.hidden = text.length == 0;
+}
+// Only when some row shows a distance: the applied spot's own row shows none.
+- (BOOL)savedShowsDistances {
+    if (!CLLocationCoordinate2DIsValid(self.savedReferenceCoordinate)) return NO;
+    for (LSBookmark *place in self.savedPlaces) if (![self savedIsHeld:place.coordinate]) return YES;
+    for (NSDictionary *entry in self.recents) if (![self savedIsHeld:LSRecentCoordinate(entry)]) return YES;
+    return NO;
 }
 - (void)savedFilterChanged {
     [self reloadSavedPlacesAnimated:YES];
@@ -1148,6 +1171,11 @@ static void LSSavedSetCount(UILabel *label, NSString *text) {
     return header;
 }
 - (CGFloat)tableView:(UITableView *)table heightForHeaderInSection:(NSInteger)section {
+    if (table != self.savedTable) return UITableViewAutomaticDimension;
+    return [self savedRowsInSection:section] > 0 ? UITableViewAutomaticDimension : CGFLOAT_MIN;
+}
+// An empty section takes no room at all: its footer gap left a blank band above Recently applied.
+- (CGFloat)tableView:(UITableView *)table heightForFooterInSection:(NSInteger)section {
     if (table != self.savedTable) return UITableViewAutomaticDimension;
     return [self savedRowsInSection:section] > 0 ? UITableViewAutomaticDimension : CGFLOAT_MIN;
 }
