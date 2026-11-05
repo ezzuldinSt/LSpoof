@@ -30,10 +30,15 @@ The library is injected into a third-party iOS app via `LC_LOAD_DYLIB` (load-tim
 Supported hooking targets:
 
 - `CLLocationManager.setDelegate:` → non-system delegates implementing `locationManager:didUpdateLocations:` or the legacy `locationManager:didUpdateToLocation:fromLocation:` receive simulated locations while the session is active. Both legacy arguments use simulated history.
+- `locationManager:didFailWithError:` on the same delegates. While the session is active, only `kCLErrorLocationUnknown` (no real fix yet, e.g. indoors) is held back, and a simulated location is delivered instead if none arrived in the last 10 seconds or since the last `requestLocation`. `kCLErrorDenied` and every other error always reach the app.
+- `CLLocationManager.startUpdatingLocation` / `stopUpdatingLocation` and `startMonitoringSignificantLocationChanges` / `stopMonitoringSignificantLocationChanges` register the managers an app is running, so simulated locations are delivered to them even while the phone lies still: every second while moving, and when a new spot is applied. Standard updates honour the app's `distanceFilter`; significant-change monitoring delivers only after about 500 m, as iOS does. Only managers created on the main thread are covered, and in the background only standard updates the app allowed there and significant changes with Always access.
+- `CLLocationManager.requestLocation` — a one-shot request on a main-thread manager is answered with one simulated location right away instead of waiting for a real fix, and no real fix or failure follows it. Requests from other threads go to iOS, and their result is replaced as above. `stopUpdatingLocation` cancels a pending answer.
 - `CLLocationManager.location` — the synchronous getter.
 - `MKUserLocation.location` — the covered MapKit getter.
 
-When Off, the wrappers forward original values. Authorization status and Location Services availability remain genuine. The picker's optional real-location annotation uses its own manager and starts updates only with existing permission; it does not request authorization.
+Simulated locations carry valid speed and course accuracies. While moving they report the route's speed and direction of travel. While holding, speed is 0 and the course is the one set in Settings. While paused, speed is 0 and the course is marked invalid, as on a phone standing still.
+
+When Off, the wrappers forward original values and calls. Authorization status and Location Services availability remain genuine: an app without location access gets iOS's own answer to every request. The picker's optional real-location annotation uses its own manager and starts updates only with existing permission; it does not request authorization.
 
 Touch detection wraps `UIApplication.sendEvent:` and captures the original implementation. Lifecycle installation handles custom UIApplication subclasses. Presentation belongs to the initiating foreground window/scene.
 

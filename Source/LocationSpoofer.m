@@ -9,6 +9,13 @@
 static _Thread_local BOOL ls_internalCreate;
 static char ls_libraryManagerKey;
 static char ls_historyKey;
+static char ls_requestKey;
+static char ls_oneShotKey;
+
+// A swallowed kCLErrorLocationUnknown is replaced by a sample when none was delivered this recently.
+static const NSTimeInterval kLSRecentSampleInterval = 10.0;
+// CoreLocation reports a significant change after roughly 500 m of movement.
+static const CLLocationDistance kLSSignificantChangeDistance = 500.0;
 
 typedef struct {
     void *receiver;
@@ -165,18 +172,37 @@ static CLLocationCoordinate2D LSApplyFluctuation(CLLocationCoordinate2D coordina
     return CLLocationCoordinate2DMake(latitude, longitude - 180.0);
 }
 
+// A heading derived from movement steadies with speed: about 18° walking, a few degrees driving.
+static CLLocationDirectionAccuracy LSCourseAccuracy(CLLocationSpeed speed) {
+    return fmin(45.0, fmax(3.0, 25.0 / fmax(speed, 0.5)));
+}
+
 static CLLocation *LSLocationForSnapshot(LSSessionSnapshot *snapshot) {
     CLLocation *sample = snapshot.location;
     if (snapshot.mode == LSSessionModeOff || !sample) return nil;
     CLLocationCoordinate2D coordinate = sample.coordinate;
     if (snapshot.fluctuationEnabled) coordinate = LSApplyFluctuation(coordinate, snapshot.fluctuationRadius);
+    // The shorter initializer left courseAccuracy and speedAccuracy at -1, which marks course
+    // and speed invalid to hosts that check them. SessionController puts the route's speed and
+    // heading into a moving sample, speed 0 and the last heading into a paused one, and speed 0
+    // with the Course setting into a held one.
+    CLLocationSpeed speed = snapshot.mode == LSSessionModeMoving && sample.speed > 0 ? sample.speed : 0.0;
+    CLLocationSpeedAccuracy speedAccuracy = 0.3 + 0.04 * fmax(0.0, sample.horizontalAccuracy);
+    CLLocationDirection course = -1.0;
+    CLLocationDirectionAccuracy courseAccuracy = -1.0;
+    // A paused route is standing still, so its course is unknown, as on a real device.
+    if (snapshot.mode != LSSessionModePaused && sample.course >= 0) {
+        course = sample.course;
+        courseAccuracy = LSCourseAccuracy(speed);
+    }
     BOOL previous = ls_internalCreate;
     ls_internalCreate = YES;
     CLLocation *location;
     @try {
         location = [[CLLocation alloc] initWithCoordinate:coordinate altitude:sample.altitude
                                      horizontalAccuracy:sample.horizontalAccuracy verticalAccuracy:sample.verticalAccuracy
-                                                 course:sample.course speed:sample.speed timestamp:[NSDate date]];
+                                                 course:course courseAccuracy:courseAccuracy
+                                                  speed:speed speedAccuracy:speedAccuracy timestamp:[NSDate date]];
     } @finally {
         ls_internalCreate = previous;
     }
@@ -202,6 +228,26 @@ static CLLocation *LSRecordSample(CLLocationManager *manager, CLLocation *sample
         history.generation = generation;
         objc_setAssociatedObject(manager, &ls_historyKey, history, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         return previous ?: sample;
+    }
+}
+
+static void LSNoteLocationRequest(CLLocationManager *manager) {
+    @synchronized(manager) {
+        objc_setAssociatedObject(manager, &ls_requestKey, [NSDate date], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+}
+
+// A failure is replaced by a sample when the host has none from this session yet, none since
+// its last requestLocation (a one-shot request ends with exactly one update or failure), or
+// none delivered recently.
+static BOOL LSNeedsReplacementSample(CLLocationManager *manager, uint64_t generation) {
+    @synchronized(manager) {
+        LSLocationHistory *history = objc_getAssociatedObject(manager, &ls_historyKey);
+        NSDate *delivered = history && history.generation == generation ? history.location.timestamp : nil;
+        if (!delivered) return YES;
+        NSDate *requested = objc_getAssociatedObject(manager, &ls_requestKey);
+        if (requested && [delivered compare:requested] == NSOrderedAscending) return YES;
+        return -delivered.timeIntervalSinceNow >= kLSRecentSampleInterval;
     }
 }
 
@@ -254,6 +300,38 @@ static void LSInstallDelegateHooks(id delegate) {
                 @finally { ls_deliveryContext = previous; }
             });
         });
+        // Without a real fix (indoors, no signal) CoreLocation reports kCLErrorLocationUnknown
+        // and keeps trying, so the host showed a location error while a spot was applied. Only
+        // that error is swallowed; kCLErrorDenied and every other error always reach the host.
+        SEL failure = @selector(locationManager:didFailWithError:);
+        LSInstallInstanceHook(cls, failure, ^IMP(IMP implementation) {
+            void (*original)(id, SEL, CLLocationManager *, NSError *) = (void *)implementation;
+            return imp_implementationWithBlock(^(id receiver, CLLocationManager *manager, NSError *error) {
+                if (!LSIsNestedDelivery(receiver, manager, failure) && !LSIsLibraryLocationManager(manager) &&
+                    [error.domain isEqualToString:kCLErrorDomain] && error.code == kCLErrorLocationUnknown) {
+                    LSSessionSnapshot *snapshot = [LSSessionController shared].snapshot;
+                    CLLocation *sample = LSLocationForSnapshot(snapshot);
+                    if (sample) {
+                        // Delivered on this thread, the manager's; the update hooks above
+                        // substitute the current sample and record history.
+                        if (!LSNeedsReplacementSample(manager, snapshot.generation)) return;
+                        if ([receiver respondsToSelector:modern]) {
+                            [receiver locationManager:manager didUpdateLocations:@[sample]];
+                        } else if ([receiver respondsToSelector:legacy]) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+                            [receiver locationManager:manager didUpdateToLocation:sample fromLocation:sample];
+#pragma clang diagnostic pop
+                        }
+                        return;
+                    }
+                }
+                LSDeliveryContext previous = ls_deliveryContext;
+                ls_deliveryContext = (LSDeliveryContext){(__bridge void *)receiver, (__bridge void *)manager, failure};
+                @try { original(receiver, failure, manager, error); }
+                @finally { ls_deliveryContext = previous; }
+            });
+        });
     }
 }
 
@@ -263,17 +341,71 @@ static void LSInstallDelegateHooks(id delegate) {
 // movement at all, and a newly applied location waited for the next real fix. The
 // pusher delivers spoofed samples itself to managers the host is actively running.
 static char ls_pushedKey;
+static char ls_servicesKey;
 static NSHashTable<CLLocationManager *> *ls_activeManagers;
 static NSObject *ls_activeManagersLock;
 
-static void LSSetManagerActive(CLLocationManager *manager, BOOL active) {
+typedef NS_OPTIONS(NSUInteger, LSManagerServices) {
+    LSManagerServiceStandard = 1 << 0,     // startUpdatingLocation
+    LSManagerServiceSignificant = 1 << 1,  // startMonitoringSignificantLocationChanges
+};
+
+// A manager stays pushed while either service runs, so stopping one keeps the other.
+static void LSSetManagerService(CLLocationManager *manager, LSManagerServices service, BOOL active) {
     if (!manager || LSIsLibraryLocationManager(manager)) return;
     @synchronized(ls_activeManagersLock) {
+        LSManagerServices services = [objc_getAssociatedObject(manager, &ls_servicesKey) unsignedIntegerValue];
         // Delegates are called on the thread that created the manager. Only main-thread
         // managers are pushed so delivery never happens on an unexpected thread.
-        if (active && NSThread.isMainThread) [ls_activeManagers addObject:manager];
+        if (active && NSThread.isMainThread) services |= service;
+        else if (active) services = 0;
+        else services &= ~service;
+        objc_setAssociatedObject(manager, &ls_servicesKey, services ? @(services) : nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        if (services) [ls_activeManagers addObject:manager];
         else [ls_activeManagers removeObject:manager];
     }
+}
+
+static LSManagerServices LSActiveServices(CLLocationManager *manager) {
+    @synchronized(ls_activeManagersLock) {
+        return [objc_getAssociatedObject(manager, &ls_servicesKey) unsignedIntegerValue];
+    }
+}
+
+// The host delegate that may be handed a sample the library delivers itself, or nil.
+// Authorization stays genuine: a manager without access is never answered.
+static id<CLLocationManagerDelegate> LSPushableDelegate(CLLocationManager *manager) {
+    if (LSIsLibraryLocationManager(manager)) return nil;
+    id<CLLocationManagerDelegate> delegate = manager.delegate;
+    if (!delegate || LSIsSystemClass([delegate class]) ||
+        ![delegate respondsToSelector:@selector(locationManager:didUpdateLocations:)]) return nil;
+    CLAuthorizationStatus status = manager.authorizationStatus;
+    if (status != kCLAuthorizationStatusAuthorizedAlways && status != kCLAuthorizationStatusAuthorizedWhenInUse) return nil;
+    return delegate;
+}
+
+// requestLocation used to wait for a real fix, which indoors meant a long wait and then
+// kCLErrorLocationUnknown. A main-thread manager is answered with one sample instead.
+static void LSAnswerLocationRequest(CLLocationManager *manager, void (*original)(id, SEL), SEL selector) {
+    // Repeated calls before the answer get one update, as in CoreLocation.
+    if ([objc_getAssociatedObject(manager, &ls_oneShotKey) boolValue]) return;
+    objc_setAssociatedObject(manager, &ls_oneShotKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    __weak CLLocationManager *weakManager = manager;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        CLLocationManager *strongManager = weakManager;
+        // stopUpdatingLocation cancels a pending request.
+        if (!strongManager || ![objc_getAssociatedObject(strongManager, &ls_oneShotKey) boolValue]) return;
+        objc_setAssociatedObject(strongManager, &ls_oneShotKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        id<CLLocationManagerDelegate> delegate = LSPushableDelegate(strongManager);
+        CLLocation *sample = LSLocationForSnapshot([LSSessionController shared].snapshot);
+        // Turned off (or access revoked) in the meantime: CoreLocation answers it after all.
+        if (!delegate || !sample) {
+            original(strongManager, selector);
+            return;
+        }
+        // The installed delegate hook substitutes the current sample and records history.
+        [delegate locationManager:strongManager didUpdateLocations:@[sample]];
+    });
 }
 
 @interface LSLocationPusher : NSObject
@@ -334,24 +466,29 @@ static void LSSetManagerActive(CLLocationManager *manager, BOOL active) {
 }
 - (void)pushSnapshot:(LSSessionSnapshot *)snapshot force:(BOOL)force {
     // In the background a route only keeps moving when the user asked for it, and then
-    // only managers the host itself set up for background updates are pushed.
+    // only services the OS keeps running there are pushed: standard updates the host set
+    // up for the background, and significant changes with Always access.
     BOOL background = UIApplication.sharedApplication.applicationState == UIApplicationStateBackground;
     if (background && !PersistenceManager.shared.continueInBackground) return;
     NSArray<CLLocationManager *> *managers;
     @synchronized(ls_activeManagersLock) { managers = ls_activeManagers.allObjects; }
-    SEL selector = @selector(locationManager:didUpdateLocations:);
     for (CLLocationManager *manager in managers) {
-        if (LSIsLibraryLocationManager(manager)) continue;
-        id<CLLocationManagerDelegate> delegate = manager.delegate;
-        if (!delegate || LSIsSystemClass([delegate class]) || ![delegate respondsToSelector:selector]) continue;
-        CLAuthorizationStatus status = manager.authorizationStatus;
-        if (status != kCLAuthorizationStatusAuthorizedAlways && status != kCLAuthorizationStatusAuthorizedWhenInUse) continue;
-        if (background && !manager.allowsBackgroundLocationUpdates) continue;
+        id<CLLocationManagerDelegate> delegate = LSPushableDelegate(manager);
+        if (!delegate) continue;
+        LSManagerServices services = LSActiveServices(manager);
+        BOOL standard = (services & LSManagerServiceStandard) && (!background || manager.allowsBackgroundLocationUpdates);
+        BOOL significant = (services & LSManagerServiceSignificant) &&
+            (!background || manager.authorizationStatus == kCLAuthorizationStatusAuthorizedAlways);
+        if (!standard && !significant) continue;
         CLLocation *sample = LSLocationForSnapshot(snapshot);
         if (!sample) return;
         CLLocation *previous = objc_getAssociatedObject(manager, &ls_pushedKey);
-        CLLocationDistance filter = manager.distanceFilter;
-        if (!force && previous && filter > 0 && [sample distanceFromLocation:previous] < filter) continue;
+        // Significant changes ignore distanceFilter and arrive only after about 500 m, even
+        // when the held spot is replaced. Standard updates honour the host's filter, except
+        // on a forced push (a new spot or a mode change).
+        CLLocationDistance filter = standard ? manager.distanceFilter : kLSSignificantChangeDistance;
+        BOOL filtered = previous && filter > 0 && [sample distanceFromLocation:previous] < filter;
+        if (filtered && !(standard && force)) continue;
         objc_setAssociatedObject(manager, &ls_pushedKey, sample, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         // The installed delegate hook substitutes the current sample and records history.
         [delegate locationManager:manager didUpdateLocations:@[sample]];
@@ -390,7 +527,7 @@ static void LSSetManagerActive(CLLocationManager *manager, BOOL active) {
         LSInstallInstanceHook(managerClass, start, ^IMP(IMP implementation) {
             void (*original)(id, SEL) = (void *)implementation;
             return imp_implementationWithBlock(^(CLLocationManager *manager) {
-                LSSetManagerActive(manager, YES);
+                LSSetManagerService(manager, LSManagerServiceStandard, YES);
                 original(manager, start);
             });
         });
@@ -398,8 +535,42 @@ static void LSSetManagerActive(CLLocationManager *manager, BOOL active) {
         LSInstallInstanceHook(managerClass, stop, ^IMP(IMP implementation) {
             void (*original)(id, SEL) = (void *)implementation;
             return imp_implementationWithBlock(^(CLLocationManager *manager) {
-                LSSetManagerActive(manager, NO);
+                LSSetManagerService(manager, LSManagerServiceStandard, NO);
+                // Stopping updates also cancels a pending requestLocation answer.
+                if (NSThread.isMainThread) objc_setAssociatedObject(manager, &ls_oneShotKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
                 original(manager, stop);
+            });
+        });
+        SEL request = @selector(requestLocation);
+        LSInstallInstanceHook(managerClass, request, ^IMP(IMP implementation) {
+            void (*original)(id, SEL) = (void *)implementation;
+            return imp_implementationWithBlock(^(CLLocationManager *manager) {
+                if (LSIsLibraryLocationManager(manager) || [LSSessionController shared].snapshot.mode == LSSessionModeOff) {
+                    original(manager, request);
+                    return;
+                }
+                LSNoteLocationRequest(manager);
+                // Only main-thread managers are answered directly, as the pusher does. Others
+                // reach CoreLocation: a real fix is substituted by the delegate hook, and a
+                // kCLErrorLocationUnknown failure is replaced by one sample.
+                if (NSThread.isMainThread && LSPushableDelegate(manager)) LSAnswerLocationRequest(manager, original, request);
+                else original(manager, request);
+            });
+        });
+        SEL startSignificant = @selector(startMonitoringSignificantLocationChanges);
+        LSInstallInstanceHook(managerClass, startSignificant, ^IMP(IMP implementation) {
+            void (*original)(id, SEL) = (void *)implementation;
+            return imp_implementationWithBlock(^(CLLocationManager *manager) {
+                LSSetManagerService(manager, LSManagerServiceSignificant, YES);
+                original(manager, startSignificant);
+            });
+        });
+        SEL stopSignificant = @selector(stopMonitoringSignificantLocationChanges);
+        LSInstallInstanceHook(managerClass, stopSignificant, ^IMP(IMP implementation) {
+            void (*original)(id, SEL) = (void *)implementation;
+            return imp_implementationWithBlock(^(CLLocationManager *manager) {
+                LSSetManagerService(manager, LSManagerServiceSignificant, NO);
+                original(manager, stopSignificant);
             });
         });
         dispatch_async(dispatch_get_main_queue(), ^{ (void)[LSLocationPusher shared]; });
