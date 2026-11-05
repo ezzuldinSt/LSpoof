@@ -179,12 +179,40 @@ static double LSNextMultiplier(double multiplier, NSInteger direction) {
     return 0.25;
 }
 
+- (BOOL)updatePlayingRoute:(LSRoute *)route {
+    if (![route isKindOfClass:LSRoute.class]) return NO;
+    __block BOOL updated = NO;
+    [self onMain:^{
+        LSRouteSimulator *simulator = [LSRouteSimulator shared];
+        if (self.retainedRoute != simulator.route) return;
+        updated = [simulator replaceRouteKeepingProgress:route];
+        if (!updated) return;
+        self.retainedRoute = route;
+        [self publishMode:simulator.isPaused ? LSSessionModePaused : LSSessionModeMoving
+              coordinate:simulator.currentCoordinate heading:simulator.currentHeading];
+    }];
+    return updated;
+}
+
 - (BOOL)nudgeSpeed:(NSInteger)direction {
     __block BOOL changed = NO;
     [self onMain:^{
         LSRouteSimulator *simulator = [LSRouteSimulator shared];
         if (!simulator.isSimulating || direction == 0) return;
         LSPlaybackOptions *options = [simulator.options copy];
+        if (simulator.currentLegHasOwnSpeed) {
+            // The leg being played changes, so the location speeds up or slows down now.
+            LSRoute *route = simulator.route;
+            NSUInteger leg = simulator.currentLegIndex;
+            double current = route.legs[leg].speedKmh, next = LSNextSpeed(current, direction);
+            if (fabs(next - current) <= 0.01) return;
+            NSMutableArray<NSNumber *> *speeds = [NSMutableArray arrayWithCapacity:route.legs.count];
+            for (LSRouteLeg *each in route.legs) [speeds addObject:@(each.speedKmh)];
+            speeds[leg] = @(next);
+            LSRoute *updated = [route routeWithLegSpeeds:speeds];
+            changed = updated && [self updatePlayingRoute:updated];
+            return;
+        }
         if (options.recordedPace && simulator.route.hasTiming) {
             double next = LSNextMultiplier(options.paceMultiplier, direction);
             changed = fabs(next - options.paceMultiplier) > 0.001;

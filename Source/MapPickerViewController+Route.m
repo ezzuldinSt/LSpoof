@@ -456,6 +456,8 @@ static LSTraitStack *LSRouteRow(NSArray<UIView *> *views, CGFloat spacing, UISta
 // halo on the row that the next map tap sets.
 @interface LSRouteRailView : UIView
 @property (nonatomic) BOOL lineAbove, lineBelow, active;
+// A smaller marker on the line between two places (a leg's path), in the same column.
+@property (nonatomic) BOOL compact;
 - (instancetype)initWithSymbol:(NSString *)symbol color:(UIColor *)color;
 - (void)setSymbol:(NSString *)symbol color:(UIColor *)color;
 @end
@@ -507,11 +509,19 @@ static LSTraitStack *LSRouteRow(NSArray<UIView *> *views, CGFloat spacing, UISta
     _color = color;
     [self renderIcon];
 }
-// The marker grows with the text beside it, up to about one and a half times.
+- (void)setCompact:(BOOL)compact {
+    if (_compact == compact) return;
+    _compact = compact;
+    [self renderIcon];
+}
+// The marker grows with the text beside it, up to about one and a half times. A compact one
+// is smaller but keeps the column as wide as the full markers, so the dotted line stays straight.
 - (void)renderIcon {
-    CGFloat point = MIN(34, [[UIFontMetrics metricsForTextStyle:UIFontTextStyleBody] scaledValueForValue:22 compatibleWithTraitCollection:self.traitCollection]);
+    UIFontMetrics *metrics = [UIFontMetrics metricsForTextStyle:UIFontTextStyleBody];
+    CGFloat full = MIN(34, [metrics scaledValueForValue:22 compatibleWithTraitCollection:self.traitCollection]);
+    CGFloat point = _compact ? MIN(24, [metrics scaledValueForValue:16 compatibleWithTraitCollection:self.traitCollection]) : full;
     CGFloat halo = round(point + 14);
-    _width.constant = MAX(36, halo);
+    _width.constant = MAX(36, round(full + 14));
     _haloWidth.constant = halo;
     _haloHeight.constant = halo;
     _halo.layer.cornerRadius = halo / 2;
@@ -838,6 +848,8 @@ static UIButton *LSRowIconButton(NSString *symbol, NSString *label) {
     [NSLayoutConstraint activateConstraints:@[[button.widthAnchor constraintEqualToConstant:44], [button.heightAnchor constraintEqualToConstant:44]]];
     return button;
 }
+// Tag of a planner row's hairline, so it can move under the leg row that follows the place.
+static const NSInteger kLSPlannerSeparatorTag = 0x1E95;
 // One planner row: rail, the row's button, an optional trailing control and a hairline under it.
 static UIView *LSPlannerRow(LSRouteRailView *rail, UIButton *button, UIView *accessory, BOOL separator) {
     UIView *row = [[UIView alloc] init];
@@ -862,6 +874,7 @@ static UIView *LSPlannerRow(LSRouteRailView *rail, UIButton *button, UIView *acc
     }
     if (separator) {
         UIView *line = LSSeparator();
+        line.tag = kLSPlannerSeparatorTag;
         [row addSubview:line];
         [constraints addObjectsFromArray:@[[line.leadingAnchor constraintEqualToAnchor:button.leadingAnchor],
                                            [line.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
@@ -920,6 +933,81 @@ static void LSSetChipSubtitle(UIButton *chip, NSString *subtitle) {
     if ([config.subtitle isEqualToString:subtitle]) return;
     config.subtitle = subtitle;
     chip.configuration = config;
+}
+
+// The row under a place that shows and sets how the leg leaving it is travelled: the path on
+// the rail, the path and speed as text, and a menu.
+static UIButton *LSLegButton(void) {
+    UIButtonConfiguration *config = UIButtonConfiguration.plainButtonConfiguration;
+    config.image = [UIImage systemImageNamed:@"chevron.up.chevron.down"];
+    config.preferredSymbolConfigurationForImage = [UIImageSymbolConfiguration configurationWithTextStyle:UIFontTextStyleCaption2 scale:UIImageSymbolScaleSmall];
+    config.imagePlacement = NSDirectionalRectEdgeTrailing;
+    config.imagePadding = 4;
+    config.baseForegroundColor = UIColor.secondaryLabelColor;
+    config.titleAlignment = UIButtonConfigurationTitleAlignmentLeading;
+    config.titleLineBreakMode = NSLineBreakByWordWrapping;
+    config.contentInsets = NSDirectionalEdgeInsetsMake(6, 0, 6, 4);
+    UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
+    button.configuration = config;
+    button.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeading;
+    button.translatesAutoresizingMaskIntoConstraints = NO;
+    button.titleLabel.numberOfLines = 0;
+    button.showsMenuAsPrimaryAction = YES;
+    button.accessibilityHint = @"Opens the path and speed for this part of the route.";
+    [button.heightAnchor constraintGreaterThanOrEqualToConstant:44].active = YES;
+    return button;
+}
+static char ls_legOwnKey;
+static void LSSetLegText(UIButton *button, NSString *text, BOOL own) {
+    UIButtonConfiguration *config = button.configuration;
+    if ([config.title isEqualToString:text] && [objc_getAssociatedObject(button, &ls_legOwnKey) boolValue] == own) return;
+    objc_setAssociatedObject(button, &ls_legOwnKey, @(own), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    config.title = text;
+    // A leg set on its own reads like a choice; one that follows the route stays quiet.
+    config.titleTextAttributesTransformer = ^NSDictionary *(NSDictionary *attributes) {
+        NSMutableDictionary *result = [attributes mutableCopy];
+        result[NSFontAttributeName] = LSFont(UIFontTextStyleFootnote, own ? UIFontWeightSemibold : UIFontWeightMedium, 24);
+        result[NSForegroundColorAttributeName] = own ? UIColor.labelColor : UIColor.secondaryLabelColor;
+        return result;
+    };
+    button.configuration = config;
+}
+
+// How the leg leaving a place (From or a stop) is travelled, when it differs from the route.
+// Kept on the place, so it moves with a stop that is moved and comes back with an undone removal.
+@interface LSLegChoice : NSObject
+@property (nonatomic) MKDirectionsTransportType transport;   // 0: the route's path.
+@property (nonatomic) double speedKmh;                       // NAN: the route's playback speed.
+@end
+@implementation LSLegChoice
+- (instancetype)init {
+    self = [super init];
+    if (self) _speedKmh = NAN;
+    return self;
+}
+@end
+static char ls_legChoiceKey;
+static LSLegChoice *LSLegChoiceOf(MKPointAnnotation *place) {
+    LSLegChoice *choice = objc_getAssociatedObject(place, &ls_legChoiceKey);
+    if (!choice && place) {
+        choice = [[LSLegChoice alloc] init];
+        objc_setAssociatedObject(place, &ls_legChoiceKey, choice, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    return choice;
+}
+static NSString *LSPathName(MKDirectionsTransportType type) {
+    return type == MKDirectionsTransportTypeAutomobile ? @"Driving path" : @"Walking path";
+}
+static NSString *LSLegSymbol(MKDirectionsTransportType type) {
+    return type == MKDirectionsTransportTypeAutomobile ? @"car.circle.fill" : @"figure.walk.circle.fill";
+}
+// The speed preset that goes with a path, for a leg set to a path of its own.
+static double LSPresetForPath(MKDirectionsTransportType type) {
+    return type == MKDirectionsTransportTypeAutomobile ? kLSPresetSpeeds[2] : kLSPresetSpeeds[0];
+}
+// Directions for one leg are reused while both of its ends and its path type stay the same.
+static NSString *LSLegCacheKey(CLLocationCoordinate2D from, CLLocationCoordinate2D to, MKDirectionsTransportType type) {
+    return [NSString stringWithFormat:@"%.6f,%.6f>%.6f,%.6f/%lu", from.latitude, from.longitude, to.latitude, to.longitude, (unsigned long)type];
 }
 
 // Marker symbols and colours for From, a stop and To.
@@ -983,7 +1071,14 @@ static NSURL *LSExportRoute(LSRoute *route, LSPlaybackOptions *options, NSString
     }];
     NSUInteger count = points.length / sizeof(LSTrackPoint);
     if (count < 2) return nil;
-    NSString *activity = options.recordedPace ? LSActivityForKmh(route.distance / MAX(1, duration) * 3.6) : LSActivityForKmh(options.speedKmh);
+    // The file names one activity; with legs at their own speeds, the longest leg's. The
+    // points themselves are timed leg by leg, like playback.
+    double kmh = options.speedKmh, longest = -1;
+    for (LSRouteLeg *leg in options.recordedPace ? @[] : route.legs) {
+        double length = leg.endDistance - leg.startDistance;
+        if (length > longest) { longest = length; kmh = leg.hasOwnSpeed ? leg.speedKmh : options.speedKmh; }
+    }
+    NSString *activity = options.recordedPace ? LSActivityForKmh(route.distance / MAX(1, duration) * 3.6) : LSActivityForKmh(kmh);
     NSData *data = nil;
     if ([format isEqualToString:@"GPX"]) data = [LSTrackIO GPXDataForPoints:points.bytes count:count name:route.name activity:activity];
     else if ([format isEqualToString:@"TCX"]) data = [LSTrackIO TCXDataForPoints:points.bytes count:count name:route.name activity:activity];
@@ -1072,7 +1167,12 @@ static LSRoute *LSRouteFromTrackFile(NSURL *url, LSTrack **trackOut, NSString **
     self.addStopButton = LSAddStopButton();
     self.addStopButton.accessibilityHint = @"Adds a place to pass through between From and To. Up to 10 stops.";
     [self.addStopButton addTarget:self action:@selector(addStopTapped) forControlEvents:UIControlEventTouchUpInside];
-    UIStackView *list = LSStack(@[LSPlannerRow(self.routeFromRail, self.fromButton, nil, YES), self.stopsStack,
+    // With stops, a leg row under From and under each stop sets how that leg is travelled.
+    self.routeFromRow = LSPlannerRow(self.routeFromRail, self.fromButton, nil, YES);
+    self.routeFirstLegStack = LSStack(@[], 0);
+    self.routeFailedLeg = -1;
+    self.routeLegCache = [NSMutableDictionary dictionary];
+    UIStackView *list = LSStack(@[self.routeFromRow, self.routeFirstLegStack, self.stopsStack,
                                   LSPlannerRow(self.routeAddRail, self.addStopButton, nil, YES),
                                   LSPlannerRow(self.routeToRail, self.toButton, nil, NO)], 0);
     self.swapButton = LSIconButton(@"arrow.up.arrow.down", @"Reverse the route");
@@ -1281,6 +1381,7 @@ static LSRoute *LSRouteFromTrackFile(NSURL *url, LSTrack **trackOut, NSString **
     self.draftRecordedPace = options.recordedPace && route.hasTiming;
     self.draftPaceMultiplier = options.paceMultiplier;
     self.profileSegment.selectedSegmentIndex = route.transportType == MKDirectionsTransportTypeAutomobile ? 1 : 0;
+    [self adoptLegsOfRoute:route];
     self.tab = LSPickerTabRoute;
     self.tabs.selectedSegmentIndex = self.tab;
     self.endpointSegment.selectedSegmentIndex = LSEndpointTo;
@@ -1293,6 +1394,250 @@ static LSRoute *LSRouteFromTrackFile(NSURL *url, LSTrack **trackOut, NSString **
                       tone:LSRouteToneInfo];
     [self rebuildStopRows];
     [self updateRouteUI];
+}
+
+#pragma mark - Legs
+
+// The places each leg leaves from: From, then every stop. Empty until From and To are set.
+- (NSArray<MKPointAnnotation *> *)legDepartures {
+    if (!self.startPin || !self.endPin) return @[];
+    NSMutableArray<MKPointAnnotation *> *places = [NSMutableArray arrayWithObject:self.startPin];
+    [places addObjectsFromArray:self.routeStops];
+    return places;
+}
+
+- (MKDirectionsTransportType)routePathType {
+    return self.profileSegment.selectedSegmentIndex == 1 ? MKDirectionsTransportTypeAutomobile : MKDirectionsTransportTypeWalking;
+}
+
+- (LSLegChoice *)choiceForLeg:(NSUInteger)leg {
+    NSArray<MKPointAnnotation *> *places = [self legDepartures];
+    return leg < places.count ? LSLegChoiceOf(places[leg]) : nil;
+}
+
+- (MKDirectionsTransportType)pathTypeForLeg:(NSUInteger)leg {
+    MKDirectionsTransportType own = [self choiceForLeg:leg].transport;
+    return own ? own : [self routePathType];
+}
+
+// km/h the leg plays at: its own speed, or the route's.
+- (double)speedForLeg:(NSUInteger)leg {
+    double own = [self choiceForLeg:leg].speedKmh;
+    return isfinite(own) ? own : self.draftSpeedKmh;
+}
+
+- (NSArray<NSNumber *> *)draftLegTypes {
+    NSMutableArray<NSNumber *> *types = [NSMutableArray array];
+    for (NSUInteger leg = 0; leg < [self legDepartures].count; leg++) [types addObject:@([self pathTypeForLeg:leg])];
+    return types;
+}
+
+- (NSArray<NSNumber *> *)draftLegSpeeds {
+    NSMutableArray<NSNumber *> *speeds = [NSMutableArray array];
+    for (MKPointAnnotation *place in [self legDepartures]) [speeds addObject:@(LSLegChoiceOf(place).speedKmh)];
+    return speeds;
+}
+
+// "From to Stop 1", "Stop 2 to To".
+- (NSString *)titleForLeg:(NSUInteger)leg {
+    NSUInteger count = self.routeStops.count + 2;
+    return [NSString stringWithFormat:@"%@ to %@", [self legName:leg count:count], [self legName:leg + 1 count:count]];
+}
+
+- (NSString *)summaryForLeg:(NSUInteger)leg spoken:(BOOL)spoken {
+    double kmh = [self speedForLeg:leg];
+    NSString *path = LSPathName([self pathTypeForLeg:leg]);
+    if (spoken) {
+        BOOL routeSpeed = !isfinite([self choiceForLeg:leg].speedKmh);
+        return [NSString stringWithFormat:@"%@, %@%@", path, LSSpokenSpeed(kmh), routeSpeed ? @", the route speed" : @""];
+    }
+    return [NSString stringWithFormat:@"%@ · %@", path, LSSpeedText(kmh)];
+}
+
+// The planner's leg choices from a built route, e.g. the retained one when the picker opens.
+- (void)adoptLegsOfRoute:(LSRoute *)route {
+    NSArray<MKPointAnnotation *> *places = [self legDepartures];
+    if (route.legs.count != places.count) return;
+    for (NSUInteger leg = 0; leg < places.count; leg++) {
+        LSRouteLeg *built = route.legs[leg];
+        LSLegChoice *choice = LSLegChoiceOf(places[leg]);
+        choice.transport = built.transportType != route.transportType ? built.transportType : 0;
+        choice.speedKmh = built.speedKmh;
+        // Its directions are already known; changing another leg reuses them.
+        LSRouteLegPath *path = [route pathForLegAtIndex:leg];
+        CLLocationCoordinate2D from = places[leg].coordinate;
+        CLLocationCoordinate2D to = leg + 1 < places.count ? places[leg + 1].coordinate : self.endPin.coordinate;
+        if (path) [self cacheLegPath:path from:from to:to];
+    }
+}
+
+- (void)cacheLegPath:(LSRouteLegPath *)path from:(CLLocationCoordinate2D)from to:(CLLocationCoordinate2D)to {
+    if (!path) return;
+    if (!self.routeLegCache) self.routeLegCache = [NSMutableDictionary dictionary];
+    // Enough for every leg of a few drafts in both path types.
+    if (self.routeLegCache.count >= 64) [self.routeLegCache removeAllObjects];
+    self.routeLegCache[LSLegCacheKey(from, to, path.transportType)] = path;
+}
+
+- (void)setLeg:(NSUInteger)leg pathType:(MKDirectionsTransportType)type {
+    LSLegChoice *choice = [self choiceForLeg:leg];
+    if (!choice || [self pathTypeForLeg:leg] == type) return;
+    MKDirectionsTransportType routeType = [self routePathType], previous = choice.transport;
+    choice.transport = type == routeType ? 0 : type;
+    if (choice.transport && !isfinite(choice.speedKmh)) {
+        // Getting out of the car means walking speed too; the speed can still be changed.
+        choice.speedKmh = LSPresetForPath(type);
+    } else if (!choice.transport && previous && isfinite(choice.speedKmh) && fabs(choice.speedKmh - LSPresetForPath(previous)) < 0.01) {
+        // Back on the route's path: the speed that came with the other path goes too.
+        choice.speedKmh = NAN;
+    }
+    LSHapticSelection();
+    LSAnnounce([NSString stringWithFormat:@"%@: %@.", [self titleForLeg:leg], [self summaryForLeg:leg spoken:YES]]);
+    // Only this leg is looked up again; the others come from the cache.
+    BOOL refetch = self.startPin && self.endPin;
+    [self invalidateRouteDraft];
+    [self refreshLegRows];
+    [self updateRouteUI];
+    if (refetch) [self fetchRoute];
+}
+
+- (void)setLeg:(NSUInteger)leg speed:(double)kmh {
+    LSLegChoice *choice = [self choiceForLeg:leg];
+    if (!choice) return;
+    if (isfinite(kmh) && (kmh < 1 || kmh > 500)) return;
+    BOOL same = isfinite(kmh) ? isfinite(choice.speedKmh) && fabs(choice.speedKmh - kmh) < 0.01 : !isfinite(choice.speedKmh);
+    if (same) return;
+    choice.speedKmh = kmh;
+    LSHapticSelection();
+    [self applyLegSpeedsToDraft];
+    NSString *message = [NSString stringWithFormat:@"%@: %@.", [self titleForLeg:leg], [self summaryForLeg:leg spoken:YES]];
+    if ([self isPlayingDraft]) [self setRouteFeedback:[NSString stringWithFormat:@"%@ at %@ now.", [self titleForLeg:leg], LSSpeedText([self speedForLeg:leg])] tone:LSRouteToneInfo];
+    LSAnnounce(message);
+    [self refreshLegRows];
+    [self updateRouteUI];
+}
+
+// A speed change needs no directions: the built route takes the new speeds, and when it is
+// the one playing, playback carries on from where it is at the new speed.
+- (void)applyLegSpeedsToDraft {
+    LSRoute *route = self.fetchedRoute;
+    NSArray<NSNumber *> *speeds = [self draftLegSpeeds];
+    if (!route || route.fromTrack || route.legs.count != speeds.count) return;
+    BOOL playing = [self isPlayingDraft];
+    LSRoute *updated = [route routeWithLegSpeeds:speeds];
+    if (!updated) return;
+    // Should the playing route not take it, the draft now differs and can replace it.
+    if (playing && ![LSSessionController.shared updatePlayingRoute:updated]) self.routeDraftChanged = YES;
+    self.fetchedRoute = updated;
+}
+
+// After the playing route changed under the picker (a leg sped up from the controls), the
+// draft follows it.
+- (void)followPlayingRoute {
+    LSRoute *playing = LSSessionController.shared.retainedRoute;
+    if (!playing || playing == self.fetchedRoute || ![playing hasSamePathAs:self.fetchedRoute]) return;
+    self.fetchedRoute = playing;
+    [self adoptLegsOfRoute:playing];
+    [self refreshLegRows];
+}
+
+- (UIMenu *)menuForLeg:(NSUInteger)leg {
+    __weak typeof(self) weakSelf = self;
+    MKDirectionsTransportType routeType = [self routePathType], type = [self pathTypeForLeg:leg];
+    NSMutableArray<UIMenuElement *> *paths = [NSMutableArray array];
+    for (NSNumber *value in @[@(MKDirectionsTransportTypeWalking), @(MKDirectionsTransportTypeAutomobile)]) {
+        MKDirectionsTransportType option = value.unsignedIntegerValue;
+        UIAction *action = [UIAction actionWithTitle:LSPathName(option)
+                                               image:[UIImage systemImageNamed:option == MKDirectionsTransportTypeAutomobile ? @"car.fill" : @"figure.walk"]
+                                          identifier:nil handler:^(__unused UIAction *item) { [weakSelf setLeg:leg pathType:option]; }];
+        action.state = type == option ? UIMenuElementStateOn : UIMenuElementStateOff;
+        action.subtitle = option == routeType ? @"Same as the route" : (type == option ? @"This leg only" : @"Looks up this leg again");
+        [paths addObject:action];
+    }
+    LSLegChoice *choice = [self choiceForLeg:leg];
+    double own = choice.speedKmh;
+    NSMutableArray<UIMenuElement *> *speeds = [NSMutableArray array];
+    UIAction *route = [UIAction actionWithTitle:[NSString stringWithFormat:@"Route speed (%@)", LSSpeedText(self.draftSpeedKmh)]
+                                          image:[UIImage systemImageNamed:@"speedometer"] identifier:nil
+                                        handler:^(__unused UIAction *item) { [weakSelf setLeg:leg speed:NAN]; }];
+    route.subtitle = @"Follows Playback speed below";
+    route.state = isfinite(own) ? UIMenuElementStateOff : UIMenuElementStateOn;
+    [speeds addObject:route];
+    NSArray *titles = @[@"Walk", @"Bike", @"Drive"];
+    BOOL preset = NO;
+    for (NSUInteger index = 0; index < 3; index++) {
+        double kmh = kLSPresetSpeeds[index];
+        UIAction *action = [UIAction actionWithTitle:[NSString stringWithFormat:@"%@ · %@", titles[index], LSSpeedText(kmh)] image:nil identifier:nil
+                                             handler:^(__unused UIAction *item) { [weakSelf setLeg:leg speed:kmh]; }];
+        BOOL on = isfinite(own) && fabs(own - kmh) < 0.01;
+        preset = preset || on;
+        action.state = on ? UIMenuElementStateOn : UIMenuElementStateOff;
+        [speeds addObject:action];
+    }
+    UIAction *custom = [UIAction actionWithTitle:isfinite(own) && !preset ? [NSString stringWithFormat:@"Custom (%@)…", LSSpeedText(own)] : @"Custom…"
+                                           image:[UIImage systemImageNamed:@"slider.horizontal.3"] identifier:nil
+                                         handler:^(__unused UIAction *item) { [weakSelf enterSpeedForLeg:leg]; }];
+    custom.state = isfinite(own) && !preset ? UIMenuElementStateOn : UIMenuElementStateOff;
+    [speeds addObject:custom];
+    UIMenu *pathMenu = [UIMenu menuWithTitle:@"Path" image:nil identifier:nil options:UIMenuOptionsDisplayInline | UIMenuOptionsSingleSelection children:paths];
+    UIMenu *speedMenu = [UIMenu menuWithTitle:@"Speed on this leg" image:nil identifier:nil options:UIMenuOptionsDisplayInline | UIMenuOptionsSingleSelection children:speeds];
+    return [UIMenu menuWithTitle:[self titleForLeg:leg] children:@[pathMenu, speedMenu]];
+}
+
+- (void)enterSpeedForLeg:(NSUInteger)leg {
+    NSString *help = @"Enter a speed from 1 to 500 km/h for this leg. The other legs keep theirs.";
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:[self titleForLeg:leg] message:help preferredStyle:UIAlertControllerStyleAlert];
+    double current = [self speedForLeg:leg];
+    [alert addTextFieldWithConfigurationHandler:^(UITextField *field) {
+        field.keyboardType = UIKeyboardTypeDecimalPad;
+        field.text = LSFormatDecimal(current, 1);
+        field.placeholder = @"km/h";
+        field.clearButtonMode = UITextFieldViewModeWhileEditing;
+        field.accessibilityLabel = @"Speed on this leg in kilometers per hour";
+    }];
+    __weak UIAlertController *weakAlert = alert;
+    __weak typeof(self) weakSelf = self;
+    UIAlertAction *save = [UIAlertAction actionWithTitle:@"Set speed" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
+        NSNumber *number = LSParseDecimal(weakAlert.textFields.firstObject.text, NSLocale.currentLocale);
+        if (number) [weakSelf setLeg:leg speed:number.doubleValue];
+    }];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:save];
+    alert.preferredAction = save;
+    [self validateAlert:alert action:save valid:^BOOL(NSNumber *number) { return number.doubleValue >= 1 && number.doubleValue <= 500; }
+                   help:help error:@"Enter a number from 1 to 500 km/h."];
+    [self presentViewController:alert animated:LSMapAnimationsEnabled() completion:nil];
+}
+
+// The leg row under a place: a small path marker on the rail and the path and speed as a menu.
+- (UIView *)legRowForLeg:(NSUInteger)leg rails:(NSMutableArray<LSRouteRailView *> *)rails buttons:(NSMutableArray<UIButton *> *)buttons {
+    __weak typeof(self) weakSelf = self;
+    LSRouteRailView *rail = [[LSRouteRailView alloc] initWithSymbol:LSLegSymbol([self pathTypeForLeg:leg]) color:LSRouteColor()];
+    rail.compact = YES;
+    rail.lineAbove = YES;
+    rail.lineBelow = YES;
+    UIButton *button = LSLegButton();
+    button.tag = (NSInteger)leg;
+    button.menu = LSLiveMenu([self titleForLeg:leg], 0, ^UIMenu *{ return [weakSelf menuForLeg:leg]; });
+    [rails addObject:rail];
+    [buttons addObject:button];
+    return LSPlannerRow(rail, button, nil, YES);
+}
+
+// Texts and markers of the leg rows, for a new route speed, path or leg choice.
+- (void)refreshLegRows {
+    NSArray<UIButton *> *buttons = self.routeLegButtons;
+    NSArray<LSRouteRailView *> *rails = self.routeLegRails;
+    NSUInteger passed = [self passedStopCount];
+    for (NSUInteger leg = 0; leg < buttons.count && leg < rails.count; leg++) {
+        LSLegChoice *choice = [self choiceForLeg:leg];
+        BOOL own = choice.transport || isfinite(choice.speedKmh);
+        LSSetLegText(buttons[leg], [self summaryForLeg:leg spoken:NO], own);
+        buttons[leg].accessibilityLabel = [NSString stringWithFormat:@"Leg %lu, %@", (unsigned long)leg + 1, [self titleForLeg:leg]];
+        buttons[leg].accessibilityValue = [self summaryForLeg:leg spoken:YES];
+        // A leg the playing route has finished turns grey, like its stop.
+        [rails[leg] setSymbol:LSLegSymbol([self pathTypeForLeg:leg]) color:leg < passed ? UIColor.systemGrayColor : LSRouteColor()];
+    }
 }
 
 #pragma mark - Endpoints and stops
@@ -1313,9 +1658,22 @@ static LSRoute *LSRouteFromTrackFile(NSURL *url, LSTrack **trackOut, NSString **
     }
 }
 
+// Leg rows show once a route has stops (and both ends), so there is more than one leg.
+- (BOOL)showsLegRows {
+    return [self legDepartures].count >= 2 && !self.fetchedRoute.fromTrack;
+}
+
 - (void)rebuildStopRows {
     for (UIView *view in self.stopsStack.arrangedSubviews) { [self.stopsStack removeArrangedSubview:view]; [view removeFromSuperview]; }
+    for (UIView *view in self.routeFirstLegStack.arrangedSubviews) { [self.routeFirstLegStack removeArrangedSubview:view]; [view removeFromSuperview]; }
     NSUInteger passed = [self passedStopCount];
+    BOOL legs = [self showsLegRows];
+    NSMutableArray<LSRouteRailView *> *legRails = [NSMutableArray array];
+    NSMutableArray<UIButton *> *legButtons = [NSMutableArray array];
+    if (legs) [self.routeFirstLegStack addArrangedSubview:[self legRowForLeg:0 rails:legRails buttons:legButtons]];
+    self.routeFirstLegStack.hidden = !legs;
+    // The hairline goes under the leg row, which belongs to the place above it.
+    [self.routeFromRow viewWithTag:kLSPlannerSeparatorTag].hidden = legs;
     for (NSUInteger index = 0; index < self.routeStops.count; index++) {
         LSStopAnnotation *stop = self.routeStops[index];
         NSString *place = stop.subtitle.length ? stop.subtitle : LSCoordinateText(stop.coordinate);
@@ -1333,8 +1691,14 @@ static LSRoute *LSRouteFromTrackFile(NSURL *url, LSTrack **trackOut, NSString **
         UIButton *remove = LSRowIconButton(@"xmark.circle.fill", [NSString stringWithFormat:@"Remove stop %lu", (unsigned long)index + 1]);
         remove.tag = (NSInteger)index;
         [remove addTarget:self action:@selector(removeStopTapped:) forControlEvents:UIControlEventTouchUpInside];
-        [self.stopsStack addArrangedSubview:LSPlannerRow(rail, button, remove, YES)];
+        UIView *row = LSPlannerRow(rail, button, remove, YES);
+        [row viewWithTag:kLSPlannerSeparatorTag].hidden = legs;
+        [self.stopsStack addArrangedSubview:row];
+        if (legs) [self.stopsStack addArrangedSubview:[self legRowForLeg:index + 1 rails:legRails buttons:legButtons]];
     }
+    self.routeLegRails = legRails;
+    self.routeLegButtons = legButtons;
+    [self refreshLegRows];
     self.stopsStack.hidden = self.routeStops.count == 0;
     NSUInteger count = self.routeStops.count;
     self.addStopButton.enabled = count < kLSMaximumStops;
@@ -1351,16 +1715,18 @@ static LSRoute *LSRouteFromTrackFile(NSURL *url, LSTrack **trackOut, NSString **
     return index < passed ? @"checkmark.circle.fill" : [NSString stringWithFormat:@"%lu.circle.fill", (unsigned long)index + 1];
 }
 
-// Passed stops turn into grey checkmarks in the list, matching their markers.
+// Passed stops turn into grey checkmarks in the list, matching their markers; finished legs grey too.
 - (void)refreshStopRails {
     NSUInteger passed = [self passedStopCount];
-    NSArray<UIView *> *rows = self.stopsStack.arrangedSubviews;
-    for (NSUInteger index = 0; index < rows.count; index++) {
-        for (UIView *view in rows[index].subviews) {
-            if (![view isKindOfClass:LSRouteRailView.class]) continue;
+    NSUInteger index = 0;
+    for (UIView *row in self.stopsStack.arrangedSubviews) {
+        for (UIView *view in row.subviews) {
+            if (![view isKindOfClass:LSRouteRailView.class] || ((LSRouteRailView *)view).compact) continue;
             [(LSRouteRailView *)view setSymbol:[self railSymbolForStop:index passed:passed] color:index < passed ? UIColor.systemGrayColor : LSWarningColor()];
+            index++;
         }
     }
+    [self refreshLegRows];
 }
 
 - (NSArray<UIAccessibilityCustomAction *> *)accessibilityActionsForStopAtIndex:(NSUInteger)index {
@@ -1404,7 +1770,19 @@ static LSRoute *LSRouteFromTrackFile(NSURL *url, LSTrack **trackOut, NSString **
     UIAction *remove = [UIAction actionWithTitle:@"Remove stop" image:[UIImage systemImageNamed:@"trash"] identifier:nil handler:^(__unused UIAction *action) { [weakSelf removeStopAtIndex:index]; }];
     remove.attributes = UIMenuElementAttributesDestructive;
     UIMenu *order = [UIMenu menuWithTitle:@"" image:nil identifier:nil options:UIMenuOptionsDisplayInline children:@[up, down]];
-    return [UIMenu menuWithTitle:[NSString stringWithFormat:@"Stop %lu", (unsigned long)index + 1] children:@[change, order, remove]];
+    NSMutableArray<UIMenuElement *> *items = [NSMutableArray arrayWithObjects:change, order, nil];
+    if (self.endPin) {
+        // The leg that leaves this stop: its path and speed, read when the submenu opens.
+        UIDeferredMenuElement *leg = [UIDeferredMenuElement elementWithUncachedProvider:^(void (^completion)(NSArray<UIMenuElement *> *)) {
+            completion([weakSelf menuForLeg:index + 1].children ?: @[]);
+        }];
+        NSString *next = index + 1 < self.routeStops.count ? [NSString stringWithFormat:@"Stop %lu", (unsigned long)index + 2] : @"To";
+        UIMenu *legMenu = [UIMenu menuWithTitle:[NSString stringWithFormat:@"Next leg, to %@", next] image:[UIImage systemImageNamed:@"arrow.triangle.turn.up.right.diamond"]
+                                     identifier:nil options:0 children:@[leg]];
+        [items addObject:legMenu];
+    }
+    [items addObject:remove];
+    return [UIMenu menuWithTitle:[NSString stringWithFormat:@"Stop %lu", (unsigned long)index + 1] children:items];
 }
 
 - (void)stopsChanged {
@@ -1454,11 +1832,14 @@ static LSRoute *LSRouteFromTrackFile(NSURL *url, LSTrack **trackOut, NSString **
 
 // Rows are rebuilt after a change; keep VoiceOver on the stop that moved.
 - (void)focusStopAtIndex:(NSUInteger)index {
-    if (!UIAccessibilityIsVoiceOverRunning() || index >= self.stopsStack.arrangedSubviews.count) return;
-    for (UIView *view in self.stopsStack.arrangedSubviews[index].subviews) {
-        if ([view isKindOfClass:UIButton.class] && view.tag == (NSInteger)index && view.accessibilityCustomActions.count) {
-            UIAccessibilityPostNotification(UIAccessibilityLayoutChangedNotification, view);
-            return;
+    if (!UIAccessibilityIsVoiceOverRunning() || index >= self.routeStops.count) return;
+    // Leg rows sit between the stop rows; only a stop's button has custom actions.
+    for (UIView *row in self.stopsStack.arrangedSubviews) {
+        for (UIView *view in row.subviews) {
+            if ([view isKindOfClass:UIButton.class] && view.tag == (NSInteger)index && view.accessibilityCustomActions.count) {
+                UIAccessibilityPostNotification(UIAccessibilityLayoutChangedNotification, view);
+                return;
+            }
         }
     }
 }
@@ -1598,8 +1979,23 @@ static LSRoute *LSRouteFromTrackFile(NSURL *url, LSTrack **trackOut, NSString **
     CLLocationCoordinate2D from = self.startPin.coordinate, to = self.endPin.coordinate;
     NSString *fromName = self.startPin.subtitle ?: @"Map point", *toName = self.endPin.subtitle ?: @"Map point";
     LSHapticSelection();
+    // Each leg keeps its path and speed when the trip runs backwards: the walk from B to C
+    // becomes the walk from C to B, which now leaves from C.
+    NSMutableArray<LSLegChoice *> *choices = [NSMutableArray array];
+    for (MKPointAnnotation *place in [self legDepartures]) {
+        LSLegChoice *copy = [[LSLegChoice alloc] init];
+        copy.transport = LSLegChoiceOf(place).transport;
+        copy.speedKmh = LSLegChoiceOf(place).speedKmh;
+        [choices addObject:copy];
+    }
     NSArray *reversed = self.routeStops.reverseObjectEnumerator.allObjects;
     [self.routeStops setArray:reversed];
+    NSArray<MKPointAnnotation *> *departures = [self legDepartures];
+    for (NSUInteger leg = 0; leg < departures.count && leg < choices.count; leg++) {
+        LSLegChoice *from = choices[choices.count - 1 - leg], *to = LSLegChoiceOf(departures[leg]);
+        to.transport = from.transport;
+        to.speedKmh = from.speedKmh;
+    }
     [self renumberStops];
     [self rebuildStopRows];
     [self assignEndpoint:LSEndpointFrom coordinate:to name:toName build:NO];
@@ -1709,14 +2105,34 @@ static LSRoute *LSRouteFromTrackFile(NSURL *url, LSTrack **trackOut, NSString **
 - (void)profileChanged {
     BOOL shouldRefetch = self.startPin && self.endPin;
     LSHapticSelection();
+    // A leg set to the path the whole route now takes simply follows the route again.
+    MKDirectionsTransportType routeType = [self routePathType];
+    for (MKPointAnnotation *place in [self legDepartures]) {
+        LSLegChoice *choice = LSLegChoiceOf(place);
+        if (choice.transport == routeType) choice.transport = 0;
+    }
     [self invalidateRouteDraft];
     [self updateRouteUI];
     if (shouldRefetch) [self fetchRoute];
 }
 
 - (void)tryOtherPath {
+    // A leg that failed on a path of its own switches alone; otherwise the whole route does.
+    NSInteger failed = self.routeFailedLeg;
+    if (failed >= 0 && [self choiceForLeg:(NSUInteger)failed].transport) {
+        MKDirectionsTransportType type = [self pathTypeForLeg:(NSUInteger)failed];
+        [self setLeg:(NSUInteger)failed pathType:type == MKDirectionsTransportTypeAutomobile ? MKDirectionsTransportTypeWalking : MKDirectionsTransportTypeAutomobile];
+        return;
+    }
     self.profileSegment.selectedSegmentIndex = self.profileSegment.selectedSegmentIndex == 1 ? 0 : 1;
     [self profileChanged];
+}
+
+// The path the recovery button offers: the other one for the leg (or route) that failed.
+- (MKDirectionsTransportType)failedPathType {
+    NSInteger failed = self.routeFailedLeg;
+    if (failed >= 0 && (NSUInteger)failed < [self legDepartures].count) return [self pathTypeForLeg:(NSUInteger)failed];
+    return [self routePathType];
 }
 
 - (void)fetchRoute {
@@ -1737,9 +2153,11 @@ static LSRoute *LSRouteFromTrackFile(NSURL *url, LSTrack **trackOut, NSString **
         return;
     }
     [self setRouteFeedback:@"Looking up the streets. The current session keeps running." tone:LSRouteToneBusy];
-    MKDirectionsTransportType transport = self.profileSegment.selectedSegmentIndex == 1 ? MKDirectionsTransportTypeAutomobile : MKDirectionsTransportTypeWalking;
-    [self fetchLegs:waypoints legs:[NSMutableArray array] transport:transport revision:self.routeRevision];
-    [self updateRouteUI];
+    self.routeFailedLeg = -1;
+    // Each leg is looked up with its own path type; legs already looked up are reused.
+    [self fetchLegs:waypoints legs:[NSMutableArray array] types:[self draftLegTypes] revision:self.routeRevision];
+    // Every leg may have come from the cache, and the route is already built.
+    if (self.directions || !self.fetchedRoute) [self updateRouteUI];
 }
 
 - (NSString *)legName:(NSUInteger)index count:(NSUInteger)count {
@@ -1748,10 +2166,20 @@ static LSRoute *LSRouteFromTrackFile(NSURL *url, LSTrack **trackOut, NSString **
     return [NSString stringWithFormat:@"Stop %lu", (unsigned long)index];
 }
 
-// One MapKit request per leg, in order, so each stop is actually visited.
-- (void)fetchLegs:(NSArray<LSRouteWaypoint *> *)waypoints legs:(NSMutableArray<MKRoute *> *)legs transport:(MKDirectionsTransportType)transport revision:(NSUInteger)revision {
+// One MapKit request per leg, in order, so each stop is actually visited. A leg whose ends and
+// path type were looked up before is taken from the cache, so changing one leg's path or
+// moving one stop only asks for the legs that changed.
+- (void)fetchLegs:(NSArray<LSRouteWaypoint *> *)waypoints legs:(NSMutableArray<LSRouteLegPath *> *)legs
+            types:(NSArray<NSNumber *> *)types revision:(NSUInteger)revision {
     NSUInteger index = legs.count;
+    while (index + 1 < waypoints.count) {
+        LSRouteLegPath *known = self.routeLegCache[LSLegCacheKey(waypoints[index].coordinate, waypoints[index + 1].coordinate, types[index].unsignedIntegerValue)];
+        if (!known) break;
+        [legs addObject:known];
+        index++;
+    }
     if (index + 1 >= waypoints.count) { [self finishLegs:legs waypoints:waypoints]; return; }
+    MKDirectionsTransportType transport = types[index].unsignedIntegerValue;
     if (waypoints.count > 2) {
         self.routeFeedback.text = [NSString stringWithFormat:@"Looking up part %lu of %lu of the route…", (unsigned long)index + 1, (unsigned long)waypoints.count - 1];
     }
@@ -1767,29 +2195,38 @@ static LSRoute *LSRouteFromTrackFile(NSURL *url, LSTrack **trackOut, NSString **
         if (!self || self.closed || revision != self.routeRevision || self.tab != LSPickerTabRoute) return;
         self.directions = nil;
         MKRoute *leg = response.routes.firstObject;
-        if (error || !leg || leg.polyline.pointCount < 2 || !isfinite(leg.distance) || leg.distance <= 0) {
+        // Kept under the path type it was asked for, which is how the cache looks it up.
+        LSRouteLegPath *path = leg && isfinite(leg.distance) && leg.distance > 0
+            ? [LSRouteLegPath pathWithPolyline:leg.polyline expectedTravelTime:leg.expectedTravelTime transportType:transport] : nil;
+        if (error || !path) {
             [self.routeSpinner stopAnimating];
             BOOL notFound = error.code == MKErrorDirectionsNotFound || !error;
             NSString *between = waypoints.count == 2 ? @"these points" : [NSString stringWithFormat:@"%@ and %@", [self legName:index count:waypoints.count], [self legName:index + 1 count:waypoints.count]];
+            NSString *kind = transport == MKDirectionsTransportTypeAutomobile ? @"driving" : @"walking";
             [self setRouteFeedback:notFound
-                ? [NSString stringWithFormat:@"No route between %@. Try the other path type or move a point.", between]
+                ? [NSString stringWithFormat:@"No %@ route between %@. Try the other path type or move a point.", kind, between]
                 : (error.code == MKErrorLoadingThrottled ? @"Apple Maps is limiting requests. Wait a minute and tap Try again."
                                                          : @"Directions are unavailable right now. Check your connection and tap Try again.")
                               tone:LSRouteToneError];
             self.routeSuggestsOtherPath = notFound;
+            self.routeFailedLeg = (NSInteger)index;
             LSAnnounce(self.routeFeedback.text);
             LSHapticWarning();
             [self updateRouteUI];
             return;
         }
-        [legs addObject:leg];
-        [self fetchLegs:waypoints legs:legs transport:transport revision:revision];
+        [self cacheLegPath:path from:waypoints[index].coordinate to:waypoints[index + 1].coordinate];
+        [legs addObject:path];
+        [self fetchLegs:waypoints legs:legs types:types revision:revision];
     }];
 }
 
-- (void)finishLegs:(NSArray<MKRoute *> *)legs waypoints:(NSArray<LSRouteWaypoint *> *)waypoints {
+- (void)finishLegs:(NSArray<LSRouteLegPath *> *)legs waypoints:(NSArray<LSRouteWaypoint *> *)waypoints {
     [self.routeSpinner stopAnimating];
-    LSRoute *route = [LSRoute routeWithLegs:legs waypoints:waypoints];
+    // Speeds are read now: one may have changed while the directions were looked up.
+    NSArray<NSNumber *> *speeds = [self draftLegSpeeds];
+    LSRoute *route = [LSRoute routeWithLegPaths:legs waypoints:waypoints transportType:[self routePathType]
+                                      legSpeeds:speeds.count == legs.count ? speeds : nil];
     if (!route) {
         [self setRouteFeedback:@"This route could not be built. Move a point and try again." tone:LSRouteToneError];
         [self updateRouteUI];
@@ -2270,9 +2707,10 @@ static LSRoute *LSRouteFromTrackFile(NSURL *url, LSTrack **trackOut, NSString **
     LSRoute *route = self.fetchedRoute;
     __weak typeof(self) weakSelf = self;
     NSMutableArray *items = [NSMutableArray array];
+    UIAction *match = nil;
     if (route.expectedTravelTime > 60 && !route.fromTrack) {
         NSTimeInterval eta = route.expectedTravelTime;
-        UIAction *match = [UIAction actionWithTitle:[NSString stringWithFormat:@"Match Apple Maps (%@)", LSDuration(eta)] image:[UIImage systemImageNamed:@"applelogo"] identifier:nil handler:^(__unused UIAction *action) {
+        match = [UIAction actionWithTitle:[NSString stringWithFormat:@"Match Apple Maps (%@)", LSDuration(eta)] image:[UIImage systemImageNamed:@"applelogo"] identifier:nil handler:^(__unused UIAction *action) {
             [weakSelf finishIn:eta];
         }];
         match.subtitle = @"Apple's arrival estimate for this route";
@@ -2291,7 +2729,24 @@ static LSRoute *LSRouteFromTrackFile(NSURL *url, LSTrack **trackOut, NSString **
     UIAction *custom = [UIAction actionWithTitle:@"Finish in…" image:[UIImage systemImageNamed:@"timer"] identifier:nil handler:^(__unused UIAction *action) { [weakSelf enterFinishTime]; }];
     custom.subtitle = @"Type the minutes another app shows, such as Google Maps or Waze";
     [items addObject:custom];
+    // Finish in sets the route speed; a leg with a speed of its own keeps it.
+    NSUInteger own = [self legsWithOwnSpeed:route];
+    if (own && own == route.legs.count && !route.fromTrack) {
+        for (UIAction *item in @[custom, match ?: custom]) {
+            item.attributes = UIMenuElementAttributesDisabled;
+            item.subtitle = @"Every leg has its own speed. Set a leg to Route speed to use this.";
+        }
+    } else if (own) {
+        custom.subtitle = @"Changes the route speed. Legs with their own speed keep it.";
+    }
     return [UIMenu menuWithTitle:@"Arrive on time" children:items];
+}
+
+- (NSUInteger)legsWithOwnSpeed:(LSRoute *)route {
+    if (route.fromTrack) return 0;
+    NSUInteger count = 0;
+    for (LSRouteLeg *leg in route.legs) if (leg.hasOwnSpeed) count++;
+    return count;
 }
 
 - (void)enterFinishTime {
@@ -2340,16 +2795,25 @@ static LSRoute *LSRouteFromTrackFile(NSURL *url, LSTrack **trackOut, NSString **
         LSAnnounce(message);
         return;
     }
+    NSUInteger own = [self legsWithOwnSpeed:route];
+    if (own && own == route.legs.count) {
+        [self showMessage:@"Every leg has its own speed. Set a leg to Route speed so Finish in can change it." symbol:@"exclamationmark.triangle.fill"];
+        LSHapticWarning();
+        return;
+    }
     double kmh = [LSRouteSimulator speedKmhForRoute:route options:options finishingIn:seconds];
     if (!isfinite(kmh)) {
-        [self showMessage:@"No speed from 1 to 500 km/h finishes in that time. Shorten the waits or pick another time." symbol:@"exclamationmark.triangle.fill"];
+        [self showMessage:own ? @"No route speed from 1 to 500 km/h finishes in that time, with the legs that keep their own speed. Change those legs, the waits or the time."
+                              : @"No speed from 1 to 500 km/h finishes in that time. Shorten the waits or pick another time."
+                   symbol:@"exclamationmark.triangle.fill"];
         LSHapticWarning();
         return;
     }
     self.draftSpeedKmh = round(kmh * 10) / 10;
     self.draftRecordedPace = NO;
     LSHapticSelection();
-    NSString *message = [NSString stringWithFormat:@"Speed set to %@ km/h to finish in %@.", LSFormatDecimal(self.draftSpeedKmh, 1), LSDuration(seconds)];
+    NSString *message = [NSString stringWithFormat:own ? @"Route speed set to %@ km/h to finish in %@. Legs with their own speed keep it."
+                                                       : @"Speed set to %@ km/h to finish in %@.", LSFormatDecimal(self.draftSpeedKmh, 1), LSDuration(seconds)];
     [self setRouteFeedback:message tone:LSRouteToneSuccess];
     [self optionsChanged:message];
     LSAnnounce(message);
@@ -2357,11 +2821,26 @@ static LSRoute *LSRouteFromTrackFile(NSURL *url, LSTrack **trackOut, NSString **
 
 #pragma mark - Share and export
 
+// A map link carries one mode for the whole trip, so it takes the first leg's.
 - (NSString *)linkMode {
-    if (LSModeForSpeed(self.draftSpeedKmh) == LSTransportModeCycling) return @"cycling";
-    MKDirectionsTransportType type = self.fetchedRoute ? self.fetchedRoute.transportType
-        : (self.profileSegment.selectedSegmentIndex == 1 ? MKDirectionsTransportTypeAutomobile : MKDirectionsTransportTypeWalking);
+    return [self linkModeForLeg:0];
+}
+
+- (NSString *)linkModeForLeg:(NSUInteger)leg {
+    BOOL known = leg < [self legDepartures].count;
+    if (LSModeForSpeed(known ? [self speedForLeg:leg] : self.draftSpeedKmh) == LSTransportModeCycling) return @"cycling";
+    MKDirectionsTransportType type = known ? [self pathTypeForLeg:leg] : (self.fetchedRoute ? self.fetchedRoute.transportType : [self routePathType]);
     return type == MKDirectionsTransportTypeWalking ? @"walking" : @"driving";
+}
+
+// "Walks the whole way, like the first leg" when the legs are travelled differently, else nil.
+- (nullable NSString *)linkModeNote {
+    NSString *first = [self linkMode];
+    BOOL mixed = NO;
+    for (NSUInteger leg = 1; leg < [self legDepartures].count; leg++) mixed = mixed || ![[self linkModeForLeg:leg] isEqualToString:first];
+    if (!mixed) return nil;
+    NSString *verb = [first isEqualToString:@"walking"] ? @"Walks" : ([first isEqualToString:@"cycling"] ? @"Cycles" : @"Drives");
+    return [NSString stringWithFormat:@"%@ the whole way, like the first leg", verb];
 }
 
 - (NSArray<LSMapLinkPlace *> *)linkPlaces {
@@ -2381,6 +2860,7 @@ static LSRoute *LSRouteFromTrackFile(NSURL *url, LSTrack **trackOut, NSString **
     BOOL modernApple = [NSProcessInfo.processInfo isOperatingSystemAtLeastVersion:(NSOperatingSystemVersion){18, 4, 0}];
     BOOL legacyApple = !modernApple && places.count <= 2;
     NSMutableArray *links = [NSMutableArray array];
+    NSString *modeNote = [self linkModeNote];
     NSArray *apps = @[@(LSMapAppApple), @(LSMapAppGoogle), @(LSMapAppWaze)];
     NSArray *titles = @[@"Apple Maps link", @"Google Maps link", @"Waze link"];
     NSArray *symbols = @[@"map", @"globe", @"car"];
@@ -2392,8 +2872,15 @@ static LSRoute *LSRouteFromTrackFile(NSURL *url, LSTrack **trackOut, NSString **
             NSURL *url = [LSMapLinks URLForApp:app places:[self linkPlaces] mode:[self linkMode] legacyApple:legacyApple];
             if (url) [self presentShareItems:@[url] from:self.shareButton];
         }];
-        if (app == LSMapAppWaze) action.subtitle = @"Destination only; Waze starts where you are";
-        else if (places.count > limit) action.subtitle = [NSString stringWithFormat:@"Keeps the first %lu stops", (unsigned long)(limit - 2)];
+        if (app == LSMapAppWaze) {
+            action.subtitle = @"Destination only; Waze starts where you are";
+        } else {
+            // Apple and Google links have one mode; Waze always drives.
+            NSMutableArray<NSString *> *notes = [NSMutableArray array];
+            if (places.count > limit) [notes addObject:[NSString stringWithFormat:@"Keeps the first %lu stops", (unsigned long)(limit - 2)]];
+            if (modeNote) [notes addObject:modeNote];
+            if (notes.count) action.subtitle = [notes componentsJoinedByString:@". "];
+        }
         [links addObject:action];
     }
     UIMenu *linkMenu = [UIMenu menuWithTitle:@"" image:nil identifier:nil options:UIMenuOptionsDisplayInline children:links];
@@ -2778,6 +3265,11 @@ static LSRoute *LSRouteFromTrackFile(NSURL *url, LSTrack **trackOut, NSString **
     self.recordedChip.accessibilityLabel = @"Recorded pace";
     self.recordedChip.accessibilityValue = scaled ? [NSString stringWithFormat:@"%@ times the recorded speed", LSFormatDecimal(self.draftPaceMultiplier, 2)] : @"As recorded";
 
+    // Leg rows appear once From, a stop and To are set, and follow the route speed.
+    NSUInteger legRows = [self showsLegRows] ? [self legDepartures].count : 0;
+    if (self.routeLegButtons.count != legRows) [self rebuildStopRows];
+    else [self refreshLegRows];
+
     PersistenceManager *store = PersistenceManager.shared;
     NSArray *profiles = @[@"Gentle", @"Normal", @"Sporty"];
     LSSetChipTitle(self.motionButton, store.smoothMotion ? [NSString stringWithFormat:@"Smooth · %@", profiles[MAX(0, MIN(2, store.accelerationProfile))]] : @"Steady speed");
@@ -2809,7 +3301,7 @@ static LSRoute *LSRouteFromTrackFile(NSURL *url, LSTrack **trackOut, NSString **
     self.buildRouteButton.accessibilityLabel = build.title;
     self.buildRouteButton.hidden = !both || route != nil;
     self.buildRouteButton.enabled = both && !busy;
-    BOOL driving = self.profileSegment.selectedSegmentIndex == 1;
+    BOOL driving = [self failedPathType] == MKDirectionsTransportTypeAutomobile;
     UIButtonConfiguration *other = self.routeRecoveryButton.configuration;
     other.title = driving ? @"Try the walking path" : @"Try the driving path";
     other.image = [UIImage systemImageNamed:driving ? @"figure.walk" : @"car.fill"];
@@ -2829,10 +3321,28 @@ static LSRoute *LSRouteFromTrackFile(NSURL *url, LSTrack **trackOut, NSString **
         [stops setValue:[NSString stringWithFormat:@"%lu", (unsigned long)count] caption:count == 1 ? @"stop" : @"stops" spoken:nil];
         stops.superview.hidden = count == 0;
         PersistenceManager *store = PersistenceManager.shared;
-        NSString *path = route.fromTrack ? @"Recorded track" : (route.transportType == MKDirectionsTransportTypeAutomobile ? @"Driving path" : @"Walking path");
+        NSString *path = route.fromTrack ? @"Recorded track" : LSPathName(route.transportType);
         NSString *pace = options.recordedPace
             ? (fabs(options.paceMultiplier - 1) > 0.01 ? [NSString stringWithFormat:@"recorded pace ×%@", LSFormatDecimal(options.paceMultiplier, 2)] : @"recorded pace")
             : [NSString stringWithFormat:@"at %@", LSSpeedText(self.draftSpeedKmh)];
+        if (!route.fromTrack && route.hasLegSettings) {
+            // "Driving and walking paths · at 50 and 5 km/h": each kind once, in the order driven.
+            NSMutableArray<NSString *> *paths = [NSMutableArray array], *speeds = [NSMutableArray array];
+            for (LSRouteLeg *leg in route.legs) {
+                NSString *kind = leg.transportType == MKDirectionsTransportTypeAutomobile ? @"driving" : @"walking";
+                if (![paths containsObject:kind]) [paths addObject:kind];
+                double kmh = leg.hasOwnSpeed ? leg.speedKmh : self.draftSpeedKmh;
+                NSString *speed = LSFormatDecimal(kmh, kmh < 10 ? 1 : 0);
+                if (![speeds containsObject:speed]) [speeds addObject:speed];
+            }
+            NSString *joined = [NSListFormatter localizedStringByJoiningStrings:paths];
+            if (paths.count > 1 && joined.length) {
+                path = [NSString stringWithFormat:@"%@%@ paths", [joined substringToIndex:1].uppercaseString, [joined substringFromIndex:1]];
+            } else {
+                path = LSPathName(route.legs.firstObject.transportType);
+            }
+            pace = [NSString stringWithFormat:@"at %@ km/h", [NSListFormatter localizedStringByJoiningStrings:speeds]];
+        }
         NSString *motion = options.recordedPace ? nil : (store.smoothMotion ? @"smooth motion" : @"steady speed");
         NSMutableArray *parts = [NSMutableArray arrayWithObjects:path, pace, nil];
         if (motion) [parts addObject:motion];
@@ -2927,13 +3437,16 @@ static LSRoute *LSRouteFromTrackFile(NSURL *url, LSTrack **trackOut, NSString **
 #pragma mark - Playback
 
 - (void)nudge:(NSInteger)direction {
+    // On a leg with its own speed the step changes that leg, which swaps the playing route.
+    BOOL playingDraft = [self isPlayingDraft];
     if (![LSSessionController.shared nudgeSpeed:direction]) {
         LSHapticWarning();
         LSAnnounce(direction > 0 ? @"Already at the fastest speed." : @"Already at the slowest speed.");
         return;
     }
     LSHapticSelection();
-    if ([self isPlayingDraft]) {
+    if (playingDraft) {
+        [self followPlayingRoute];
         LSPlaybackOptions *options = LSRouteSimulator.shared.options;
         self.draftRecordedPace = options.recordedPace;
         self.draftPaceMultiplier = options.paceMultiplier;
@@ -3129,12 +3642,15 @@ static LSRoute *LSRouteFromTrackFile(NSURL *url, LSTrack **trackOut, NSString **
 
         LSPlaybackOptions *options = engine.options;
         BOOL recorded = options.recordedPace && route.hasTiming;
+        // The speed set for the leg being played: its own, or the route's. Slower and Faster step it.
+        double set = engine.setSpeedKmh;
+        BOOL legOwn = !recorded && engine.currentLegHasOwnSpeed;
         LSSetText(gauge.speedLabel, recorded ? [NSString stringWithFormat:@"Recorded pace ×%@", LSFormatDecimal(options.paceMultiplier, 2)]
-                                             : [NSString stringWithFormat:@"Set to %@", LSSpeedText(options.speedKmh)]);
-        gauge.speedLabel.accessibilityLabel = @"Playback speed";
-        gauge.speedLabel.accessibilityValue = recorded ? [NSString stringWithFormat:@"%@ times the recorded pace", LSFormatDecimal(options.paceMultiplier, 2)] : LSSpokenSpeed(options.speedKmh);
-        BOOL fastest = recorded ? options.paceMultiplier >= kLSFastestPace - 0.001 : options.speedKmh >= kLSFastestKmh - 0.01;
-        BOOL slowest = recorded ? options.paceMultiplier <= kLSSlowestPace + 0.001 : options.speedKmh <= kLSSlowestKmh + 0.01;
+                                             : [NSString stringWithFormat:legOwn ? @"Set to %@ on this leg" : @"Set to %@", LSSpeedText(set)]);
+        gauge.speedLabel.accessibilityLabel = legOwn ? @"Speed on this leg" : @"Playback speed";
+        gauge.speedLabel.accessibilityValue = recorded ? [NSString stringWithFormat:@"%@ times the recorded pace", LSFormatDecimal(options.paceMultiplier, 2)] : LSSpokenSpeed(set);
+        BOOL fastest = recorded ? options.paceMultiplier >= kLSFastestPace - 0.001 : set >= kLSFastestKmh - 0.01;
+        BOOL slowest = recorded ? options.paceMultiplier <= kLSSlowestPace + 0.001 : set <= kLSSlowestKmh + 0.01;
         if (gauge.fasterButton.enabled == fastest) gauge.fasterButton.enabled = !fastest;
         if (gauge.slowerButton.enabled == slowest) gauge.slowerButton.enabled = !slowest;
         gauge.fasterButton.accessibilityValue = fastest ? @"Fastest speed" : nil;
@@ -3260,8 +3776,9 @@ static LSRoute *LSRouteFromTrackFile(NSURL *url, LSTrack **trackOut, NSString **
     view.titleVisibility = MKFeatureVisibilityAdaptive;
     view.subtitleVisibility = MKFeatureVisibilityHidden;
     if ([annotation isKindOfClass:LSStartAnnotation.class]) {
-        // From shows how the trip is played: on foot, by bike or by car.
-        NSString *activity = LSActivityForKmh(self.draftSpeedKmh);
+        // From shows how the trip (its first leg) is played: on foot, by bike or by car.
+        LSLegChoice *first = self.endPin ? objc_getAssociatedObject(annotation, &ls_legChoiceKey) : nil;
+        NSString *activity = LSActivityForKmh(isfinite(first.speedKmh) && first ? first.speedKmh : self.draftSpeedKmh);
         NSString *glyph = [activity isEqualToString:@"walking"] ? @"figure.walk" : ([activity isEqualToString:@"cycling"] ? @"bicycle" : @"car.fill");
         view.markerTintColor = LSFillColor(LSSuccessColor());
         view.glyphText = nil;

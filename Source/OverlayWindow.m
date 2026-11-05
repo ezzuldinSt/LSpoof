@@ -114,7 +114,7 @@ static NSString *LSOpenerSpeedText(void) {
     LSPlaybackOptions *options = engine.options;
     return options.recordedPace && engine.route.hasTiming
         ? [NSString stringWithFormat:@"Recorded pace ×%@", LSFormatDecimal(options.paceMultiplier, 2)]
-        : [NSString stringWithFormat:@"%@ km/h", LSFormatDecimal(options.speedKmh, 0)];
+        : [NSString stringWithFormat:@"%@ km/h", LSFormatDecimal(engine.setSpeedKmh, 0)];
 }
 static NSString * _Nullable LSOpenerDuration(NSTimeInterval seconds, BOOL spoken) {
     if (!isfinite(seconds) || seconds <= 0) return nil;
