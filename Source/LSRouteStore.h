@@ -17,6 +17,7 @@ NS_ASSUME_NONNULL_BEGIN
 // Loads the file if it exists; unreadable entries are skipped.
 - (instancetype)initWithFileURL:(NSURL *)fileURL;
 - (NSArray<LSRouteArchive *> *)allRoutes;
+- (NSUInteger)count;
 - (nullable LSRouteArchive *)routeWithID:(NSString *)identifier;
 // No eviction. NO means invalid input, an identifier already saved, or the capacity was reached.
 - (BOOL)addRoute:(LSRouteArchive *)route;

@@ -66,6 +66,10 @@ static const NSInteger kLSRouteStoreVersion = 1;
     }
 }
 
+- (NSUInteger)count {
+    @synchronized(self) { return _routes.count; }
+}
+
 - (LSRouteArchive *)routeWithID:(NSString *)identifier {
     if (![identifier isKindOfClass:NSString.class]) return nil;
     @synchronized(self) {

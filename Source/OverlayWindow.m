@@ -1265,6 +1265,13 @@ static UIBezierPath *LSHintBubblePath(CGRect body, CGFloat r, BOOL tailOnRight, 
         [sections addObject:section(@"", @[open, tuck])];
     } else {
         NSMutableArray<UIMenuElement *> *first = [NSMutableArray array];
+        // A route that stopped part-way, after a relaunch or Stop and hold (#20).
+        LSResumeOffer *offer = LSSessionController.shared.resumeOffer;
+        if (offer) {
+            UIAction *resume = [UIAction actionWithTitle:@"Resume route" image:[UIImage systemImageNamed:@"play.fill"] identifier:nil handler:^(__unused UIAction *action) { [weakSelf resumeStoppedRoute]; }];
+            resume.subtitle = LSResumeSummary(offer, NO);
+            [first addObject:resume];
+        }
         if (mode == LSSessionModeOff && PersistenceManager.shared.hasStoredCoordinate) {
             UIAction *apply = [UIAction actionWithTitle:@"Apply last location" image:[UIImage systemImageNamed:@"clock.arrow.circlepath"] identifier:nil handler:^(__unused UIAction *action) { [weakSelf applyLastLocation]; }];
             apply.subtitle = LSCoordinateText(PersistenceManager.shared.spoofCoordinate);
@@ -1313,6 +1320,10 @@ static UIBezierPath *LSHintBubblePath(CGRect body, CGFloat r, BOOL tailOnRight, 
     [LSSessionController.shared stopAndHold];
     LSHapticSuccess();
 }
+- (void)resumeStoppedRoute {
+    if ([LSSessionController.shared resumeRoute]) LSHapticSuccess();
+    else { LSHapticError(); LSOpenerAnnounce(@"Couldn't resume the route"); }
+}
 - (void)applyLastLocation {
     if (!PersistenceManager.shared.hasStoredCoordinate) return;
     if ([LSSessionController.shared applyStaticCoordinate:PersistenceManager.shared.spoofCoordinate]) LSHapticSuccess();
@@ -1342,6 +1353,8 @@ static UIBezierPath *LSHintBubblePath(CGRect body, CGFloat r, BOOL tailOnRight, 
         add(@"Stop and hold here", @"stop.fill", ^{ [weakSelf stopAndHold]; });
     } else if (mode == LSSessionModeOff && PersistenceManager.shared.hasStoredCoordinate) {
         add(@"Apply last location", @"clock.arrow.circlepath", ^{ [weakSelf applyLastLocation]; });
+    } else if (LSSessionController.shared.resumeOffer) {
+        add(@"Resume route", @"play.fill", ^{ [weakSelf resumeStoppedRoute]; });
     }
     if (mode != LSSessionModeOff) add(@"Turn off", @"power", ^{ [weakSelf turnOff]; });
     BOOL right = self.right;

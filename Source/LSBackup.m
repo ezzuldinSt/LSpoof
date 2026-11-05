@@ -3,10 +3,11 @@
 #import "PersistenceManager.h"
 #import "LSSettings.h"
 #import "SessionController.h"
+#import "LSRouteStore.h"
 
 static NSString * const kLSBackupFormat = @"lspoof-backup";
 static const NSInteger kLSBackupVersion = 1;
-static const NSUInteger kLSBackupMaximumBytes = 2 * 1024 * 1024;
+static const NSUInteger kLSBackupMaximumBytes = 32 * 1024 * 1024;
 
 @implementation LSBackupSummary
 @end
@@ -17,6 +18,8 @@ static id LSNumber(NSDictionary *dictionary, NSString *key) {
 }
 
 @implementation LSBackup
+
++ (NSUInteger)maximumBytes { return kLSBackupMaximumBytes; }
 
 + (NSUserDefaults *)defaults { return [[NSUserDefaults alloc] initWithSuiteName:@"com.locationspoofer.dylib"]; }
 
@@ -44,6 +47,9 @@ static id LSNumber(NSDictionary *dictionary, NSString *key) {
                       @"continueInBackground":@(settings.continueInBackground)},
         @"playback":@{@"smoothMotion":@(store.smoothMotion), @"accelerationProfile":@(store.accelerationProfile), @"stopDwell":@(store.stopDwell)},
         @"places":places, @"recents":recents} mutableCopy];
+    NSMutableArray *routes = [NSMutableArray array];
+    for (LSRouteArchive *route in LSRouteStore.shared.allRoutes) [routes addObject:route.dictionaryRepresentation];
+    backup[@"routes"] = routes;
     NSUserDefaults *defaults = [self defaults];
     id side = [defaults objectForKey:@"LSOpenerSide"], y = [defaults objectForKey:@"LSOpenerY"];
     if ([side isKindOfClass:NSNumber.class] && [y isKindOfClass:NSNumber.class] && isfinite([y doubleValue])) backup[@"opener"] = @{@"right":side, @"y":y};
@@ -95,6 +101,18 @@ static id LSNumber(NSDictionary *dictionary, NSString *key) {
     return places;
 }
 
+// Entries that don't decode, or come from a newer route format, are left out.
++ (NSArray<LSRouteArchive *> *)routesFrom:(NSDictionary *)backup {
+    NSMutableArray<LSRouteArchive *> *routes = [NSMutableArray array];
+    id entries = backup[@"routes"];
+    for (id entry in [entries isKindOfClass:NSArray.class] ? entries : @[]) {
+        LSRouteArchive *route = [LSRouteArchive archiveFromDictionary:entry error:NULL];
+        if (route.isValid) [routes addObject:route];
+        if (routes.count >= LSRouteStore.capacity) break;
+    }
+    return routes;
+}
+
 + (NSArray<NSDictionary *> *)recentsFrom:(NSDictionary *)backup {
     NSMutableArray *recents = [NSMutableArray array];
     id entries = backup[@"recents"];
@@ -112,6 +130,8 @@ static id LSNumber(NSDictionary *dictionary, NSString *key) {
     if (!backup) return nil;
     LSBackupSummary *summary = [[LSBackupSummary alloc] init];
     summary.placeCount = [self placesFrom:backup].count;
+    summary.routeCount = [self routesFrom:backup].count;
+    summary.hasRoutes = [backup[@"routes"] isKindOfClass:NSArray.class];
     summary.recentCount = [self recentsFrom:backup].count;
     summary.hasSettings = [backup[@"settings"] isKindOfClass:NSDictionary.class];
     id exported = backup[@"exportedAt"];
@@ -147,6 +167,9 @@ static id LSNumber(NSDictionary *dictionary, NSString *key) {
         if (LSNumber(playback, @"stopDwell")) store.stopDwell = [playback[@"stopDwell"] doubleValue];
     }
     summary.placeCount = [BookmarksManager.shared importBookmarks:[self placesFrom:backup] replace:replace];
+    // A backup from before saved routes has no list, and leaves them as they are.
+    summary.hasRoutes = [backup[@"routes"] isKindOfClass:NSArray.class];
+    if (summary.hasRoutes) summary.routeCount = [LSRouteStore.shared importRoutes:[self routesFrom:backup] replace:replace];
     NSArray *recents = [self recentsFrom:backup];
     if (recents.count || replace) {
         NSMutableArray *merged = [recents mutableCopy];
