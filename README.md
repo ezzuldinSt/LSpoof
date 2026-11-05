@@ -578,7 +578,6 @@ The release build is `.theos/obj/LocationSpoofer.dylib` (optimized, stripped and
   ```
 - **CI:** the GitHub Actions workflow in [`.github/workflows/build.yml`](.github/workflows/build.yml) is set up to run the tests and the same release build on pushes to `main`, pull requests and `v*` tags, and to attach **LocationSpoofer.dylib** and **SHA256SUMS** to each run.
 - **Toolchain:** the SDK is pinned to iPhoneOS **16.5**, with an iOS **16.0** deployment target, `arm64` and ARC. The Linux build is verified with Theos revision `dd5c14bb9d91311e221d51b5bfb8c9e5948156db` and the official Linux Clang 11.1.0 toolchain.
-- **README art:** the banner, diagram and guides in [`assets/readme`](assets/readme) are generated from the screenshots in `assets/readme/screens`. After changing either, run `python assets/readme/build.py`.
 
 </details>
 
