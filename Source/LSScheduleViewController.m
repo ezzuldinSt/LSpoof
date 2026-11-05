@@ -193,6 +193,7 @@ static UIView *LSScheduleBullet(NSString *symbol, NSString *text) {
 static UIButton *LSScheduleChip(NSString *title, NSString *spoken) {
     UIButton *chip = LSChipButton(title, nil);
     chip.accessibilityLabel = spoken;
+    LSSetChipOneLine(chip);
     return chip;
 }
 // Chips scroll sideways instead of wrapping, so large text never pushes them off screen.

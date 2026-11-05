@@ -36,6 +36,11 @@ FOUNDATION_EXPORT UIButton *LSChipButton(NSString *title, NSString * _Nullable s
 // Selected chips are filled and bold, and show a checkmark when they have no symbol (or when
 // Differentiate Without Color is on) plus an outline ring with Differentiate Without Color or
 // Increase Contrast, so selection never relies on colour alone.
+// Chip titles stay on one line except at accessibility sizes. LSSetChipOneLine: never wraps
+// and never shrinks below its title, for rows that scroll sideways. LSSetChipWraps: always may
+// wrap, only for chips whose row sets their width (fill or fill-equally rows).
+FOUNDATION_EXPORT void LSSetChipOneLine(UIButton *chip);
+FOUNDATION_EXPORT void LSSetChipWraps(UIButton *chip);
 FOUNDATION_EXPORT void LSSetChipSelected(UIButton *chip, BOOL selected);
 // Symbol colour of an idle (unselected, enabled) chip; nil restores the accent. Selected chips
 // show white symbols. An imageColorTransformer the caller sets on the configuration also wins.

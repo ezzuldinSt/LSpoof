@@ -376,7 +376,7 @@ UIButton *LSIconButton(NSString *symbol, NSString *accessibilityLabel) {
     return button;
 }
 
-static char ls_chipSelectedKey, ls_chipCheckKey, ls_chipOriginalImageKey, ls_chipIconColorKey, ls_chipShownIconKey;
+static char ls_chipSelectedKey, ls_chipCheckKey, ls_chipOriginalImageKey, ls_chipIconColorKey, ls_chipShownIconKey, ls_chipLinesKey;
 void LSSetChipIconColor(UIButton *chip, UIColor *color) {
     objc_setAssociatedObject(chip, &ls_chipIconColorKey, color, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     [chip setNeedsUpdateConfiguration];
@@ -406,7 +406,7 @@ UIButton *LSChipButton(NSString *title, NSString *symbol) {
     // Same fill as a deselected chip, so never-selected and deselected chips match.
     config.baseBackgroundColor = UIColor.tertiarySystemFillColor;
     config.contentInsets = NSDirectionalEdgeInsetsMake(10, 14, 10, 14);
-    config.titleLineBreakMode = NSLineBreakByWordWrapping;
+    config.titleLineBreakMode = NSLineBreakByTruncatingTail;
     config.titleTextAttributesTransformer = LSFontTransformer(UIFontTextStyleSubheadline, UIFontWeightSemibold, 28);
     LSStyleChipBackground(config, NO);
     UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -417,16 +417,24 @@ UIButton *LSChipButton(NSString *title, NSString *symbol) {
         UIButtonConfiguration *updated = chip.configuration;
         // Follows title changes made by callers; a configuration title is not currentTitle.
         chip.largeContentTitle = updated.title;
+        // One line unless the chip's row gives it a width. A chip whose title may wrap has no
+        // reliable width of its own: in a row that leaves it at its natural size it shrank to a
+        // 44 pt circle with its text spilling over its neighbours, or broke "Finish in…" across
+        // two lines. At accessibility sizes titles wrap, in rows that stack to full width.
+        NSInteger lines = [objc_getAssociatedObject(chip, &ls_chipLinesKey) integerValue];
+        BOOL wraps = lines == 2 || (lines == 0 && UIContentSizeCategoryIsAccessibilityCategory(chip.traitCollection.preferredContentSizeCategory));
+        updated.titleLineBreakMode = wraps ? NSLineBreakByWordWrapping : NSLineBreakByTruncatingTail;
         // A transformer the caller installed wins. Ours returns the exact colour object it last
         // installed, which a caller's transformer cannot.
         UIConfigurationColorTransformer current = updated.imageColorTransformer;
         UIColor *shown = objc_getAssociatedObject(chip, &ls_chipShownIconKey);
-        if (current && !(shown && current(UIColor.clearColor) == shown)) return;
-        BOOL selected = [objc_getAssociatedObject(chip, &ls_chipSelectedKey) boolValue];
-        UIColor *idle = objc_getAssociatedObject(chip, &ls_chipIconColorKey) ?: LSAccentTextColor();
-        UIColor *icon = !chip.enabled ? nil : (selected ? UIColor.whiteColor : idle);
-        updated.imageColorTransformer = icon ? ^UIColor *(__unused UIColor *color) { return icon; } : nil;
-        objc_setAssociatedObject(chip, &ls_chipShownIconKey, icon, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        if (!current || (shown && current(UIColor.clearColor) == shown)) {
+            BOOL selected = [objc_getAssociatedObject(chip, &ls_chipSelectedKey) boolValue];
+            UIColor *idle = objc_getAssociatedObject(chip, &ls_chipIconColorKey) ?: LSAccentTextColor();
+            UIColor *icon = !chip.enabled ? nil : (selected ? UIColor.whiteColor : idle);
+            updated.imageColorTransformer = icon ? ^UIColor *(__unused UIColor *color) { return icon; } : nil;
+            objc_setAssociatedObject(chip, &ls_chipShownIconKey, icon, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
         chip.configuration = updated;
     };
     button.translatesAutoresizingMaskIntoConstraints = NO;
@@ -436,6 +444,16 @@ UIButton *LSChipButton(NSString *title, NSString *symbol) {
     LSApplyMinimumSize(button, 44, 44);
     LSAddPressFeedback(button);
     return button;
+}
+void LSSetChipWraps(UIButton *chip) {
+    objc_setAssociatedObject(chip, &ls_chipLinesKey, @2, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    [chip setNeedsUpdateConfiguration];
+}
+void LSSetChipOneLine(UIButton *chip) {
+    objc_setAssociatedObject(chip, &ls_chipLinesKey, @1, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    [chip setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+    [chip setContentCompressionResistancePriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+    [chip setNeedsUpdateConfiguration];
 }
 void LSSetChipSelected(UIButton *chip, BOOL selected) {
     NSNumber *previous = objc_getAssociatedObject(chip, &ls_chipSelectedKey);
