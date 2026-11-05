@@ -4,6 +4,7 @@
 #import "SessionController.h"
 #import "OverlayWindow.h"
 #import "LSBackup.h"
+#import "LSRouteStore.h"
 #import "BookmarksManager.h"
 #import "PersistenceManager.h"
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
@@ -1122,10 +1123,10 @@ static UIView *LSSettingsSection(NSString *header, UIView *card, NSString *foote
     BOOL scoped = [url startAccessingSecurityScopedResource];
     NSNumber *size = nil;
     [url getResourceValue:&size forKey:NSURLFileSizeKey error:NULL];
-    NSData *data = size.unsignedLongLongValue <= 2 * 1024 * 1024 ? [NSData dataWithContentsOfURL:url] : nil;
+    NSData *data = size.unsignedLongLongValue <= LSBackup.maximumBytes ? [NSData dataWithContentsOfURL:url] : nil;
     if (scoped) [url stopAccessingSecurityScopedResource];
     if (!data) {
-        LSShowToast(self.view, size.unsignedLongLongValue > 2 * 1024 * 1024 ? @"That file is too large to be an LSpoof backup." : @"The file could not be read.", @"exclamationmark.triangle.fill");
+        LSShowToast(self.view, size.unsignedLongLongValue > LSBackup.maximumBytes ? @"That file is too large to be an LSpoof backup." : @"The file could not be read.", @"exclamationmark.triangle.fill");
         LSHapticWarning();
         return;
     }
@@ -1156,15 +1157,24 @@ static NSString *LSSettingsCount(NSUInteger count, NSString *one, NSString *many
     }
     NSMutableArray<NSString *> *parts = [NSMutableArray array];
     [parts addObject:LSSettingsCount(summary.placeCount, @"saved place", @"saved places")];
+    if (summary.routeCount) [parts addObject:LSSettingsCount(summary.routeCount, @"saved route", @"saved routes")];
     [parts addObject:LSSettingsCount(summary.recentCount, @"recent location", @"recent locations")];
     if (summary.hasSettings) [parts addObject:@"settings"];
     NSString *when = summary.exportedAt ? [NSString stringWithFormat:@" from %@", [NSDateFormatter localizedStringFromDate:summary.exportedAt dateStyle:NSDateFormatterMediumStyle timeStyle:NSDateFormatterShortStyle]] : @"";
     NSUInteger places = BookmarksManager.shared.allBookmarks.count, recents = PersistenceManager.shared.recentLocations.count;
+    // Routes are only replaced by a backup that has a routes list (#20).
+    NSUInteger routes = summary.hasRoutes ? LSRouteStore.shared.count : 0;
+    NSMutableArray<NSString *> *kept = [NSMutableArray array];
+    if (places) [kept addObject:LSSettingsCount(places, @"saved place", @"saved places")];
+    if (LSRouteStore.shared.count) [kept addObject:LSSettingsCount(LSRouteStore.shared.count, @"saved route", @"saved routes")];
+    NSMutableArray<NSString *> *replaced = [NSMutableArray arrayWithObject:LSSettingsCount(places, @"saved place", @"saved places")];
+    if (routes) [replaced addObject:LSSettingsCount(routes, @"saved route", @"saved routes")];
+    [replaced addObject:LSSettingsCount(recents, @"recent location", @"recent locations")];
     // Names what each choice does to what is on this device now.
-    NSString *mergeText = places ? [NSString stringWithFormat:@"Merge keeps your %@ and adds the ones you don’t have yet.", LSSettingsCount(places, @"saved place", @"saved places")]
+    NSString *mergeText = kept.count ? [NSString stringWithFormat:@"Merge keeps your %@ and adds the ones you don’t have yet.", [NSListFormatter localizedStringByJoiningStrings:kept]]
                              : @"Merge adds the backup’s places.";
-    NSString *replaceText = places || recents
-        ? [NSString stringWithFormat:@"Replace removes your %@ and %@ and uses the backup’s instead.", LSSettingsCount(places, @"saved place", @"saved places"), LSSettingsCount(recents, @"recent location", @"recent locations")]
+    NSString *replaceText = places || recents || routes
+        ? [NSString stringWithFormat:@"Replace removes your %@ and uses the backup’s instead.", [NSListFormatter localizedStringByJoiningStrings:replaced]]
         : @"Replace uses the backup’s places and recents.";
     NSMutableString *message = [NSMutableString stringWithFormat:@"This backup%@ has %@.\n\n%@\n%@\nSettings are restored either way.",
                                 when, [NSListFormatter localizedStringByJoiningStrings:parts], mergeText, replaceText];
@@ -1190,7 +1200,9 @@ static NSString *LSSettingsCount(NSUInteger count, NSString *one, NSString *many
     // The stored settings changed underneath this screen's edits, so it closes.
     [LSOverlayManager refreshOpeners];
     LSHapticSuccess();
-    NSString *message = [NSString stringWithFormat:@"Backup restored: %@ added.", LSSettingsCount(result.placeCount, @"place", @"places")];
+    NSMutableArray<NSString *> *added = [NSMutableArray arrayWithObject:LSSettingsCount(result.placeCount, @"place", @"places")];
+    if (result.routeCount) [added addObject:LSSettingsCount(result.routeCount, @"route", @"routes")];
+    NSString *message = [NSString stringWithFormat:@"Backup restored: %@ added.", [NSListFormatter localizedStringByJoiningStrings:added]];
     void (^done)(NSString *) = self.didRestore;
     [self dismissViewControllerAnimated:LSMapAnimationsEnabled() completion:^{ if (done) done(message); }];
 }

@@ -1,8 +1,13 @@
 #import <Foundation/Foundation.h>
 #import <CoreLocation/CoreLocation.h>
 #import <MapKit/MapKit.h>
+#import "LSRouteArchive.h"
 
 NS_ASSUME_NONNULL_BEGIN
+
+// The route archive's path names: "driving", "walking", "transit". Unknown names use fallback.
+FOUNDATION_EXPORT NSString *LSArchivePathForTransportType(MKDirectionsTransportType type);
+FOUNDATION_EXPORT MKDirectionsTransportType LSTransportTypeForArchivePath(NSString * _Nullable path, MKDirectionsTransportType fallback);
 
 // A named point the route passes through: From, a stop, or To.
 @interface LSRouteWaypoint : NSObject <NSCopying>
@@ -87,6 +92,11 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (NSDictionary *)dictionaryRepresentation;
 + (nullable instancetype)routeFromDictionary:(id)dictionary;
+// The versioned form used to resume after a relaunch, for saved routes and in backups, with
+// each leg's path and speed. The archive gets a new identifier and no playback; set those as needed.
+- (LSRouteArchive *)archive;
+// nil when the archive has no usable path (a planned route can then be looked up again from its places).
++ (nullable instancetype)routeWithArchive:(LSRouteArchive *)archive;
 
 // Recorded speed (m/s) of the segment ending at each point, or nil without timing.
 - (nullable NSData *)recordedSegmentSpeeds;

@@ -36,6 +36,9 @@ typedef NS_ENUM(NSInteger, LSAccelerationProfile) {
 // Property list form, used to keep a scheduled route's options.
 - (NSDictionary *)dictionaryRepresentation;
 + (nullable instancetype)optionsFromDictionary:(nullable id)dictionary;
+// The form kept with a saved route and with the checkpoint of a playing one.
+- (LSRoutePlayback *)playback;
++ (nullable instancetype)optionsWithPlayback:(nullable LSRoutePlayback *)playback;
 @end
 
 @class LSRouteSimulator;
@@ -76,11 +79,16 @@ typedef NS_ENUM(NSInteger, LSAccelerationProfile) {
 @property (nonatomic, readonly) CLLocationCoordinate2D startCoordinate;
 @property (nonatomic, readonly) CLLocationCoordinate2D destinationCoordinate;
 @property (nonatomic, readonly) NSUInteger plannedStopsReached;
+// Index of the next stop or pause along the path, for the resume checkpoint.
+@property (nonatomic, readonly) NSUInteger nextStopIndex;
 
 - (BOOL)startWithRoute:(LSRoute *)route;
 // Swaps in a route with the same path (LSRoute hasSamePathAs:), e.g. new leg speeds, and
 // carries on from where playback is. NO when nothing plays or the path differs.
 - (BOOL)replaceRouteKeepingProgress:(LSRoute *)route;
+// Starts part-way, `covered` meters along, as a relaunch resumes a route. With wait > 0 and a
+// stop at that spot, it first waits there for the rest of its time. NO when nothing is left.
+- (BOOL)startWithRoute:(LSRoute *)route covered:(double)covered waitRemaining:(NSTimeInterval)wait;
 - (void)pause;
 - (void)resume;
 - (void)stop;
@@ -90,6 +98,9 @@ typedef NS_ENUM(NSInteger, LSAccelerationProfile) {
 + (double)speedMetersPerSecondForMode:(LSTransportMode)mode customSpeedKmh:(double)customSpeedKmh;
 + (double)horizontalAccuracyForMode:(LSTransportMode)mode;
 + (NSTimeInterval)estimatedDurationForRoute:(LSRoute *)route options:(LSPlaybackOptions *)options;
+// Seconds left from `covered` meters along, including the rest of a wait there.
++ (NSTimeInterval)remainingTimeForRoute:(LSRoute *)route options:(LSPlaybackOptions *)options
+                                covered:(double)covered waitRemaining:(NSTimeInterval)wait;
 // The custom speed (km/h) that makes the trip take `seconds`, or NAN when 1–500 km/h cannot.
 // Legs with their own speed keep it; only the others change.
 + (double)speedKmhForRoute:(LSRoute *)route options:(LSPlaybackOptions *)options finishingIn:(NSTimeInterval)seconds;

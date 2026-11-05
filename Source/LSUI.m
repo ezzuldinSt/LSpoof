@@ -1540,6 +1540,38 @@ NSString *LSRelativeDate(NSDate *date) {
     return [formatter localizedStringForDate:date relativeToDate:NSDate.date];
 }
 
+NSString *LSResumeSummary(LSResumeOffer *offer, BOOL spoken) {
+    // Made once: the floating button's menu builds this each time it opens.
+    static MKDistanceFormatter *shortDistance, *spokenDistance;
+    static NSDateComponentsFormatter *shortTime, *spokenTime;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        shortDistance = [[MKDistanceFormatter alloc] init];
+        shortDistance.unitStyle = MKDistanceFormatterUnitStyleAbbreviated;
+        spokenDistance = [[MKDistanceFormatter alloc] init];
+        spokenDistance.unitStyle = MKDistanceFormatterUnitStyleFull;
+        shortTime = [[NSDateComponentsFormatter alloc] init];
+        spokenTime = [[NSDateComponentsFormatter alloc] init];
+        for (NSDateComponentsFormatter *formatter in @[shortTime, spokenTime]) {
+            formatter.allowedUnits = NSCalendarUnitHour | NSCalendarUnitMinute;
+            formatter.maximumUnitCount = 2;
+        }
+        shortTime.unitsStyle = NSDateComponentsFormatterUnitsStyleAbbreviated;
+        spokenTime.unitsStyle = NSDateComponentsFormatterUnitsStyleFull;
+    });
+    if (!offer) return @"";
+    NSString *along = [spoken ? spokenDistance : shortDistance stringFromDistance:MAX(0, offer.covered)];
+    NSTimeInterval seconds = offer.remainingTime;
+    NSString *left;
+    if (isfinite(seconds) && seconds > 0) {
+        NSString *time = seconds < 60 ? (spoken ? @"under a minute" : @"under 1 min") : [spoken ? spokenTime : shortTime stringFromTimeInterval:seconds];
+        left = [NSString stringWithFormat:@"%@ left", time];
+    } else {
+        left = [NSString stringWithFormat:@"%@ to go", [spoken ? spokenDistance : shortDistance stringFromDistance:offer.remainingDistance]];
+    }
+    return [NSString stringWithFormat:spoken ? @"From about %@ along, %@" : @"From about %@ · %@", along, left];
+}
+
 // MARK: - Empty states and tips
 
 @interface LSCircleView : UIView

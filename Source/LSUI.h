@@ -80,6 +80,9 @@ FOUNDATION_EXPORT BOOL LSParseCoordinatePair(NSString * _Nullable text, CLLocati
 FOUNDATION_EXPORT NSString *LSFormatDecimal(double value, NSUInteger fractionDigits);
 FOUNDATION_EXPORT NSString *LSCoordinateText(CLLocationCoordinate2D coordinate);
 FOUNDATION_EXPORT NSString *LSRelativeDate(NSDate *date);
+@class LSResumeOffer;
+// "From about 3.2 km · 12 min left": where a stopped route would go on from (#20).
+FOUNDATION_EXPORT NSString *LSResumeSummary(LSResumeOffer *offer, BOOL spoken);
 
 // MARK: - Design foundation (shared by every screen)
 // Spacing and corner scale. Nested corners should be concentric: inner = outer - inset.

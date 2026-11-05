@@ -12,6 +12,8 @@ static void LSDylibInit(void) {
 
     dispatch_async(dispatch_get_main_queue(), ^{
         [LSOverlayManager install];
+        // Before the scheduler, which may start a route of its own.
+        [LSSessionController.shared restorePersistedRoute];
         [LSScheduler.shared activate];
     });
 }
