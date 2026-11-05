@@ -36,6 +36,16 @@ NS_ASSUME_NONNULL_BEGIN
 // Replaces the list with entries in the stored format (used by backup restore).
 - (void)replaceRecentLocations:(NSArray<NSDictionary *> *)entries;
 
+// The playing route, kept so a relaunch can offer to resume it (#20). Its path (an
+// LSRouteArchive dictionary) is written once per route to a file in Application Support, off the
+// main thread; the small checkpoint (an LSRouteCheckpoint dictionary) goes to the defaults every
+// few seconds. nil removes either.
+@property (nonatomic, copy, nullable) NSDictionary *routeCheckpoint;
+- (void)storeActiveRoute:(nullable NSDictionary *)archive;
+// Waits for pending writes, then reads the file. It can be large, so not on the main thread.
+- (nullable NSDictionary *)loadActiveRoute;
+- (void)clearActiveRoute;
+
 - (BOOL)setSpoofCoordinate:(CLLocationCoordinate2D)coordinate enabled:(BOOL)enabled;
 - (void)clearSpoof;
 - (void)clearLastSpoof;

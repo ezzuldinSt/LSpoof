@@ -20,6 +20,7 @@ static NSString * const kKeyAccelerationProfile = @"LSAccelerationProfile";
 static NSString * const kKeyStopDwell = @"LSStopDwell";
 static NSString * const kKeyContinueInBackground = @"LSContinueInBackground";
 static NSString * const kKeyActiveRadius = @"LSActiveRadius";
+static NSString * const kKeyRouteCheckpoint = @"LSRouteCheckpoint";
 static NSString * const kRecentLatitudeKey = @"LSRecentLat";
 static NSString * const kRecentLongitudeKey = @"LSRecentLon";
 static NSString * const kRecentNameKey = @"LSRecentName";
@@ -48,6 +49,8 @@ static const NSUInteger kLSMaxRecentLocations = 5;
 @property (nonatomic, assign) double cachedActiveRadius;
 @property (nonatomic, strong) NSMutableArray<NSDictionary *> *cachedRecents;
 @property (nonatomic, assign) BOOL recentsLoaded;
+@property (nonatomic, strong) dispatch_queue_t routeQueue;
+@property (nonatomic, strong) NSURL *activeRouteURL;
 @end
 
 @implementation PersistenceManager
@@ -82,6 +85,9 @@ static const NSUInteger kLSMaxRecentLocations = 5;
         _cachedAccelerationProfile = 1;
         _cachedActiveRadius = NAN;
         _cachedRecents = [NSMutableArray array];
+        _routeQueue = dispatch_queue_create("com.locationspoofer.active-route", DISPATCH_QUEUE_SERIAL);
+        NSString *support = NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES).firstObject ?: NSTemporaryDirectory();
+        _activeRouteURL = [NSURL fileURLWithPath:[[support stringByAppendingPathComponent:@"LSpoof"] stringByAppendingPathComponent:@"ActiveRoute.json"]];
     }
     return self;
 }
@@ -441,6 +447,47 @@ static const NSUInteger kLSMaxRecentLocations = 5;
     NSArray *payload = [self.cachedRecents copy];
     os_unfair_lock_unlock(&_lock);
     [self.defaults setObject:payload forKey:kKeyRecentLocations];
+}
+
+- (NSDictionary *)routeCheckpoint {
+    id value = [self.defaults objectForKey:kKeyRouteCheckpoint];
+    return [value isKindOfClass:NSDictionary.class] ? value : nil;
+}
+
+- (void)setRouteCheckpoint:(NSDictionary *)checkpoint {
+    if ([checkpoint isKindOfClass:NSDictionary.class]) [self.defaults setObject:checkpoint forKey:kKeyRouteCheckpoint];
+    else [self.defaults removeObjectForKey:kKeyRouteCheckpoint];
+}
+
+- (void)storeActiveRoute:(NSDictionary *)archive {
+    NSURL *url = self.activeRouteURL;
+    NSDictionary *payload = [archive isKindOfClass:NSDictionary.class] ? [archive copy] : nil;
+    dispatch_async(self.routeQueue, ^{
+        NSFileManager *files = NSFileManager.defaultManager;
+        NSData *data = payload ? [NSJSONSerialization dataWithJSONObject:payload options:0 error:NULL] : nil;
+        if (!data) { [files removeItemAtURL:url error:NULL]; return; }
+        [files createDirectoryAtURL:[url URLByDeletingLastPathComponent] withIntermediateDirectories:YES attributes:nil error:NULL];
+        // Readable after the first unlock, like the defaults, so a relaunch in the background can use it.
+        [data writeToURL:url options:NSDataWritingAtomic | NSDataWritingFileProtectionCompleteUntilFirstUserAuthentication error:NULL];
+    });
+}
+
+- (NSDictionary *)loadActiveRoute {
+    __block NSData *data = nil;
+    NSURL *url = self.activeRouteURL;
+    dispatch_sync(self.routeQueue, ^{
+        NSNumber *size = nil;
+        [url getResourceValue:&size forKey:NSURLFileSizeKey error:NULL];
+        // A route is at most 50,000 points, about 1 MB of text.
+        if (size && size.unsignedLongLongValue <= 8 * 1024 * 1024) data = [NSData dataWithContentsOfURL:url];
+    });
+    id object = data.length ? [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL] : nil;
+    return [object isKindOfClass:NSDictionary.class] ? object : nil;
+}
+
+- (void)clearActiveRoute {
+    self.routeCheckpoint = nil;
+    [self storeActiveRoute:nil];
 }
 
 - (BOOL)setSpoofCoordinate:(CLLocationCoordinate2D)coordinate enabled:(BOOL)enabled {
