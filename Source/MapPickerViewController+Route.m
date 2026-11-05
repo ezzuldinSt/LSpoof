@@ -1214,8 +1214,12 @@ static LSRoute *LSRouteFromTrackFile(NSURL *url, LSTrack **trackOut, NSString **
     self.waitButton = LSMenuChip(@"No wait at stops", @"hourglass");
     self.waitButton.accessibilityHint = @"How long to stay at each stop before moving on.";
     LSTraitStack *motionRow = LSRouteRow(@[self.motionButton, self.waitButton], 8, UIStackViewAlignmentCenter, UIContentSizeCategoryExtraExtraLarge);
+    // Two equal halves of the card, so a long choice ("No wait at stops") wraps in its half
+    // on a narrow card (the landscape side panel) instead of being cut off.
+    motionRow.distribution = UIStackViewDistributionFillEqually;
+    LSSetChipWraps(self.motionButton);
+    LSSetChipWraps(self.waitButton);
     UIStackView *motionWrap = LSStack(@[motionRow], 0);
-    motionWrap.alignment = UIStackViewAlignmentLeading;
     NSMutableArray<UIView *> *optionViews = [NSMutableArray array];
     if (!ls_routeExplained) {
         self.routeTip = LSTipView(@"lightbulb", @"Path and speed are separate",
