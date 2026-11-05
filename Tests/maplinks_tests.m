@@ -156,12 +156,33 @@ static void TestTextAndBuild(void) {
     CHECK([LSMapLinks URLForApp:LSMapAppGoogle places:@[] mode:nil legacyApple:NO] == nil, "no places, no link");
 }
 
+// Where resolving a short link may stop following redirects.
+static void TestResolving(void) {
+    // Where maps.app.goo.gl/EnxGXTs7ozbQVjMj6?g_st=ic redirects (#20): an address and a feature id, no coordinate.
+    NSURL *yankee = [NSURL URLWithString:@"https://maps.google.com/?q=Yankee+Stadium,+1+E+161st+St,+Bronx,+NY+10451"
+                     @"&ftid=0x89c2f42c5ae76971:0x4940c3d9559a1e08&entry=gps&shh=CAE&lucs=,94297699,94231188"
+                     @"&g_ep=CAISEjI2LjQzLjEuMDAxOTUxMTAxMBgAIIgnKnssOTQyOTc2OTk&skid=e6176778-63d2-40cd-bf18-9e9fbe19ff96"];
+    LSMapLink *link = [LSMapLinks parseURL:yankee];
+    CHECK(link.places.count == 1 && !link.isDirections && Query(Place(link, 0), @"Yankee Stadium, 1 E 161st St, Bronx, NY 10451"),
+          "shared Google place redirect is an address search: %s", Place(link, 0).query.UTF8String);
+    CHECK([LSMapLinks resolvedLinkNamesPlace:yankee], "resolving stops at the shared place redirect");
+
+    CHECK(![LSMapLinks resolvedLinkNamesPlace:[NSURL URLWithString:@"https://maps.app.goo.gl/EnxGXTs7ozbQVjMj6?g_st=ic"]], "a short link keeps resolving");
+    CHECK(![LSMapLinks resolvedLinkNamesPlace:[NSURL URLWithString:@"https://maps.apple/p/7cKm2oGv0hH-5Z"]], "an Apple short link keeps resolving");
+    CHECK(![LSMapLinks resolvedLinkNamesPlace:[NSURL URLWithString:@"https://maps.apple.com/place?place-id=I1234"]], "a place id keeps resolving to its page");
+    CHECK(![LSMapLinks resolvedLinkNamesPlace:[NSURL URLWithString:@"https://www.google.com/sorry/index"]], "a page that isn't a map link keeps resolving");
+    CHECK(![LSMapLinks resolvedLinkNamesPlace:nil], "no URL");
+    NSURL *consent = [NSURL URLWithString:@"https://consent.google.com/m?continue=https://www.google.com/maps/place/Louvre/@48.86,2.33,15z&gl=FR"];
+    CHECK([LSMapLinks resolvedLinkNamesPlace:consent], "resolving stops at an EU consent page that wraps a place");
+}
+
 int main(void) {
     @autoreleasepool {
         TestGoogle();
         TestApple();
         TestWazeAndGeo();
         TestTextAndBuild();
+        TestResolving();
     }
     printf("maplinks_tests: %d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

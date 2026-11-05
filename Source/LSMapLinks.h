@@ -66,8 +66,11 @@ typedef NS_ENUM(NSInteger, LSMapApp) {
 + (NSUInteger)maximumPlacesForApp:(LSMapApp)app legacyApple:(BOOL)legacyApple;
 // Apple place pages name their coordinate in meta tags; used when a link only has a place id.
 + (nullable LSMapLinkPlace *)placeFromHTML:(NSString *)html;
+// A link reached while resolving that needs no further opening and names at least one place.
++ (BOOL)resolvedLinkNamesPlace:(nullable NSURL *)url;
 #ifndef GNUSTEP
-// Follows redirects. On main: the final URL, plus the page text when it is a small HTML page.
+// Follows redirects until a link names a place. On main: that link (or the final URL), plus
+// the page text when the final response is a small HTML page.
 + (void)resolveURL:(NSURL *)url completion:(void (^)(NSURL * _Nullable resolved, NSString * _Nullable html))completion;
 #endif
 @end
