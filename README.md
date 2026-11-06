@@ -4,15 +4,15 @@
 
 <br>
 
-<a href="https://github.com/ezzuldinSt/LSpoof/releases/latest"><img alt="Release 1.5.1" src="https://img.shields.io/badge/release-v1.5.1-4f8bff?style=for-the-badge&logo=github&labelColor=0a1020"></a>
-<img alt="iOS 16 or later" src="https://img.shields.io/badge/iOS-16%2B-0a1020?style=for-the-badge&logo=apple&logoColor=white">
-<img alt="arm64" src="https://img.shields.io/badge/arch-arm64-7c5cff?style=for-the-badge&labelColor=0a1020">
+<a href="https://github.com/ezzuldinSt/LSpoof/releases/latest"><img alt="Release 1.5.1" src="assets/readme/badges/release.svg"></a>
+<img alt="iOS 16 or later" src="assets/readme/badges/ios.svg">
+<img alt="arm64" src="assets/readme/badges/arch.svg">
 
 <h3>Choose where a sideloaded iOS app thinks you are.</h3>
 
 Hold one spot, play a route at walking or driving speed, and keep the places you use one swipe away,<br>all from a picker that floats inside the app.
 
-<a href="https://github.com/ezzuldinSt/LSpoof/releases/latest/download/LocationSpoofer.dylib"><img alt="Download LocationSpoofer.dylib" src="https://img.shields.io/badge/Download-LocationSpoofer.dylib-4f8bff?style=for-the-badge&logo=icloud&logoColor=white"></a>
+<a href="https://github.com/ezzuldinSt/LSpoof/releases/latest/download/LocationSpoofer.dylib"><img alt="Download LocationSpoofer.dylib" src="assets/readme/badges/download.svg"></a>
 
 [**Get started**](#-get-started) &nbsp;·&nbsp; [**Guides**](#-guides) &nbsp;·&nbsp; [**How it works**](#-how-it-works) &nbsp;·&nbsp; [**FAQ**](#-faq) &nbsp;·&nbsp; [**Build**](#-build-from-source)
 
@@ -580,6 +580,6 @@ The release build is `.theos/obj/LocationSpoofer.dylib` (optimized, stripped and
 
 <br><br>
 
-<a href="#top"><img alt="Back to top" src="https://img.shields.io/badge/%E2%86%91_Back_to_top-0a1020?style=for-the-badge"></a>
+<a href="#top"><img alt="Back to top" src="assets/readme/badges/top.svg"></a>
 
 </div>
