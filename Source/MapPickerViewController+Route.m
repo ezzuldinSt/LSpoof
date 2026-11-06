@@ -210,6 +210,8 @@ static UIView *LSRouteCollapsible(UIView *content) {
 @interface LSTraitStack : UIStackView
 @property (nonatomic, copy, nullable) UIContentSizeCategory stackFrom;
 @property (nonatomic) UIStackViewAlignment rowAlignment;
+// Alignment once stacked; Fill unless set (a chip at Fill would stretch across the card).
+@property (nonatomic) UIStackViewAlignment stackedAlignment;
 @property (nonatomic, copy, nullable) dispatch_block_t traitsChanged;
 // When the row is one VoiceOver element, what a double tap does.
 @property (nonatomic, copy, nullable) dispatch_block_t activated;
@@ -236,7 +238,7 @@ static UIView *LSRouteCollapsible(UIView *content) {
     UILayoutConstraintAxis axis = stacked ? UILayoutConstraintAxisVertical : UILayoutConstraintAxisHorizontal;
     if (self.axis == axis) return;
     self.axis = axis;
-    self.alignment = stacked ? UIStackViewAlignmentFill : self.rowAlignment;
+    self.alignment = stacked ? self.stackedAlignment : self.rowAlignment;
 }
 @end
 static LSTraitStack *LSRouteRow(NSArray<UIView *> *views, CGFloat spacing, UIStackViewAlignment alignment, UIContentSizeCategory stackFrom) {
@@ -246,7 +248,9 @@ static LSTraitStack *LSRouteRow(NSArray<UIView *> *views, CGFloat spacing, UISta
     row.spacing = spacing;
     row.alignment = alignment;
     row.rowAlignment = alignment;
+    row.stackedAlignment = UIStackViewAlignmentFill;
     row.stackFrom = stackFrom;
+    LSRowPrefersText(row);
     return row;
 }
 
@@ -286,6 +290,18 @@ static LSTraitStack *LSRouteRow(NSArray<UIView *> *views, CGFloat spacing, UISta
 }
 - (UIView *)viewForFirstBaselineLayout { return self.valueLabel; }
 - (UIView *)viewForLastBaselineLayout { return self.captionLabel; }
+// This view has no size of its own, so its priorities would do nothing; they apply to its labels,
+// which decide which figure in a row stretches or wraps first.
+- (void)setContentHuggingPriority:(UILayoutPriority)priority forAxis:(UILayoutConstraintAxis)axis {
+    [super setContentHuggingPriority:priority forAxis:axis];
+    [self.valueLabel setContentHuggingPriority:priority forAxis:axis];
+    [self.captionLabel setContentHuggingPriority:priority forAxis:axis];
+}
+- (void)setContentCompressionResistancePriority:(UILayoutPriority)priority forAxis:(UILayoutConstraintAxis)axis {
+    [super setContentCompressionResistancePriority:priority forAxis:axis];
+    [self.valueLabel setContentCompressionResistancePriority:priority forAxis:axis];
+    [self.captionLabel setContentCompressionResistancePriority:priority forAxis:axis];
+}
 - (void)applyAlignment {
     BOOL stacked = UIContentSizeCategoryIsAccessibilityCategory(self.traitCollection.preferredContentSizeCategory);
     NSTextAlignment alignment = NSTextAlignmentNatural;
@@ -650,17 +666,24 @@ static UIButton *LSTransportButton(NSString *symbol, NSString *label, CGFloat di
     self.translatesAutoresizingMaskIntoConstraints = NO;
     UIContentSizeCategory large = UIContentSizeCategoryAccessibilityMedium;
     _stateChip = [[LSStatusChip alloc] init];
-    [_stateChip setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
     _etaLabel = LSRouteLabel(UIFontTextStyleSubheadline, UIFontWeightSemibold, 26, UIColor.secondaryLabelColor);
     _etaLabel.textAlignment = NSTextAlignmentRight;
+    // The arrival time takes the space the chip leaves, and wraps first when it runs out. It stays
+    // in the row (empty) while paused or arrived, so the chip is never alone and stretched.
+    [_etaLabel setContentHuggingPriority:UILayoutPriorityDefaultLow - 1 forAxis:UILayoutConstraintAxisHorizontal];
+    [_etaLabel setContentCompressionResistancePriority:UILayoutPriorityDefaultHigh - 1 forAxis:UILayoutConstraintAxisHorizontal];
     LSTraitStack *top = LSRouteRow(@[_stateChip, _etaLabel], 8, UIStackViewAlignmentCenter, large);
+    top.stackedAlignment = UIStackViewAlignmentLeading;
     _headingLabel = LSLabel(@"", UIFontTextStyleHeadline);
     _headingLabel.font = LSFont(UIFontTextStyleHeadline, UIFontWeightSemibold, 28);
     _timeLeft = [[LSRouteStatView alloc] initHero:YES trailing:NO];
     _speedNow = [[LSRouteStatView alloc] initHero:NO trailing:YES];
-    [_timeLeft setContentHuggingPriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
-    [_speedNow setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
-    [_speedNow setContentCompressionResistancePriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+    // Time left takes the spare width and wraps first; the speed keeps its size. Both are
+    // wrapping labels on a baseline row, so equal priorities could make Auto Layout alternate.
+    [_timeLeft setContentHuggingPriority:UILayoutPriorityDefaultLow - 1 forAxis:UILayoutConstraintAxisHorizontal];
+    [_timeLeft setContentCompressionResistancePriority:UILayoutPriorityDefaultHigh - 1 forAxis:UILayoutConstraintAxisHorizontal];
+    [_speedNow setContentHuggingPriority:UILayoutPriorityDefaultLow + 1 forAxis:UILayoutConstraintAxisHorizontal];
+    [_speedNow setContentCompressionResistancePriority:UILayoutPriorityDefaultHigh + 1 forAxis:UILayoutConstraintAxisHorizontal];
     LSTraitStack *figures = LSRouteRow(@[_timeLeft, _speedNow], 12, UIStackViewAlignmentLastBaseline, large);
     _bar = [[LSRouteProgressBar alloc] init];
     _percentLabel = LSRouteLabel(UIFontTextStyleFootnote, UIFontWeightSemibold, 22, UIColor.secondaryLabelColor);
@@ -671,6 +694,8 @@ static UIButton *LSTransportButton(NSString *symbol, NSString *label, CGFloat di
     _leftLabel = LSRouteLabel(UIFontTextStyleFootnote, UIFontWeightMedium, 22, UIColor.secondaryLabelColor);
     _leftLabel.textAlignment = NSTextAlignmentRight;
     [_doneLabel setContentHuggingPriority:UILayoutPriorityDefaultLow + 1 forAxis:UILayoutConstraintAxisHorizontal];
+    // "To go" wraps first when both no longer fit; equal priorities left that to chance.
+    [_leftLabel setContentCompressionResistancePriority:UILayoutPriorityDefaultHigh - 1 forAxis:UILayoutConstraintAxisHorizontal];
     LSTraitStack *distances = LSRouteRow(@[_doneLabel, _leftLabel], 8, UIStackViewAlignmentFirstBaseline, large);
     _detailLabel = LSLabel(@"", UIFontTextStyleSubheadline);
     _detailLabel.textColor = UIColor.secondaryLabelColor;
@@ -1247,6 +1272,9 @@ static LSRoute *LSRouteFromTrackFile(NSURL *url, LSTrack **trackOut, NSString **
     LSRouteStatView *time = [[LSRouteStatView alloc] initHero:NO trailing:NO];
     LSRouteStatView *stops = [[LSRouteStatView alloc] initHero:NO trailing:NO];
     self.routeStats = @[distance, time, stops];
+    // When the row runs short, the stop count wraps first and the distance last.
+    [distance setContentCompressionResistancePriority:UILayoutPriorityDefaultHigh + 1 forAxis:UILayoutConstraintAxisHorizontal];
+    [stops setContentCompressionResistancePriority:UILayoutPriorityDefaultHigh - 1 forAxis:UILayoutConstraintAxisHorizontal];
     UIView *stopsWrap = LSRouteCollapsible(stops);
     UIView *spacer = [[UIView alloc] init];
     [spacer setContentHuggingPriority:1 forAxis:UILayoutConstraintAxisHorizontal];
@@ -3645,6 +3673,7 @@ static LSRoute *LSRouteFromTrackFile(NSURL *url, LSTrack **trackOut, NSString **
         [gauge.timeLeft setValue:LSDistance(total) caption:@"travelled" spoken:LSSpokenDistance(total)];
         LSSetText(gauge.doneLabel, @"Whole route done");
         LSSetText(gauge.leftLabel, @"");
+        LSSetText(gauge.etaLabel, @"");
         detail = @"Holding the destination until you replay or replace it.";
         [spoken addObjectsFromArray:@[@"Arrived", [NSString stringWithFormat:@"%@ travelled", LSSpokenDistance(total)]]];
     } else {
@@ -3658,13 +3687,14 @@ static LSRoute *LSRouteFromTrackFile(NSURL *url, LSTrack **trackOut, NSString **
         [gauge.speedNow setValue:LSSpeedText(kmh) caption:@"now" spoken:LSSpokenSpeed(kmh)];
         LSSetText(gauge.doneLabel, [NSString stringWithFormat:@"%@ done", LSDistance(covered)]);
         LSSetText(gauge.leftLabel, [NSString stringWithFormat:@"%@ to go", LSDistance(remaining)]);
-        LSSetText(gauge.etaLabel, paused ? @"" : [NSString stringWithFormat:@"Arrives %@", LSClockTime([NSDate dateWithTimeIntervalSinceNow:timeLeft])]);
+        BOOL knownArrival = !paused && isfinite(timeLeft) && timeLeft >= 0;
+        LSSetText(gauge.etaLabel, knownArrival ? [NSString stringWithFormat:@"Arrives %@", LSClockTime([NSDate dateWithTimeIntervalSinceNow:timeLeft])] : @"");
         if (paused) detail = @"Paused. The location stays put until you resume.";
         else if (waiting) detail = [NSString stringWithFormat:@"Moving on in %@.", LSClock(engine.waitRemaining)];
         [spoken addObjectsFromArray:@[state, [NSString stringWithFormat:@"%@ left", LSTimeText(timeLeft, YES)],
                                       [NSString stringWithFormat:@"%@ to go", LSSpokenDistance(remaining)], LSPercentText(progress),
                                       [NSString stringWithFormat:@"%@ now", LSSpokenSpeed(kmh)]]];
-        if (!paused) [spoken addObject:gauge.etaLabel.text];
+        if (knownArrival) [spoken addObject:gauge.etaLabel.text];
 
         LSPlaybackOptions *options = engine.options;
         BOOL recorded = options.recordedPace && route.hasTiming;
@@ -3685,7 +3715,8 @@ static LSRoute *LSRouteFromTrackFile(NSURL *url, LSTrack **trackOut, NSString **
         [self setTripRowPauseAction:paused ? @"Resume route" : @"Pause route"];
     }
     gauge.speedNow.hidden = complete;
-    gauge.etaLabel.hidden = complete || paused;
+    // Never hidden (it is empty instead), so the chip beside it keeps its own width.
+    if (gauge.etaLabel.hidden) gauge.etaLabel.hidden = NO;
     gauge.leftLabel.hidden = complete;
     if (gauge.transport.hidden != complete) gauge.transport.hidden = complete;
     gauge.speedLabel.hidden = complete;

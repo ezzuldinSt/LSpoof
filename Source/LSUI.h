@@ -61,6 +61,9 @@ FOUNDATION_EXPORT void LSSetFieldInvalid(UITextField *field, BOOL invalid);
 FOUNDATION_EXPORT void LSSetFieldError(UITextField *field, NSString * _Nullable message);
 FOUNDATION_EXPORT UIStackView *LSStack(NSArray<UIView *> *views, CGFloat spacing);
 FOUNDATION_EXPORT UIStackView *LSRow(NSArray<UIView *> *views, CGFloat spacing);
+// In a row, icons, spinners and buttons keep their natural width, so the text beside them is
+// what stretches and wraps. Only priorities still at UIKit's defaults are raised (by one).
+FOUNDATION_EXPORT void LSRowPrefersText(UIStackView *row);
 FOUNDATION_EXPORT UIView *LSInsetPanel(UIView *content);
 FOUNDATION_EXPORT UIView *LSFieldRow(NSString *title, UITextField *field, UILabel *error);
 FOUNDATION_EXPORT void LSInstallNumberToolbar(UITextField *field, id target, SEL action);

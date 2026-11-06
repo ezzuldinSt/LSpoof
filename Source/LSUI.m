@@ -677,10 +677,23 @@ UIStackView *LSStack(NSArray<UIView *> *views, CGFloat spacing) {
     stack.translatesAutoresizingMaskIntoConstraints = NO;
     return stack;
 }
+void LSRowPrefersText(UIStackView *row) {
+    // With equal priorities UIKit picks which view stretches or gives way, so an icon could be
+    // stretched or a button squeezed instead of the label beside it.
+    UILayoutConstraintAxis axis = UILayoutConstraintAxisHorizontal;
+    for (UIView *view in row.arrangedSubviews) {
+        BOOL fixed = [view isKindOfClass:UIImageView.class] || [view isKindOfClass:UIActivityIndicatorView.class] ||
+            [view isKindOfClass:UIButton.class] || [view isKindOfClass:UISwitch.class];
+        if (!fixed) continue;
+        if ([view contentHuggingPriorityForAxis:axis] == UILayoutPriorityDefaultLow) [view setContentHuggingPriority:UILayoutPriorityDefaultLow + 1 forAxis:axis];
+        if ([view contentCompressionResistancePriorityForAxis:axis] == UILayoutPriorityDefaultHigh) [view setContentCompressionResistancePriority:UILayoutPriorityDefaultHigh + 1 forAxis:axis];
+    }
+}
 UIStackView *LSRow(NSArray<UIView *> *views, CGFloat spacing) {
     UIStackView *stack = LSStack(views, spacing);
     stack.axis = UILayoutConstraintAxisHorizontal;
     stack.alignment = UIStackViewAlignmentCenter;
+    LSRowPrefersText(stack);
     return stack;
 }
 
@@ -1756,8 +1769,13 @@ static NSString *LSSymbolForSessionTitle(NSString *title) {
         _label = LSLabel(@"", UIFontTextStyleFootnote);
         _label.font = LSFont(UIFontTextStyleFootnote, UIFontWeightSemibold, 22);
         _label.numberOfLines = 1;
-        _label.adjustsFontSizeToFitWidth = YES;
-        _label.minimumScaleFactor = 0.8;
+        _label.lineBreakMode = NSLineBreakByTruncatingTail;
+        // The title truncates instead of shrinking its font to fit. A shrinking title beside
+        // another label with the same priorities (the route card's "Arrives …") gave Auto Layout
+        // two answers, and it alternated between them for ever: starting a route froze the app.
+        // The priorities stay at their defaults: a chip that refuses to stretch pulled the whole
+        // route column down to its own width while it was alone in its row. Rows that hold a chip
+        // give the other view lower priorities instead.
         [self ls_updateSymbolSize];
         LSInstallLargeContentViewer(self);
         UIStackView *row = LSRow(@[_dot, _lsSymbolView, _label], 5);
@@ -1780,14 +1798,14 @@ static NSString *LSSymbolForSessionTitle(NSString *title) {
     [super layoutSubviews];
     // A capsule on one line; a rounded rectangle once the title wraps.
     CGFloat height = self.bounds.size.height;
-    self.layer.cornerRadius = self.label.numberOfLines == 1 ? height / 2 : MIN(height / 2, 14);
+    CGFloat radius = self.label.numberOfLines == 1 ? height / 2 : MIN(height / 2, 14);
+    if (fabs(self.layer.cornerRadius - radius) > 0.01) self.layer.cornerRadius = radius;
 }
 - (void)traitCollectionDidChange:(UITraitCollection *)previous {
     [super traitCollectionDidChange:previous];
-    // At accessibility sizes the title wraps to two lines rather than shrinking out of reach.
+    // At accessibility sizes the title wraps to two lines rather than being cut short.
     BOOL large = UIContentSizeCategoryIsAccessibilityCategory(self.traitCollection.preferredContentSizeCategory);
     self.label.numberOfLines = large ? 2 : 1;
-    self.label.adjustsFontSizeToFitWidth = !large;
     [self ls_updateSymbolSize];
     [self ls_updateEdge];
     [self setNeedsLayout];
