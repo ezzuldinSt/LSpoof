@@ -7,6 +7,7 @@
 <a href="https://github.com/ezzuldinSt/LSpoof/releases/latest"><img alt="Release 1.5.1" src="assets/readme/badges/release.svg"></a>
 <img alt="iOS 16 or later" src="assets/readme/badges/ios.svg">
 <img alt="arm64" src="assets/readme/badges/arch.svg">
+<a href="https://github.com/ezzuldinSt/LSpoof/releases"><img alt="Downloads" src="assets/readme/badges/downloads.svg"></a>
 
 <h3>Choose where a sideloaded iOS app thinks you are.</h3>
 
