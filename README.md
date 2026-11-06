@@ -4,10 +4,9 @@
 
 <br>
 
-<a href="https://github.com/ezzuldinSt/LSpoof/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/ezzuldinSt/LSpoof?style=for-the-badge&logo=github&label=release&color=4f8bff&labelColor=0a1020"></a>
+<a href="https://github.com/ezzuldinSt/LSpoof/releases/latest"><img alt="Release 1.5.1" src="https://img.shields.io/badge/release-v1.5.1-4f8bff?style=for-the-badge&logo=github&labelColor=0a1020"></a>
 <img alt="iOS 16 or later" src="https://img.shields.io/badge/iOS-16%2B-0a1020?style=for-the-badge&logo=apple&logoColor=white">
 <img alt="arm64" src="https://img.shields.io/badge/arch-arm64-7c5cff?style=for-the-badge&labelColor=0a1020">
-<a href="https://github.com/ezzuldinSt/LSpoof/releases"><img alt="Downloads" src="https://img.shields.io/github/downloads/ezzuldinSt/LSpoof/total?style=for-the-badge&color=34d399&labelColor=0a1020"></a>
 
 <h3>Choose where a sideloaded iOS app thinks you are.</h3>
 
@@ -438,15 +437,7 @@ LSpoof loads into the app when it starts (it's added as an `LC_LOAD_DYLIB` load 
 
 LSpoof is always in one of four states:
 
-```mermaid
-flowchart LR
-    Off(["Off"]) -- Apply location --> Holding(["Holding"])
-    Off -- Start route --> Moving(["Moving"])
-    Holding -- Start route --> Moving
-    Moving -- "Arrive, or Hold here" --> Holding
-    Moving -- "Pause, or leave the app" --> Paused(["Paused"])
-    Paused -- Resume --> Moving
-```
+<p align="center"><img src="assets/readme/states.svg" width="100%" alt="Diagram of the four states. Off goes to Holding with Apply location, or to Moving with Start route. Holding goes to Moving with Start route. Moving goes to Paused when you pause or leave the app, and back with Resume. Moving goes to Holding when the route arrives or you tap Hold here."></p>
 
 **Turn off** goes back to Off from any of them. One session controller owns the state for as long as the app runs, and every location the app receives comes from a consistent snapshot of it. Opening or closing the picker never interrupts it.
 
